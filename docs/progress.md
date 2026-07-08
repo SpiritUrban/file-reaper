@@ -53,6 +53,8 @@
 
 | T-028 Автовибір шляху скану: MFT ↔ обхід за типом тому і правами | ✅ | 2026-07-09 | local | **App:** `choose_scan_strategy` (NTFS+elevated→Mft; інакше→DirectoryWalk) + `ScanStrategyReason` у domain; порт `ScanEnvironment`. **platform-win:** `WinScanEnvironment` — TokenElevation (advapi32), `GetVolumeInformationW`, `GetLogicalDrives`/`GetDriveTypeW`. **Shell health:** `elevated` + `scanPlans[]` (volume/strategy/reason/fileSystem); scanner module → online. **UI Health:** секція Scan strategy + elevation. **DoD:** unit-таблиця 4 кейси; `health_includes_scan_strategy_plans` — інваріант MFT лише при ntfs_elevated. Перевірено: `cargo test -p trashradar-app/platform-win/shell`; clippy `-D warnings`; `cargo fmt --check`. |
 
+| T-029 Читання USN Journal, збереження позиції в індексі | ✅ | 2026-07-09 | local | **Domain:** `UsnCursor`/`UsnJournalInfo`/`UsnChange` + `usn_reason::*`. **App:** порт `ChangeSource` (`query_journal`/`read_delta` → `UsnReadOutcome::{Changes,JournalStale}`). **scan-usn:** парсер `USN_RECORD_V2` (CI); WinAPI QUERY/READ; `UsnChangeSource`; `capture_cursor_after_full_scan`. **index-sqlite v2:** `volume_usn_state` + get/set cursor; міграція з v1. **DoD:** cursor roundtrip у SQLite; unit-парсер дельти; ignored elevated `usn_delta_returns_only_new_changes` (create file → delta). Перевірено: `cargo test -p trashradar-scan-usn/index-sqlite`; clippy `-D warnings`; fmt. |
+
 ## Легенда
 
 ✅ виконано й верифіковано · 🔄 в роботі · ⛔ заблоковано (причина в нотатках)

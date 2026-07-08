@@ -78,3 +78,80 @@ impl ScanStrategyReason {
         }
     }
 }
+
+/// Позиція в USN Change Journal тому (T-029).
+///
+/// `journal_id` ідентифікує конкретний екземпляр журналу: якщо ОС
+/// перестворила журнал, id змінюється → потрібен повний рескан (T-031).
+/// `next_usn` — USN, з якого читати наступну дельту (невключно з уже
+/// обробленими записами).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UsnCursor {
+    pub journal_id: u64,
+    pub next_usn: i64,
+}
+
+/// Знімок стану USN Journal (результат QUERY).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UsnJournalInfo {
+    pub journal_id: u64,
+    /// Найменший ще валідний USN у журналі.
+    pub lowest_valid_usn: i64,
+    /// Перший USN, який ще не записаний (кінець журналу).
+    pub next_usn: i64,
+    pub first_usn: i64,
+}
+
+impl UsnJournalInfo {
+    /// Курсор «на кінці журналу» — після повного скану (T-029 DoD:
+    /// позиція зафіксована; наступна дельта = лише нові зміни).
+    pub fn cursor_at_end(self) -> UsnCursor {
+        UsnCursor {
+            journal_id: self.journal_id,
+            next_usn: self.next_usn,
+        }
+    }
+
+    /// Чи `cursor` ще валідний для цього журналу.
+    pub fn is_cursor_valid(self, cursor: UsnCursor) -> bool {
+        cursor.journal_id == self.journal_id && cursor.next_usn >= self.lowest_valid_usn
+    }
+}
+
+/// Одна зміна з USN Journal (T-029). Сирий запис до застосування в індекс (T-030).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsnChange {
+    pub usn: i64,
+    /// Номер запису MFT (нижні 48 біт FileReferenceNumber).
+    pub file_ref: u64,
+    pub parent_ref: u64,
+    /// Бітова маска USN_REASON_*.
+    pub reason: u32,
+    pub name: String,
+    pub is_directory: bool,
+    pub timestamp: Option<FsTimestamp>,
+}
+
+/// Типові біти Reason з USN_RECORD (підмножина, потрібна дельті).
+pub mod usn_reason {
+    pub const DATA_OVERWRITE: u32 = 0x0000_0001;
+    pub const DATA_EXTEND: u32 = 0x0000_0002;
+    pub const DATA_TRUNCATION: u32 = 0x0000_0004;
+    pub const FILE_CREATE: u32 = 0x0000_0100;
+    pub const FILE_DELETE: u32 = 0x0000_0200;
+    pub const RENAME_OLD_NAME: u32 = 0x0000_1000;
+    pub const RENAME_NEW_NAME: u32 = 0x0000_2000;
+    pub const BASIC_INFO_CHANGE: u32 = 0x0000_8000;
+    pub const CLOSE: u32 = 0x8000_0000;
+
+    /// Маска «зміни, релевантні індексу метаданих».
+    pub const INDEX_RELEVANT: u32 = DATA_OVERWRITE
+        | DATA_EXTEND
+        | DATA_TRUNCATION
+        | FILE_CREATE
+        | FILE_DELETE
+        | RENAME_OLD_NAME
+        | RENAME_NEW_NAME
+        | BASIC_INFO_CHANGE
+        | CLOSE;
+}

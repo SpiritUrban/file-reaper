@@ -1,7 +1,8 @@
 //! Адаптер `IndexStore`: SQLite у WAL-режимі.
 //!
 //! Реалізація: T-010 (підключення), T-011 (схема v1), T-012 (міграції),
-//! T-013 (батчевий запис), T-014 (віконні запити), T-078 (журнал Quarantine).
+//! T-013 (батчевий запис), T-014 (віконні запити), T-029 (курсор USN),
+//! T-078 (журнал Quarantine).
 
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::{
@@ -18,12 +19,14 @@ use trashradar_domain::{
         FileRecordSort, FsTimestamp, SafetyLevel,
     },
     category::CategoryId,
+    scan::UsnCursor,
 };
 
 const DATABASE_FILE_NAME: &str = "index.sqlite3";
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const SCHEMA_VERSION_V1: i64 = 1;
-const LATEST_SCHEMA_VERSION: i64 = SCHEMA_VERSION_V1;
+const SCHEMA_VERSION_V2: i64 = 2;
+const LATEST_SCHEMA_VERSION: i64 = SCHEMA_VERSION_V2;
 const WRITER_QUEUE_CHANNEL_CLOSED: &str = "sqlite index writer queue is closed";
 
 /// Migration v1 creates the persistent file-record layer used by scanner output and
@@ -81,10 +84,28 @@ CREATE INDEX IF NOT EXISTS idx_file_records_kind
 PRAGMA user_version = 1;
 "#;
 
-const MIGRATIONS: &[Migration] = &[Migration {
-    version: SCHEMA_VERSION_V1,
-    sql: SCHEMA_V1_SQL,
-}];
+/// T-029: позиція USN Journal на том (architecture.md §2.3 / §10).
+const SCHEMA_V2_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS volume_usn_state (
+    volume TEXT PRIMARY KEY NOT NULL,
+    journal_id INTEGER NOT NULL,
+    next_usn INTEGER NOT NULL,
+    updated_at_unix INTEGER NOT NULL
+);
+
+PRAGMA user_version = 2;
+"#;
+
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: SCHEMA_VERSION_V1,
+        sql: SCHEMA_V1_SQL,
+    },
+    Migration {
+        version: SCHEMA_VERSION_V2,
+        sql: SCHEMA_V2_SQL,
+    },
+];
 
 const UPSERT_FILE_RECORD_SQL: &str = "INSERT INTO file_records (
         candidate_id,
@@ -540,6 +561,42 @@ impl IndexDatabase {
         Ok(records)
     }
 
+    /// Збережений курсор USN для тому (літера, регістр нормалізується).
+    pub fn get_usn_cursor(&self, volume: char) -> Result<Option<UsnCursor>> {
+        let key = volume_key(volume)?;
+        let row: Option<(i64, i64)> = self
+            .connection
+            .query_row(
+                "SELECT journal_id, next_usn FROM volume_usn_state WHERE volume = ?1",
+                params![key],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        Ok(row.map(|(journal_id, next_usn)| UsnCursor {
+            journal_id: journal_id as u64,
+            next_usn,
+        }))
+    }
+
+    /// Зафіксувати позицію USN Journal після скану / дельти (T-029).
+    pub fn set_usn_cursor(&self, volume: char, cursor: UsnCursor) -> Result<()> {
+        let key = volume_key(volume)?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        self.connection.execute(
+            "INSERT INTO volume_usn_state (volume, journal_id, next_usn, updated_at_unix)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(volume) DO UPDATE SET
+                journal_id = excluded.journal_id,
+                next_usn = excluded.next_usn,
+                updated_at_unix = excluded.updated_at_unix",
+            params![key, cursor.journal_id as i64, cursor.next_usn, now],
+        )?;
+        Ok(())
+    }
+
     pub fn read_all_file_records(&self) -> Result<Vec<FileRecord>> {
         let sql = "SELECT
             candidate_id,
@@ -615,6 +672,33 @@ impl trashradar_app::ports::IndexStore for IndexDatabase {
         self.read_all_file_records()
             .map_err(|err| trashradar_domain::error::CoreError::internal(err.to_string()))
     }
+
+    fn get_usn_cursor(
+        &self,
+        volume: char,
+    ) -> std::result::Result<Option<UsnCursor>, trashradar_domain::error::CoreError> {
+        self.get_usn_cursor(volume)
+            .map_err(|err| trashradar_domain::error::CoreError::internal(err.to_string()))
+    }
+
+    fn set_usn_cursor(
+        &self,
+        volume: char,
+        cursor: UsnCursor,
+    ) -> std::result::Result<(), trashradar_domain::error::CoreError> {
+        self.set_usn_cursor(volume, cursor)
+            .map_err(|err| trashradar_domain::error::CoreError::internal(err.to_string()))
+    }
+}
+
+fn volume_key(volume: char) -> Result<String> {
+    if !volume.is_ascii_alphabetic() {
+        return Err(IndexSqliteError::InvalidEnumValue {
+            field: "volume",
+            value: volume.to_string(),
+        });
+    }
+    Ok(volume.to_ascii_uppercase().to_string())
 }
 
 impl IndexWriterQueue {
@@ -1094,7 +1178,10 @@ mod tests {
         let profile_dir = temp_profile_dir("schema-v1");
         let database = IndexDatabase::open_profile(&profile_dir).expect("open profile database");
 
-        assert_eq!(database.schema_version().expect("schema version"), 1);
+        assert_eq!(
+            database.schema_version().expect("schema version"),
+            LATEST_SCHEMA_VERSION
+        );
 
         let columns: Vec<String> = database
             .connection
@@ -1131,6 +1218,45 @@ mod tests {
             );
         }
 
+        // T-029: volume_usn_state у схемі v2.
+        let usn_table: i64 = database
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='volume_usn_state'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("usn table");
+        assert_eq!(usn_table, 1);
+
+        cleanup(profile_dir);
+    }
+
+    #[test]
+    fn usn_cursor_roundtrip_and_overwrite() {
+        let profile_dir = temp_profile_dir("usn-cursor");
+        let database = IndexDatabase::open_profile(&profile_dir).expect("open");
+
+        assert_eq!(database.get_usn_cursor('C').expect("get empty"), None);
+
+        let cursor = UsnCursor {
+            journal_id: 0xAABB_CCDD_1122_3344,
+            next_usn: 1_000_042,
+        };
+        database.set_usn_cursor('c', cursor).expect("set");
+        assert_eq!(database.get_usn_cursor('C').expect("get"), Some(cursor));
+
+        // Перезапис після «обробки дельти».
+        let next = UsnCursor {
+            journal_id: cursor.journal_id,
+            next_usn: 1_000_100,
+        };
+        database.set_usn_cursor('C', next).expect("update");
+        assert_eq!(database.get_usn_cursor('C').expect("get2"), Some(next));
+
+        // Інший том — незалежний.
+        assert_eq!(database.get_usn_cursor('D').expect("other"), None);
+
         cleanup(profile_dir);
     }
 
@@ -1156,7 +1282,10 @@ mod tests {
 
         let database = IndexDatabase::open(&database_path).expect("migrate database");
 
-        assert_eq!(database.schema_version().expect("schema version"), 1);
+        assert_eq!(
+            database.schema_version().expect("schema version"),
+            LATEST_SCHEMA_VERSION
+        );
         assert_eq!(
             database.read_meta("legacy").expect("read migrated meta"),
             Some("kept".to_string())
@@ -1171,6 +1300,16 @@ mod tests {
             )
             .expect("query file_records table");
         assert_eq!(table_exists, 1);
+
+        let usn_exists: i64 = database
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'volume_usn_state'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query volume_usn_state");
+        assert_eq!(usn_exists, 1);
 
         cleanup(profile_dir);
     }
@@ -1198,7 +1337,10 @@ mod tests {
 
         let database = IndexDatabase::open(&database_path).expect("cold-start database");
 
-        assert_eq!(database.schema_version().expect("schema version"), 1);
+        assert_eq!(
+            database.schema_version().expect("schema version"),
+            LATEST_SCHEMA_VERSION
+        );
         assert_eq!(
             database.read_meta("legacy").expect("read legacy meta"),
             None

@@ -7,3 +7,7 @@ edition.workspace = true
 [dependencies]
 trashradar-domain = { path = "../../domain" }
 trashradar-app = { path = "../../app" }
+tracing = { workspace = true }
+
+[dev-dependencies]
+trashradar-index-sqlite = { path = "../index-sqlite" }

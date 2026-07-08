@@ -3685,8 +3685,10 @@ dependencies = [
 name = "trashradar-scan-usn"
 version = "0.1.0"
 dependencies = [
+ "tracing",
  "trashradar-app",
  "trashradar-domain",
+ "trashradar-index-sqlite",
 ]
 
 [[package]]

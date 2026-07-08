@@ -34,17 +34,43 @@ pub trait ScanEnvironment {
 }
 
 /// Джерело інкрементальних змін тому. Реалізація: `scan-usn` (T-029/T-030).
-pub trait ChangeSource {}
+pub trait ChangeSource {
+    /// Поточний стан USN Journal тому (id + межі USN).
+    fn query_journal(&self, volume: char) -> Result<UsnJournalInfo, CoreError>;
+
+    /// Прочитати дельту з `from` (невключно з уже обробленими).
+    ///
+    /// - [`UsnReadOutcome::Changes`] — лише записи після курсора;
+    /// - [`UsnReadOutcome::JournalStale`] — журнал перезаписано / курсор
+    ///   застарів → потрібен повний рескан (T-031).
+    fn read_delta(&self, volume: char, from: UsnCursor) -> Result<UsnReadOutcome, CoreError>;
+}
+
+/// Результат читання USN-дельти (T-029).
+#[derive(Debug, Clone)]
+pub enum UsnReadOutcome {
+    /// Дельта з новим курсором для збереження в індексі.
+    Changes {
+        changes: Vec<UsnChange>,
+        next_cursor: UsnCursor,
+    },
+    /// Позиція невалідна: journal id змінився або USN випав з журналу.
+    JournalStale {
+        info: UsnJournalInfo,
+        reason: &'static str,
+    },
+}
 
 use trashradar_domain::{
     candidate::{FileRecord, FileRecordSort},
     category::CategoryId,
     error::CoreError,
-    scan::ScanEntry,
+    scan::{ScanEntry, UsnChange, UsnCursor, UsnJournalInfo},
 };
 
 /// Persistent-індекс кандидатів і журнал Quarantine.
 /// Реалізація: `index-sqlite` (T-011…T-014, T-078).
+/// Курсор USN (T-029) — частина persistent-індексу (architecture.md §10).
 pub trait IndexStore {
     /// Отримати вікно записів кандидатів для конкретної категорії з сортуванням.
     fn read_file_records_window(
@@ -57,6 +83,12 @@ pub trait IndexStore {
 
     /// Отримати всі збережені записи кандидатів.
     fn read_all_file_records(&self) -> Result<Vec<FileRecord>, CoreError>;
+
+    /// Збережена позиція USN Journal для тому (літера `C`/`D`/…).
+    fn get_usn_cursor(&self, volume: char) -> Result<Option<UsnCursor>, CoreError>;
+
+    /// Зафіксувати позицію USN після повного скану або обробки дельти (T-029).
+    fn set_usn_cursor(&self, volume: char, cursor: UsnCursor) -> Result<(), CoreError>;
 }
 
 /// Гарячий in-memory індекс. Реалізація: `index-memory` (T-015…T-018).
