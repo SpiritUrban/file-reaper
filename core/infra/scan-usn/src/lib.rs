@@ -4,7 +4,8 @@
 //! - [`journal`] — QUERY/READ через WinAPI (потребує доступу до тому);
 //! - позиція журналу зберігається в SQLite (`volume_usn_state`, index v2).
 //!
-//! T-030 застосує дельту до індексу; T-031 — фолбек при `JournalStale`.
+//! Застосування дельти до індексу — `trashradar_app::usn_apply` (T-030).
+//! Фолбек при `JournalStale` — T-031.
 
 pub mod record;
 

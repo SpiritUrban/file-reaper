@@ -89,9 +89,13 @@ pub trait IndexStore {
 
     /// Зафіксувати позицію USN після повного скану або обробки дельти (T-029).
     fn set_usn_cursor(&self, volume: char, cursor: UsnCursor) -> Result<(), CoreError>;
+
+    /// Видалити всі persistent-записи з даним шляхом (T-030 delete/rename).
+    /// Повертає кількість видалених рядків.
+    fn delete_file_records_by_path(&self, path: &str) -> Result<u64, CoreError>;
 }
 
-/// Гарячий in-memory індекс. Реалізація: `index-memory` (T-015…T-018).
+/// Гарячий in-memory індекс. Реалізація: `index-memory` (T-015…T-018, T-030).
 pub trait HotIndex {
     /// Додати пакет записів файлів до індексу.
     fn insert_batch(&self, records: Vec<FileRecord>) -> Result<(), CoreError>;
@@ -115,6 +119,14 @@ pub trait HotIndex {
     /// Регістронезалежний; записи з рішенням Keep не повертаються
     /// (вони приховані з кандидатів). Результат обмежений `limit` записами.
     fn search_file_records(&self, query: &str, limit: usize) -> Result<Vec<FileRecord>, CoreError>;
+
+    /// Видалити записи за повними шляхами (T-030 USN delete/rename).
+    /// Порівняння шляхів — регістронезалежне (Windows). Повертає кількість
+    /// видалених записів.
+    fn remove_paths(&self, paths: &[String]) -> Result<usize, CoreError>;
+
+    /// Вставити або замінити записи з тим самим шляхом (T-030 create/modify).
+    fn upsert_batch(&self, records: Vec<FileRecord>) -> Result<(), CoreError>;
 }
 
 /// Сховище і генерація превью. Реалізація: `preview` (E6).

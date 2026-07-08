@@ -581,6 +581,63 @@ impl trashradar_app::ports::HotIndex for InMemoryIndex {
     fn search_file_records(&self, query: &str, limit: usize) -> Result<Vec<FileRecord>, CoreError> {
         Ok(self.search(query, limit))
     }
+
+    fn remove_paths(&self, paths: &[String]) -> Result<usize, CoreError> {
+        if paths.is_empty() {
+            return Ok(0);
+        }
+        let targets: Vec<String> = paths.iter().map(|p| p.replace('/', "\\")).collect();
+        let mut inner = self.inner.write().unwrap();
+        let before = inner.records.len();
+        let resolved: Vec<String> = inner
+            .records
+            .iter()
+            .map(|c| inner.resolve_path(c))
+            .collect();
+        let mut i = 0usize;
+        inner.records.retain(|_| {
+            let path = &resolved[i];
+            i += 1;
+            !targets.iter().any(|t| path.eq_ignore_ascii_case(t))
+        });
+        Ok(before - inner.records.len())
+    }
+
+    fn upsert_batch(&self, records: Vec<FileRecord>) -> Result<(), CoreError> {
+        if records.is_empty() {
+            return Ok(());
+        }
+        let mut inner = self.inner.write().unwrap();
+        inner.dir_interner.rebuild_lookup();
+        inner.filename_interner.rebuild_lookup();
+
+        for record in records {
+            let path_norm = record.path.replace('/', "\\");
+            let existing_paths: Vec<String> = inner
+                .records
+                .iter()
+                .map(|c| inner.resolve_path(c))
+                .collect();
+            let idx = existing_paths
+                .iter()
+                .position(|p| p.eq_ignore_ascii_case(&path_norm));
+
+            let path = std::path::Path::new(&path_norm);
+            let parent_str = path.parent().and_then(|p| p.to_str()).unwrap_or("");
+            let file_name_str = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
+            let dir_id = inner.dir_interner.intern(parent_str);
+            let filename_id = inner.filename_interner.intern(file_name_str);
+            let mut packed = record;
+            packed.path = path_norm;
+            let compact = CompactFileRecord::pack(&packed, dir_id, filename_id);
+            if let Some(idx) = idx {
+                inner.records[idx] = compact;
+            } else {
+                inner.records.push(compact);
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

@@ -597,6 +597,15 @@ impl IndexDatabase {
         Ok(())
     }
 
+    /// Видалити всі записи з даним шляхом (T-030; шлях порівнюється exact COLLATE NOCASE).
+    pub fn delete_file_records_by_path(&self, path: &str) -> Result<u64> {
+        let changed = self.connection.execute(
+            "DELETE FROM file_records WHERE path = ?1 COLLATE NOCASE",
+            params![path],
+        )?;
+        Ok(changed as u64)
+    }
+
     pub fn read_all_file_records(&self) -> Result<Vec<FileRecord>> {
         let sql = "SELECT
             candidate_id,
@@ -687,6 +696,14 @@ impl trashradar_app::ports::IndexStore for IndexDatabase {
         cursor: UsnCursor,
     ) -> std::result::Result<(), trashradar_domain::error::CoreError> {
         self.set_usn_cursor(volume, cursor)
+            .map_err(|err| trashradar_domain::error::CoreError::internal(err.to_string()))
+    }
+
+    fn delete_file_records_by_path(
+        &self,
+        path: &str,
+    ) -> std::result::Result<u64, trashradar_domain::error::CoreError> {
+        self.delete_file_records_by_path(path)
             .map_err(|err| trashradar_domain::error::CoreError::internal(err.to_string()))
     }
 }
@@ -1229,6 +1246,28 @@ mod tests {
             .expect("usn table");
         assert_eq!(usn_table, 1);
 
+        cleanup(profile_dir);
+    }
+
+    #[test]
+    fn delete_file_records_by_path_removes_row() {
+        let profile_dir = temp_profile_dir("delete-by-path");
+        let mut database = IndexDatabase::open_profile(&profile_dir).expect("open");
+        let record = sample_file_record(1);
+        let path = record.path.clone();
+        database.upsert_file_record(&record).expect("upsert");
+        assert!(database
+            .read_file_record(CandidateId(1))
+            .expect("read")
+            .is_some());
+        let n = database
+            .delete_file_records_by_path(&path.to_ascii_lowercase())
+            .expect("delete");
+        assert_eq!(n, 1);
+        assert!(database
+            .read_file_record(CandidateId(1))
+            .expect("read2")
+            .is_none());
         cleanup(profile_dir);
     }
 

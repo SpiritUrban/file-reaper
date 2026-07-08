@@ -55,6 +55,8 @@
 
 | T-029 Читання USN Journal, збереження позиції в індексі | ✅ | 2026-07-09 | local | **Domain:** `UsnCursor`/`UsnJournalInfo`/`UsnChange` + `usn_reason::*`. **App:** порт `ChangeSource` (`query_journal`/`read_delta` → `UsnReadOutcome::{Changes,JournalStale}`). **scan-usn:** парсер `USN_RECORD_V2` (CI); WinAPI QUERY/READ; `UsnChangeSource`; `capture_cursor_after_full_scan`. **index-sqlite v2:** `volume_usn_state` + get/set cursor; міграція з v1. **DoD:** cursor roundtrip у SQLite; unit-парсер дельти; ignored elevated `usn_delta_returns_only_new_changes` (create file → delta). Перевірено: `cargo test -p trashradar-scan-usn/index-sqlite`; clippy `-D warnings`; fmt. |
 
+| T-030 Інкрементальне оновлення індексу за USN-дельтою | ✅ | 2026-07-09 | local | **App `usn_apply`:** `classify_usn_reason`, `FrnPathCache` (parent_ref+name→path), `plan_usn_mutations` → create/modify/delete/rename, `apply_mutations_to_hot_index`, `apply_usn_read_outcome` (дельта→hot index + SQLite delete + advance cursor; JournalStale без змін — T-031). **HotIndex:** `remove_paths`, `upsert_batch`. **IndexStore:** `delete_file_records_by_path`. **DoD unit:** create→modify size→delete; rename old→new; unresolved skip. Перевірено: `cargo test -p trashradar-app usn_apply` + index-memory/sqlite; clippy `-D warnings`. |
+
 ## Легенда
 
 ✅ виконано й верифіковано · 🔄 в роботі · ⛔ заблоковано (причина в нотатках)
