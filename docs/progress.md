@@ -16,7 +16,7 @@
 | Задача | Статус | Дата | Де | Нотатки |
 |---|---|---|---|---|
 | T-001 Каркас (Tauri+Rust+React) | ✅ | 2026-07-08 | PR #1 | 13 крейтів + UI; `cargo check/clippy/fmt` чисто; UI build чисто; 4 екрани перевірені у браузері. Іконка-заглушка `core/shell/icons/icon.ico` (tauri-build вимагає .ico) — фінальна у T-159 |
-| T-002 CI | 🔄 в роботі | 2026-07-08 | — | ci.yml: UI + Core(без shell) були з T-001; додаються shell-job, installer-артефакт, branch protection |
+| T-002 CI | ✅ | 2026-07-08 | PR #2 | 3 джоби (UI / Core / Core shell+rust-cache) — зелені; installer.yml збирає NSIS-артефакт на push у main + dispatch; локальна збірка інсталятора верифікована (TrashRadar_0.1.0_x64-setup.exe, 1.9 МБ). Попутно виправлено tauri.conf: before*Command виконуються з кореня workspace (../ui, не ../../ui). Branch protection НЕ застосовано — див. відхилення |
 
 ## Легенда
 
@@ -26,5 +26,8 @@
 
 - T-002: repository.md §9 вимагає «+1 рев'ю» на PR — не вмикається, бо репозиторій
   однієї людини (власник не може заапрувити власний PR). Увімкнути при появі команди.
-- T-002: `enforce_admins = false` у branch protection — власник може пушити в main
-  повз checks (відповідає фактичному робочому процесу власника).
+- T-002: **branch protection (required checks) НЕ застосовано** — GitHub Free не
+  підтримує його на приватних репозиторіях (API: «Upgrade to GitHub Pro or make
+  this repository public»). Готовий конфіг: contexts = UI (typecheck + build),
+  Core (fmt + clippy + check), Core shell (tauri check); strict=false;
+  enforce_admins=false. Застосувати одразу після переходу на public/Pro.
