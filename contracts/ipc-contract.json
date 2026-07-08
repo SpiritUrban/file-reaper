@@ -7,7 +7,11 @@
     "codes": ["internal", "invalid_argument", "not_implemented", "io", "cancelled"]
   },
   "commands": {
-    "app.health": { "status": "implemented", "task": "T-001" },
+    "app.health": {
+      "status": "implemented",
+      "task": "T-009",
+      "$comment": "Diagnostics: versions, module states and live IPC counters for the health screen"
+    },
     "app.ping": {
       "status": "implemented",
       "task": "T-004",

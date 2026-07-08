@@ -12,8 +12,12 @@
 //! Тротлінг агрегованих подій — окрема задача T-006.
 
 use serde::Serialize;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Runtime};
+
+static EVENTS_EMITTED: AtomicU64 = AtomicU64::new(0);
+static EVENT_ERRORS: AtomicU64 = AtomicU64::new(0);
 
 /// Реєстр топіків подій (канонічні контрактні імена). Новий топік =
 /// константа тут + запис у contracts/ipc-contract.json + EventName
@@ -22,6 +26,20 @@ pub mod topic {
     /// Діагностичний потік (команда `app.test_stream`).
     pub const APP_TEST: &str = "app.test";
     pub const APP_TEST_COUNTER: &str = "app.test_counter";
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EventMetrics {
+    pub emitted: u64,
+    pub failed: u64,
+}
+
+pub fn metrics() -> EventMetrics {
+    EventMetrics {
+        emitted: EVENTS_EMITTED.load(Ordering::Relaxed),
+        failed: EVENT_ERRORS.load(Ordering::Relaxed),
+    }
 }
 
 /// Aggregated counter payload for throttled Core -> UI updates.
@@ -151,7 +169,13 @@ pub fn wire_name(topic: &str) -> String {
 /// не має залежати від стану webview.
 pub fn emit<R: Runtime, T: Serialize + Clone>(app: &AppHandle<R>, topic: &str, payload: &T) {
     match app.emit(&wire_name(topic), payload.clone()) {
-        Ok(()) => tracing::trace!(topic, "подію надіслано"),
-        Err(error) => tracing::warn!(topic, %error, "не вдалося надіслати подію"),
+        Ok(()) => {
+            EVENTS_EMITTED.fetch_add(1, Ordering::Relaxed);
+            tracing::trace!(topic, "подію надіслано")
+        }
+        Err(error) => {
+            EVENT_ERRORS.fetch_add(1, Ordering::Relaxed);
+            tracing::warn!(topic, %error, "не вдалося надіслати подію")
+        }
     }
 }

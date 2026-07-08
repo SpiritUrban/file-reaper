@@ -88,6 +88,15 @@ export function Sidebar() {
 
       <nav className="px-2 pb-2">
         <NavLink
+          to="/health"
+          className={({ isActive }) =>
+            `${itemBase} ${isActive ? itemActive : itemIdle}`
+          }
+        >
+          <span>↯</span>
+          <span>Health</span>
+        </NavLink>
+        <NavLink
           to="/settings"
           className={({ isActive }) =>
             `${itemBase} ${isActive ? itemActive : itemIdle}`

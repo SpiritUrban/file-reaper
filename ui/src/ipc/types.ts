@@ -104,6 +104,20 @@ export interface CoreErrorPayload {
 export interface HealthInfo {
   appVersion: string;
   coreStatus: string;
+  modules: ModuleHealth[];
+  ipc: IpcMetrics;
+}
+
+export interface ModuleHealth {
+  name: string;
+  status: "online" | "planned" | "degraded" | "offline";
+}
+
+export interface IpcMetrics {
+  commandsReceived: number;
+  commandErrors: number;
+  eventsEmitted: number;
+  eventErrors: number;
 }
 
 /** Параметри app.ping (усе опційне: {} — миттєвий успіх). */

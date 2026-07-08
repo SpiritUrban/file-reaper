@@ -9,7 +9,7 @@
 - Node 20.19.6, npm 10.8.2
 - Rust 1.96.1 stable-msvc (rustup) + rustfmt + clippy; MSVC Build Tools 2022; WebView2 — є
 - Tauri CLI 2.11.4 — через `ui` devDependencies (`npm run tauri`)
-- Запуск повного застосунку: з `ui/`: `npm run tauri dev -- --config ../core/shell/tauri.conf.json`
+- Запуск повного застосунку: з `core/`: `..\ui\node_modules\.bin\tauri.cmd dev --config shell/tauri.conf.json`
 
 ## Журнал задач
 
@@ -22,6 +22,7 @@
 | T-005 Канал подій Core→UI | ✅ | 2026-07-08 | PR #6 | shell/src/events.rs: реєстр топіків + emit() (fire-and-forget, з логуванням). Дротові імена: Tauri забороняє крапки в подіях → app.test ↔ app:test (wire_name ↔ client.ts). app.test_stream: ack одразу, події у фоні (модель architecture.md §1.2). Capabilities: core/shell/capabilities/default.json (core:default) — без нього webview не має права listen. 3 тести шини (доставка, unlisten зупиняє, ack до завершення потоку). UI self-check обох каналів при старті. Живий запуск: 3 емісії в core.log |
 | T-006 Тротлінг подій | ✅ | 2026-07-08 | local | Додано CounterThrottle у shell/src/events.rs: агрегує дельти лічильників у CounterSnapshot {delta,total}, тримає темп ≤10 оновлень/с і flush без втрати підсумку. Діагностичний app.test_stream тепер паралельно шле throttled app.test_counter; контракт і TS EventName синхронізовані. Перевірено: cargo fmt --check; CARGO_INCREMENTAL=0 cargo clippy -p trashradar-shell -- -D warnings; CARGO_INCREMENTAL=0 cargo test -p trashradar-shell (13 passed); npm run build |
 | T-007 Модель помилок Core | ✅ | 2026-07-08 | PR #4 | domain::error::CoreError: конверт {code, message}, 5 стартових стабільних кодів (internal/invalid_argument/not_implemented/io/cancelled), From<io::Error>, 4 тести форми/roundtrip. UI: CoreErrorPayload у types.ts, CoreIpcError + нормалізація в client.ts (+ клієнтські коди ipc_unavailable/unknown). Конверт зафіксовано в contracts/ipc-contract.json → error_envelope. E2E через живий IPC — вправляється у T-004 |
+| T-009 Діагностичний екран health | ✅ | 2026-07-08 | local | Додано UI-екран Health з live polling app.health: версія Core, статус, модулі shell/ipc/scanner/index/quarantine та IPC-лічильники commands/events/errors. Core накопичує метрики команд і подій, контракт app.health розширено для T-009, TS типи синхронізовані. Перевірено: cargo fmt --check; CARGO_TARGET_DIR=%TEMP%\trashradar-target-codex CARGO_INCREMENTAL=0 cargo clippy -p trashradar-shell -- -D warnings; CARGO_TARGET_DIR=%TEMP%\trashradar-target-codex CARGO_INCREMENTAL=0 cargo test -p trashradar-shell (13 passed); npm run build |
 
 ## Легенда
 

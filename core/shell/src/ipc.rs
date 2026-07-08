@@ -11,11 +11,41 @@
 //!   функція тут + рядок у generate_handler + запис у contracts/.
 
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use tauri::{AppHandle, Runtime};
 use trashradar_domain::error::CoreError;
 
 use crate::events;
+
+static COMMANDS_RECEIVED: AtomicU64 = AtomicU64::new(0);
+static COMMAND_ERRORS: AtomicU64 = AtomicU64::new(0);
+
+fn record_command() {
+    COMMANDS_RECEIVED.fetch_add(1, Ordering::Relaxed);
+}
+
+fn record_command_error() {
+    COMMAND_ERRORS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Module status row for the diagnostic health screen (T-009).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModuleHealth {
+    pub name: &'static str,
+    pub status: &'static str,
+}
+
+/// Live IPC counters for the diagnostic health screen (T-009).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IpcMetrics {
+    pub commands_received: u64,
+    pub command_errors: u64,
+    pub events_emitted: u64,
+    pub event_errors: u64,
+}
 
 /// Відповідь `app.health` — використовується діагностикою (T-009).
 #[derive(Debug, Serialize)]
@@ -23,14 +53,50 @@ use crate::events;
 pub struct HealthInfo {
     pub app_version: &'static str,
     pub core_status: &'static str,
+    pub modules: Vec<ModuleHealth>,
+    pub ipc: IpcMetrics,
 }
 
 #[tauri::command]
 pub fn app_health() -> HealthInfo {
+    record_command();
     tracing::debug!("запит app.health");
+    let event_metrics = events::metrics();
     HealthInfo {
         app_version: env!("CARGO_PKG_VERSION"),
         core_status: "skeleton",
+        modules: vec![
+            ModuleHealth {
+                name: "shell",
+                status: "online",
+            },
+            ModuleHealth {
+                name: "ipc.commands",
+                status: "online",
+            },
+            ModuleHealth {
+                name: "ipc.events",
+                status: "online",
+            },
+            ModuleHealth {
+                name: "scanner",
+                status: "planned",
+            },
+            ModuleHealth {
+                name: "index",
+                status: "planned",
+            },
+            ModuleHealth {
+                name: "quarantine",
+                status: "planned",
+            },
+        ],
+        ipc: IpcMetrics {
+            commands_received: COMMANDS_RECEIVED.load(Ordering::Relaxed),
+            command_errors: COMMAND_ERRORS.load(Ordering::Relaxed),
+            events_emitted: event_metrics.emitted,
+            event_errors: event_metrics.failed,
+        },
     }
 }
 
@@ -60,10 +126,12 @@ pub struct PingReply {
 /// `async` — довгий ping не блокує ні IPC-потік, ні інші команди.
 #[tauri::command]
 pub async fn app_ping(payload: Option<PingPayload>) -> Result<PingReply, CoreError> {
+    record_command();
     let payload = payload.unwrap_or_default();
     tracing::debug!(delay_ms = ?payload.delay_ms, fail = payload.fail, "запит app.ping");
 
     if payload.fail {
+        record_command_error();
         return Err(CoreError::invalid_argument(
             "Тестова відмова app.ping (fail=true).",
         ));
@@ -115,6 +183,7 @@ pub async fn app_test_stream<R: Runtime>(
     app: AppHandle<R>,
     payload: Option<TestStreamPayload>,
 ) -> Result<TestStreamAck, CoreError> {
+    record_command();
     let payload = payload.unwrap_or_default();
     let count = payload.count.unwrap_or(5).clamp(1, 1000);
     let interval = std::time::Duration::from_millis(payload.interval_ms.unwrap_or(50).min(1000));
