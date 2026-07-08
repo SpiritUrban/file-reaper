@@ -1,5 +1,476 @@
 //! Адаптер `HotIndex`: гарячий in-memory індекс метаданих.
 //!
-//! Реалізація: T-015 (структура), T-016 (наповнення), T-017 (синхронізація
-//! з SQLite), T-018 (пошук), T-019 (бенчмарк пам'яті) — docs/tasks.md, E2/F2.2.
-//! Каркас T-001 — реалізація свідомо відсутня.
+//! Реалізація T-015: компактний запис метаданих (48 байт) з інтернуванням
+//! директорій та назв файлів у суцільний буфер для мінімізації кучі.
+
+use std::collections::HashMap;
+use trashradar_domain::candidate::{
+    ByteSize, CandidateId, CandidateUnit, Decision, FileAttributes, FileKind, FileRecord,
+    FsTimestamp, SafetyLevel,
+};
+use trashradar_domain::category::CategoryId;
+
+const UNIX_EPOCH_FILETIME_SECS: i64 = 11_644_473_600;
+
+/// Перетворює Windows FILETIME (100ns з 1601 року) у секунди Unix Epoch (з 1970 року).
+/// Повертає 0 для None (sentinel).
+pub fn filetime_to_unix_secs(filetime: i64) -> u32 {
+    if filetime == 0 {
+        return 0;
+    }
+    let filetime_secs = filetime / 10_000_000;
+    let unix_secs = filetime_secs - UNIX_EPOCH_FILETIME_SECS;
+    if unix_secs <= 0 {
+        1 // Клемпимо до 1, бо 0 — маркер відсутності значення (None)
+    } else if unix_secs >= u32::MAX as i64 {
+        u32::MAX - 1
+    } else {
+        unix_secs as u32
+    }
+}
+
+/// Перетворює секунди Unix Epoch назад у Windows FILETIME.
+pub fn unix_secs_to_filetime(unix_secs: u32) -> i64 {
+    if unix_secs == 0 {
+        return 0;
+    }
+    let filetime_secs = unix_secs as i64 + UNIX_EPOCH_FILETIME_SECS;
+    filetime_secs * 10_000_000
+}
+
+/// Інтернер рядків з послідовним пакуванням у спільний буфер (string arena).
+/// Це уникає накладних витрат 24 байт String-заголовка на кожен елемент.
+#[derive(Debug, Default, Clone)]
+pub struct PathInterner {
+    buffer: String,
+    offsets: Vec<u32>,
+    lookup: HashMap<String, u32>,
+}
+
+impl PathInterner {
+    pub fn new() -> Self {
+        Self {
+            buffer: String::new(),
+            offsets: vec![0],
+            lookup: HashMap::new(),
+        }
+    }
+
+    /// Додає рядок до пулу та повертає його ID. Якщо рядок вже існує, повертає його ID.
+    pub fn intern(&mut self, s: &str) -> u32 {
+        if let Some(&id) = self.lookup.get(s) {
+            return id;
+        }
+        let id = (self.offsets.len() - 1) as u32;
+        self.buffer.push_str(s);
+        let next_offset = self.buffer.len() as u32;
+        self.offsets.push(next_offset);
+        self.lookup.insert(s.to_string(), id);
+        id
+    }
+
+    /// Повертає рядок за його ID.
+    pub fn resolve(&self, id: u32) -> Option<&str> {
+        let start = *self.offsets.get(id as usize)? as usize;
+        let end = *self.offsets.get(id as usize + 1)? as usize;
+        Some(&self.buffer[start..end])
+    }
+
+    /// Звільняє мапу пошуку для мінімізації використання пам'яті після завершення індексування.
+    pub fn shrink_to_fit(&mut self) {
+        self.buffer.shrink_to_fit();
+        self.offsets.shrink_to_fit();
+        self.lookup = HashMap::new();
+        self.lookup.shrink_to_fit();
+    }
+
+    /// Відновлює мапу пошуку за потреби (наприклад, для інкрементального додавання).
+    pub fn rebuild_lookup(&mut self) {
+        if self.lookup.is_empty() && self.offsets.len() > 1 {
+            self.lookup.reserve(self.offsets.len() - 1);
+            for id in 0..(self.offsets.len() - 1) {
+                if let Some(s) = self.resolve(id as u32) {
+                    self.lookup.insert(s.to_string(), id as u32);
+                }
+            }
+        }
+    }
+
+    /// Оцінює обсяг пам'яті, що займає інтернер у купі (heap).
+    pub fn memory_usage(&self) -> usize {
+        let mut total = 0;
+        total += self.buffer.capacity();
+        total += self.offsets.capacity() * std::mem::size_of::<u32>();
+        total += self.lookup.capacity() * 32;
+        total
+    }
+}
+
+/// Компактна структура запису файлу в пам'яті (рівно 48 байт).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompactFileRecord {
+    pub candidate_id: u64,
+    pub size: u64,
+    pub accessed_at: u32, // Unix Epoch secs
+    pub created_at: u32,  // Unix Epoch secs
+    pub modified_at: u32, // Unix Epoch secs
+    pub dir_id: u32,
+    pub filename_id: u32,
+    pub attributes: u32,
+    pub packed_meta: u16,
+}
+
+impl CompactFileRecord {
+    /// Запаковує доменну модель `FileRecord` у компактний вигляд.
+    pub fn pack(record: &FileRecord, dir_id: u32, filename_id: u32) -> Self {
+        let accessed_at = record
+            .accessed_at
+            .map(|t| filetime_to_unix_secs(t.0))
+            .unwrap_or(0);
+        let created_at = record
+            .created_at
+            .map(|t| filetime_to_unix_secs(t.0))
+            .unwrap_or(0);
+        let modified_at = record
+            .modified_at
+            .map(|t| filetime_to_unix_secs(t.0))
+            .unwrap_or(0);
+
+        let kind_val = record.kind as u16;
+        let unit_val = record.unit as u16;
+        let category_val = record.category as u16;
+        let safety_val = record.safety as u16;
+        let decision_val = record.decision as u16;
+
+        let packed_meta = (kind_val & 0x7)
+            | ((unit_val & 0x1) << 3)
+            | ((category_val & 0xF) << 4)
+            | ((safety_val & 0x1) << 8)
+            | ((decision_val & 0x3) << 9);
+
+        Self {
+            candidate_id: record.candidate_id.0,
+            size: record.size.0,
+            accessed_at,
+            created_at,
+            modified_at,
+            dir_id,
+            filename_id,
+            attributes: record.attributes.raw_bits,
+            packed_meta,
+        }
+    }
+
+    /// Розпаковує компактний запис назад у доменну модель `FileRecord`.
+    pub fn unpack(&self, path: String) -> FileRecord {
+        let accessed_at = if self.accessed_at == 0 {
+            None
+        } else {
+            Some(FsTimestamp(unix_secs_to_filetime(self.accessed_at)))
+        };
+        let created_at = if self.created_at == 0 {
+            None
+        } else {
+            Some(FsTimestamp(unix_secs_to_filetime(self.created_at)))
+        };
+        let modified_at = if self.modified_at == 0 {
+            None
+        } else {
+            Some(FsTimestamp(unix_secs_to_filetime(self.modified_at)))
+        };
+
+        let kind = parse_file_kind_val(self.packed_meta & 0x7);
+        let unit = parse_candidate_unit_val((self.packed_meta >> 3) & 0x1);
+        let category = parse_category_val((self.packed_meta >> 4) & 0xF);
+        let safety = parse_safety_level_val((self.packed_meta >> 8) & 0x1);
+        let decision = parse_decision_val((self.packed_meta >> 9) & 0x3);
+
+        FileRecord {
+            candidate_id: CandidateId(self.candidate_id),
+            path,
+            size: ByteSize(self.size),
+            created_at,
+            modified_at,
+            accessed_at,
+            kind,
+            unit,
+            category,
+            safety,
+            decision,
+            detector_id: String::new(),
+            explanation: String::new(),
+            attributes: FileAttributes {
+                raw_bits: self.attributes,
+                is_readonly: (self.attributes & 0x1) != 0,
+                is_hidden: (self.attributes & 0x2) != 0,
+                is_system: (self.attributes & 0x4) != 0,
+                is_temporary: (self.attributes & 0x8) != 0,
+            },
+        }
+    }
+}
+
+fn parse_file_kind_val(val: u16) -> FileKind {
+    match val {
+        0 => FileKind::Video,
+        1 => FileKind::Image,
+        2 => FileKind::Audio,
+        3 => FileKind::Archive,
+        4 => FileKind::Installer,
+        5 => FileKind::DiskImage,
+        6 => FileKind::Document,
+        _ => FileKind::Other,
+    }
+}
+
+fn parse_candidate_unit_val(val: u16) -> CandidateUnit {
+    match val {
+        0 => CandidateUnit::File,
+        _ => CandidateUnit::Folder,
+    }
+}
+
+fn parse_category_val(val: u16) -> CategoryId {
+    match val {
+        0 => CategoryId::LargeFiles,
+        1 => CategoryId::OldFiles,
+        2 => CategoryId::ForgottenVideos,
+        3 => CategoryId::Duplicates,
+        4 => CategoryId::Archives,
+        5 => CategoryId::Installers,
+        6 => CategoryId::TempFiles,
+        7 => CategoryId::AppCaches,
+        _ => CategoryId::DevArtifacts,
+    }
+}
+
+fn parse_safety_level_val(val: u16) -> SafetyLevel {
+    match val {
+        0 => SafetyLevel::SafeToBulk,
+        _ => SafetyLevel::ReviewRecommended,
+    }
+}
+
+fn parse_decision_val(val: u16) -> Decision {
+    match val {
+        0 => Decision::Undecided,
+        1 => Decision::Keep,
+        _ => Decision::Marked,
+    }
+}
+
+/// Гарячий in-memory індекс.
+#[derive(Debug, Default, Clone)]
+pub struct InMemoryIndex {
+    pub records: Vec<CompactFileRecord>,
+    pub dir_interner: PathInterner,
+    pub filename_interner: PathInterner,
+}
+
+impl InMemoryIndex {
+    pub fn new() -> Self {
+        Self {
+            records: Vec::new(),
+            dir_interner: PathInterner::new(),
+            filename_interner: PathInterner::new(),
+        }
+    }
+
+    /// Додає запис файлу до індексу, розділяючи та інтернуючи шлях.
+    pub fn insert(&mut self, record: &FileRecord) {
+        let path = std::path::Path::new(&record.path);
+        let parent_str = path.parent().and_then(|p| p.to_str()).unwrap_or("");
+        let file_name_str = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
+
+        let dir_id = self.dir_interner.intern(parent_str);
+        let filename_id = self.filename_interner.intern(file_name_str);
+
+        let compact = CompactFileRecord::pack(record, dir_id, filename_id);
+        self.records.push(compact);
+    }
+
+    /// Отримує розпакований запис файлу за його індексом.
+    pub fn get(&self, idx: usize) -> Option<FileRecord> {
+        let compact = self.records.get(idx)?;
+        let parent = self.dir_interner.resolve(compact.dir_id).unwrap_or("");
+        let file_name = self
+            .filename_interner
+            .resolve(compact.filename_id)
+            .unwrap_or("");
+
+        let path = if parent.is_empty() {
+            file_name.to_string()
+        } else {
+            let mut p = std::path::PathBuf::from(parent);
+            p.push(file_name);
+            p.to_string_lossy().into_owned()
+        };
+
+        Some(compact.unpack(path))
+    }
+
+    pub fn len(&self) -> usize {
+        self.records.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.records.is_empty()
+    }
+
+    pub fn clear(&mut self) {
+        self.records.clear();
+    }
+
+    /// Завершує наповнення індексу, вивільняючи lookup-таблиці інтернерів для економії пам'яті.
+    pub fn finish_indexing(&mut self) {
+        self.records.shrink_to_fit();
+        self.dir_interner.shrink_to_fit();
+        self.filename_interner.shrink_to_fit();
+    }
+
+    /// Розраховує загальний обсяг пам'яті в купі (heap).
+    pub fn memory_usage(&self) -> usize {
+        let mut total = 0;
+        total += self.records.capacity() * std::mem::size_of::<CompactFileRecord>();
+        total += self.dir_interner.memory_usage();
+        total += self.filename_interner.memory_usage();
+        total
+    }
+}
+
+impl trashradar_app::ports::HotIndex for InMemoryIndex {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_record(id: u64, path: &str) -> FileRecord {
+        FileRecord {
+            candidate_id: CandidateId(id),
+            path: path.to_string(),
+            size: ByteSize(id * 1024),
+            created_at: Some(FsTimestamp(130000000000000000 + id as i64 * 10_000_000)),
+            modified_at: Some(FsTimestamp(140000000000000000 + id as i64 * 10_000_000)),
+            accessed_at: Some(FsTimestamp(150000000000000000 + id as i64 * 10_000_000)),
+            kind: FileKind::Video,
+            unit: CandidateUnit::File,
+            category: CategoryId::ForgottenVideos,
+            safety: SafetyLevel::SafeToBulk,
+            decision: Decision::Undecided,
+            detector_id: String::new(),
+            explanation: String::new(),
+            attributes: FileAttributes {
+                raw_bits: 7,
+                is_readonly: true,
+                is_hidden: true,
+                is_system: true,
+                is_temporary: false,
+            },
+        }
+    }
+
+    #[test]
+    fn test_interning_and_resolution() {
+        let mut interner = PathInterner::new();
+        let id1 = interner.intern("C:\\Users\\Ada\\Videos");
+        let id2 = interner.intern("C:\\Users\\Ada\\Documents");
+        let id3 = interner.intern("C:\\Users\\Ada\\Videos"); // Duplicate
+
+        assert_eq!(id1, id3);
+        assert_ne!(id1, id2);
+        assert_eq!(interner.resolve(id1), Some("C:\\Users\\Ada\\Videos"));
+        assert_eq!(interner.resolve(id2), Some("C:\\Users\\Ada\\Documents"));
+    }
+
+    #[test]
+    fn test_compact_record_size() {
+        assert_eq!(std::mem::size_of::<CompactFileRecord>(), 48);
+    }
+
+    #[test]
+    fn test_pack_unpack_roundtrip() {
+        let record = sample_record(42, "C:\\Users\\Ada\\Videos\\holiday.mp4");
+        let mut index = InMemoryIndex::new();
+        index.insert(&record);
+
+        assert_eq!(index.len(), 1);
+        let restored = index.get(0).unwrap();
+
+        assert_eq!(restored.candidate_id, record.candidate_id);
+        assert_eq!(restored.path, record.path);
+        assert_eq!(restored.size, record.size);
+        assert_eq!(
+            restored.created_at.unwrap().0 / 10_000_000,
+            record.created_at.unwrap().0 / 10_000_000
+        );
+        assert_eq!(
+            restored.modified_at.unwrap().0 / 10_000_000,
+            record.modified_at.unwrap().0 / 10_000_000
+        );
+        assert_eq!(
+            restored.accessed_at.unwrap().0 / 10_000_000,
+            record.accessed_at.unwrap().0 / 10_000_000
+        );
+        assert_eq!(restored.kind, record.kind);
+        assert_eq!(restored.unit, record.unit);
+        assert_eq!(restored.category, record.category);
+        assert_eq!(restored.safety, record.safety);
+        assert_eq!(restored.decision, record.decision);
+        assert_eq!(restored.attributes, record.attributes);
+    }
+
+    #[test]
+    fn test_five_million_records_memory_footprint() {
+        let mut index = InMemoryIndex::new();
+
+        index.records.reserve(5_000_000);
+        index.dir_interner.offsets.reserve(500_000);
+        index.dir_interner.lookup.reserve(500_000);
+        index.filename_interner.offsets.reserve(1_000_000);
+        index.filename_interner.lookup.reserve(1_000_000);
+
+        for i in 0..500_000 {
+            let dir = format!("C:\\Users\\User\\Folder_{}", i);
+            index.dir_interner.intern(&dir);
+        }
+
+        for i in 0..1_000_000 {
+            let filename = format!("file_name_{}.dat", i);
+            index.filename_interner.intern(&filename);
+        }
+
+        for i in 0..5_000_000 {
+            let dir_id = (i % 500_000) as u32;
+            let filename_id = (i % 1_000_000) as u32;
+
+            let compact = CompactFileRecord {
+                candidate_id: i as u64,
+                size: (i * 123) as u64,
+                accessed_at: (1500000000 + i) as u32,
+                created_at: (1300000000 + i) as u32,
+                modified_at: (1400000000 + i) as u32,
+                dir_id,
+                filename_id,
+                attributes: 7,
+                packed_meta: 42,
+            };
+            index.records.push(compact);
+        }
+
+        // Очищуємо lookup таблиці для економії пам'яті в режимі запитів
+        index.finish_indexing();
+
+        let total_bytes = index.memory_usage();
+        let total_mb = total_bytes as f64 / 1024.0 / 1024.0;
+        println!(
+            "Estimated memory usage for 5M records (with cleanups): {:.2} MB",
+            total_mb
+        );
+
+        assert!(
+            total_mb < 300.0,
+            "Memory usage {:.2} MB exceeds the 300 MB limit!",
+            total_mb
+        );
+    }
+}
