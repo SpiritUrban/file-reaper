@@ -3,6 +3,9 @@
 //! Кожен воркер тримає локальний стек каталогів; коли стек порожній —
 //! краде роботу з глобальної черги. Глибина дерева не серіалізує обхід:
 //! підкаталоги одразу стають доступною роботою для будь-якого воркера.
+//!
+//! Виключені шляхи (T-027): відсікаються **до** `metadata`/`read_dir` на
+//! самому префіксі — у виключене піддерево немає жодного syscall-заходу.
 
 use std::collections::{HashMap, VecDeque};
 use std::fs::{self, Metadata};
@@ -15,6 +18,8 @@ use std::time::{Duration, SystemTime};
 use trashradar_domain::candidate::{ByteSize, FileAttributes, FsTimestamp};
 use trashradar_domain::error::{CoreError, ErrorCode};
 use trashradar_domain::scan::ScanEntry;
+
+use crate::exclude::PathExclusions;
 
 /// Синтетичний `file_ref` кореня тому (walk-модель; у MFT корінь = record 5).
 pub const ROOT_REF: u64 = 0;
@@ -29,14 +34,18 @@ const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
 const FILETIME_UNIX_EPOCH: u64 = 11_644_473_600_000_000_000;
 
 /// Конфігурація обходу.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct WalkConfig {
     /// Кількість воркерів. `0` = `available_parallelism` (мін. 1).
     pub workers: usize,
+    /// Виключені піддерева — сканер у них не заходить (T-027).
+    pub exclusions: PathExclusions,
+    /// Збирати трейс каталогів, на які викликано `read_dir` (DoD T-027 / діагностика).
+    pub record_opened_dirs: bool,
 }
 
 impl WalkConfig {
-    fn resolved_workers(self) -> usize {
+    fn resolved_workers(&self) -> usize {
         if self.workers > 0 {
             self.workers
         } else {
@@ -49,14 +58,18 @@ impl WalkConfig {
 }
 
 /// Статистика обходу.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct WalkStats {
     pub entries: u64,
     pub directories: u64,
     pub files: u64,
     /// Каталоги/файли, пропущені через помилки доступу.
     pub skipped_errors: u64,
+    /// Піддерева, відсічені виключенням (T-027) — без заходу всередину.
+    pub skipped_excluded: u64,
     pub workers_used: u64,
+    /// Каталоги, на які реально викликано `read_dir` (якщо `record_opened_dirs`).
+    pub opened_dirs: Vec<PathBuf>,
 }
 
 struct WorkItem {
@@ -73,6 +86,10 @@ struct SharedState {
     next_id: AtomicU64,
     entries: Mutex<Vec<ScanEntry>>,
     skipped_errors: AtomicU64,
+    skipped_excluded: AtomicU64,
+    exclusions: PathExclusions,
+    /// Трейс `read_dir` (лише коли увімкнено).
+    opened_dirs: Option<Mutex<Vec<PathBuf>>>,
 }
 
 /// Обходить том `drive` (літера) і повертає всі знайдені записи.
@@ -108,10 +125,32 @@ pub fn walk_path(root: &Path, config: WalkConfig) -> Result<Vec<ScanEntry>, Core
     Ok(entries)
 }
 
+/// Як [`walk_path`], але повертає й статистику (включно з трейсом відкритих
+/// каталогів, якщо `config.record_opened_dirs`).
+pub fn walk_path_with_stats(
+    root: &Path,
+    config: WalkConfig,
+) -> Result<(Vec<ScanEntry>, WalkStats), CoreError> {
+    walk_path_internal(root, config)
+}
+
 fn walk_path_internal(
     root: &Path,
     config: WalkConfig,
 ) -> Result<(Vec<ScanEntry>, WalkStats), CoreError> {
+    // Корінь сам у виключенні — у піддерево не заходимо взагалі (0 syscall всередині).
+    if config.exclusions.is_excluded(root) {
+        tracing::debug!(path = %root.display(), "корінь скану виключено — обхід пропущено");
+        return Ok((
+            Vec::new(),
+            WalkStats {
+                skipped_excluded: 1,
+                workers_used: 0,
+                ..WalkStats::default()
+            },
+        ));
+    }
+
     let meta = fs::metadata(root).map_err(|e| {
         CoreError::new(
             ErrorCode::Io,
@@ -141,6 +180,13 @@ fn walk_path_internal(
         next_id: AtomicU64::new(1),
         entries: Mutex::new(vec![root_entry]),
         skipped_errors: AtomicU64::new(0),
+        skipped_excluded: AtomicU64::new(0),
+        exclusions: config.exclusions.clone(),
+        opened_dirs: if config.record_opened_dirs {
+            Some(Mutex::new(Vec::new()))
+        } else {
+            None
+        },
     });
 
     let mut handles = Vec::with_capacity(workers);
@@ -161,8 +207,14 @@ fn walk_path_internal(
         .expect("entries mutex poisoned")
         .clone();
     let skipped = shared.skipped_errors.load(Ordering::Acquire);
+    let skipped_excluded = shared.skipped_excluded.load(Ordering::Acquire);
     let directories = entries.iter().filter(|e| e.is_directory).count() as u64;
     let files = entries.len() as u64 - directories;
+    let opened_dirs = shared
+        .opened_dirs
+        .as_ref()
+        .map(|m| m.lock().expect("opened_dirs mutex poisoned").clone())
+        .unwrap_or_default();
 
     if skipped > 0 {
         tracing::warn!(
@@ -171,13 +223,21 @@ fn walk_path_internal(
             "обхід каталогів пропустив недоступні записи"
         );
     }
+    if skipped_excluded > 0 {
+        tracing::debug!(
+            skipped_excluded,
+            "обхід відсік виключені піддерева без заходу всередину"
+        );
+    }
 
     let stats = WalkStats {
         entries: entries.len() as u64,
         directories,
         files,
         skipped_errors: skipped,
+        skipped_excluded,
         workers_used: workers as u64,
+        opened_dirs,
     };
     Ok((entries, stats))
 }
@@ -222,6 +282,24 @@ fn pop_global(state: &SharedState) -> Option<WorkItem> {
 }
 
 fn process_directory(state: &SharedState, local: &mut Vec<WorkItem>, item: WorkItem) {
+    // Захист: виключений каталог не повинен потрапити в чергу, але якщо
+    // потрапив — не відкриваємо його (0 syscall у піддерево).
+    if state.exclusions.is_excluded(&item.path) {
+        state.skipped_excluded.fetch_add(1, Ordering::Relaxed);
+        tracing::debug!(
+            path = %item.path.display(),
+            "пропущено виключений каталог (без read_dir)"
+        );
+        return;
+    }
+
+    if let Some(trace) = &state.opened_dirs {
+        trace
+            .lock()
+            .expect("opened_dirs mutex poisoned")
+            .push(item.path.clone());
+    }
+
     let read = match fs::read_dir(&item.path) {
         Ok(rd) => rd,
         Err(e) => {
@@ -257,6 +335,17 @@ fn process_directory(state: &SharedState, local: &mut Vec<WorkItem>, item: WorkI
             Ok(n) => n,
             Err(_) => dent.file_name().to_string_lossy().into_owned(),
         };
+
+        // T-027: виключений шлях — без metadata і без заходу всередину.
+        // Ім'я бачимо з read_dir батька; у піддерево syscall-ів немає.
+        if state.exclusions.is_excluded(&path) {
+            state.skipped_excluded.fetch_add(1, Ordering::Relaxed);
+            tracing::debug!(
+                path = %path.display(),
+                "відсічено виключений шлях (без metadata/read_dir)"
+            );
+            continue;
+        }
 
         let meta = match dent.metadata().or_else(|_| fs::symlink_metadata(&path)) {
             Ok(m) => m,
@@ -480,10 +569,17 @@ mod tests {
         base
     }
 
+    fn cfg(workers: usize) -> WalkConfig {
+        WalkConfig {
+            workers,
+            ..WalkConfig::default()
+        }
+    }
+
     #[test]
     fn walks_temp_tree_and_finds_all_files() {
         let root = temp_tree();
-        let entries = walk_path(&root, WalkConfig { workers: 4 }).expect("walk");
+        let entries = walk_path(&root, cfg(4)).expect("walk");
         let files: Vec<_> = entries.iter().filter(|e| !e.is_directory).collect();
         let names: std::collections::HashSet<_> = files.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names.len(), 4);
@@ -501,7 +597,7 @@ mod tests {
     #[test]
     fn parent_chain_reconstructs_paths() {
         let root = temp_tree();
-        let entries = walk_path(&root, WalkConfig { workers: 2 }).expect("walk");
+        let entries = walk_path(&root, cfg(2)).expect("walk");
         let deep = entries
             .iter()
             .find(|e| e.name == "deep.txt" && !e.is_directory)
@@ -528,8 +624,8 @@ mod tests {
                 .unwrap();
         }
 
-        let single = walk_path(&root, WalkConfig { workers: 1 }).expect("1 worker");
-        let multi = walk_path(&root, WalkConfig { workers: 4 }).expect("4 workers");
+        let single = walk_path(&root, cfg(1)).expect("1 worker");
+        let multi = walk_path(&root, cfg(4)).expect("4 workers");
 
         let names = |v: &[ScanEntry]| {
             let mut n: Vec<_> = v
@@ -554,7 +650,7 @@ mod tests {
         for i in 0..64 {
             create_dir_all(root.join(format!("p{i}"))).unwrap();
         }
-        let (_, stats) = walk_path_internal(&root, WalkConfig { workers: 4 }).expect("walk");
+        let (_, stats) = walk_path_internal(&root, cfg(4)).expect("walk");
         assert_eq!(stats.workers_used, 4);
         assert!(stats.directories >= 64);
         let _ = fs::remove_dir_all(&root);
@@ -570,11 +666,91 @@ mod tests {
     fn scan_source_impl_works() {
         let root = temp_tree();
         // WalkScanner.scan_volume потребує літеру тому — для temp використовуємо walk_path.
-        let entries = walk_path(&root, WalkConfig { workers: 2 }).unwrap();
+        let entries = walk_path(&root, cfg(2)).unwrap();
         assert!(!entries.is_empty());
         // Перевіряємо, що тип реалізує порт (компіляція + default).
         let _scanner = crate::WalkScanner::default();
         let _: &dyn ScanSource = &_scanner;
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// DoD T-027: у виключене піддерево немає жодного `read_dir` (трейс
+    /// `opened_dirs`) і жоден запис з нього не потрапляє в результат.
+    #[test]
+    fn excluded_subtree_has_no_read_dir_and_no_entries() {
+        let root = temp_tree();
+        // Щільне виключене піддерево з «секретами», які не повинні з'явитись.
+        create_dir_all(root.join("secret/deep/nested")).unwrap();
+        File::create(root.join("secret/top.secret"))
+            .unwrap()
+            .write_all(b"nope")
+            .unwrap();
+        File::create(root.join("secret/deep/nested/buried.secret"))
+            .unwrap()
+            .write_all(b"nope")
+            .unwrap();
+        // Дозволений сусід.
+        File::create(root.join("allowed.txt"))
+            .unwrap()
+            .write_all(b"ok")
+            .unwrap();
+
+        let excluded = root.join("secret");
+        let config = WalkConfig {
+            workers: 4,
+            exclusions: PathExclusions::from_paths([&excluded]),
+            record_opened_dirs: true,
+        };
+        let (entries, stats) = walk_path_with_stats(&root, config).expect("walk");
+
+        // Жоден запис з secret/* не в результаті.
+        let names: std::collections::HashSet<_> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert!(!names.contains("top.secret"));
+        assert!(!names.contains("buried.secret"));
+        assert!(!names.contains("secret"));
+        assert!(!names.contains("deep"));
+        assert!(!names.contains("nested"));
+        assert!(names.contains("allowed.txt"));
+        assert!(names.contains("root.txt"));
+        assert!(stats.skipped_excluded >= 1);
+
+        // Трейс: жоден opened path не лежить під secret\ (включно з самим secret).
+        let secret_norm = excluded
+            .canonicalize()
+            .unwrap_or(excluded.clone())
+            .to_string_lossy()
+            .to_ascii_lowercase()
+            .replace('/', "\\");
+        for opened in &stats.opened_dirs {
+            let o = opened
+                .canonicalize()
+                .unwrap_or_else(|_| opened.clone())
+                .to_string_lossy()
+                .to_ascii_lowercase()
+                .replace('/', "\\");
+            assert!(
+                o != secret_norm
+                    && !o.starts_with(&format!("{secret_norm}\\"))
+                    && !o.starts_with(&secret_norm.replace("\\\\", "\\")),
+                "read_dir зайшов у виключене піддерево: {o} (secret={secret_norm})"
+            );
+        }
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn excluded_root_skips_entire_walk() {
+        let root = temp_tree();
+        let config = WalkConfig {
+            workers: 2,
+            exclusions: PathExclusions::from_paths([&root]),
+            record_opened_dirs: true,
+        };
+        let (entries, stats) = walk_path_with_stats(&root, config).expect("walk");
+        assert!(entries.is_empty());
+        assert_eq!(stats.skipped_excluded, 1);
+        assert!(stats.opened_dirs.is_empty());
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -593,7 +769,7 @@ mod tests {
             .and_then(|s| s.chars().next())
             .unwrap_or('F');
 
-        let walk_scanner = crate::WalkScanner::new(WalkConfig { workers: 0 });
+        let walk_scanner = crate::WalkScanner::new(cfg(0));
         let walk_entries = walk_scanner.scan_volume(drive).expect("walk scan");
         let walk_files: HashSet<(String, u64)> = walk_entries
             .iter()
