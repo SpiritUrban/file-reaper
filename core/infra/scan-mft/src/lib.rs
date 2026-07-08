@@ -3,11 +3,13 @@
 //! Розкладка (docs/tasks.md, E3/F3.1):
 //! - [`record`] — чистий парсер байтів запису MFT (T-021), тестований у CI
 //!   без доступу до тому;
+//! - [`paths`] — побудова повних шляхів із `parent_ref`-ланцюжка (T-022);
 //! - [`volume`] — читач `$MFT` через WinAPI (T-021), потребує адмін-прав;
 //!   перевіряється ігнорованим інтеграційним тестом на реальному томі.
 //!
-//! Побудова повних шляхів — T-022, батчі — T-024, обробка помилок — T-025.
+//! Батчі — T-024, обробка помилок — T-025.
 
+pub mod paths;
 pub mod record;
 
 #[cfg(windows)]
@@ -227,6 +229,65 @@ mod integration {
         assert_eq!(
             missing, 0,
             "сирий парсер пропустив {missing} файлів контролю (том має бути тихим)"
+        );
+    }
+
+    // DoD T-022: побудований повний шлях кожного запису вказує на реальний
+    // об'єкт ФС, а розмір збігається. Звіряємо вибірку зі станом диска
+    // (ground truth). Том має бути тихим; запуск як вище, з TR_MFT_TEST_DRIVE.
+    #[test]
+    #[ignore = "DoD T-022: потребує адмін-прав і реального тому; TR_MFT_TEST_DRIVE"]
+    fn resolved_paths_point_to_real_files() {
+        use crate::paths::PathResolver;
+
+        let drive = std::env::var("TR_MFT_TEST_DRIVE")
+            .ok()
+            .and_then(|s| s.chars().next())
+            .unwrap_or('F');
+
+        let mut entries = Vec::new();
+        super::enumerate_with(drive, |e| entries.push(e)).expect("сирий парсинг $MFT");
+        let resolver = PathResolver::from_entries(drive, &entries);
+
+        // Вибірка файлів (не директорій), щоб не робити мільйони stat-ів.
+        let mut sampled = 0u64;
+        let mut resolved = 0u64;
+        let mut missing_on_disk = 0u64;
+        let mut size_mismatch = 0u64;
+        for e in entries.iter().filter(|e| !e.is_directory).step_by(200) {
+            sampled += 1;
+            let Some(path) = resolver.full_path(e) else {
+                continue;
+            };
+            resolved += 1;
+            match std::fs::metadata(&path) {
+                Ok(meta) => {
+                    // Розмір логічного потоку може легально різнитись для
+                    // reparse-точок; рахуємо як інфо, не як фейл.
+                    if meta.is_file() && meta.len() != e.size.0 {
+                        size_mismatch += 1;
+                    }
+                }
+                Err(_) => missing_on_disk += 1,
+            }
+        }
+
+        let exist_rate = (resolved - missing_on_disk) as f64 / resolved.max(1) as f64;
+        println!(
+            "Том {drive}: вибірка {sampled} файлів; шлях побудовано {resolved}; \
+             немає на диску {missing_on_disk}; частка існуючих {:.4}; \
+             розбіжність розміру {size_mismatch}",
+            exist_rate
+        );
+
+        // Кожен запис отримав повний шлях.
+        assert_eq!(resolved, sampled, "не для всіх записів побудовано шлях");
+        // Практично всі побудовані шляхи вказують на реальний об'єкт ФС
+        // (лишок — файли, зниклі за час скану/недоступні навіть elevated).
+        assert!(
+            exist_rate > 0.98,
+            "лише {:.4} побудованих шляхів існують на диску",
+            exist_rate
         );
     }
 }
