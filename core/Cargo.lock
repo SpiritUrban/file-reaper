@@ -3714,7 +3714,10 @@ dependencies = [
  "tracing-subscriber",
  "trashradar-app",
  "trashradar-domain",
+ "trashradar-index-memory",
  "trashradar-platform-win",
+ "trashradar-scan-mft",
+ "trashradar-scan-walk",
 ]
 
 [[package]]

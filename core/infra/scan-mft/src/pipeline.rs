@@ -143,22 +143,48 @@ pub fn scan_volume_to_index<F>(
 where
     F: FnMut(Vec<FileRecord>) -> Result<(), CoreError>,
 {
+    let (stats, _cancelled) = scan_volume_to_index_cancel(drive, batch_size, || false, sink)?;
+    Ok(stats)
+}
+
+/// Як [`scan_volume_to_index`], з кооперативною відміною (T-033).
+/// Повертає `(stats, cancelled)` — часткові батчі вже в `sink`.
+#[cfg(windows)]
+pub fn scan_volume_to_index_cancel<F>(
+    drive: char,
+    batch_size: usize,
+    is_cancelled: impl Fn() -> bool,
+    sink: F,
+) -> Result<(IndexingStats, bool), CoreError>
+where
+    F: FnMut(Vec<FileRecord>) -> Result<(), CoreError>,
+{
     // Прохід 1: тільки директорії — вони потрібні резолверу шляхів.
     let mut dirs = Vec::new();
-    crate::volume::enumerate_with(drive, |e| {
+    let (pass1, cancelled1) = crate::volume::enumerate_with_cancel(drive, &is_cancelled, |e| {
         if e.is_directory {
             dirs.push(e);
         }
     })?;
+    if cancelled1 {
+        return Ok((
+            IndexingStats {
+                corrupt: pass1.corrupt,
+                ..IndexingStats::default()
+            },
+            true,
+        ));
+    }
     let resolver = PathResolver::from_entries(drive, &dirs);
-    drop(dirs); // резолвер тримає власну копію — вихідний вектор більше не потрібен
+    drop(dirs);
 
-    // Прохід 2: файли → батчі у приймач (сток паузить продюсера = зворотний тиск).
+    // Прохід 2: файли → батчі (стоп на межі запису / chunk).
     let mut batcher = Batcher::new(&resolver, batch_size, sink);
-    let scan_stats = crate::volume::enumerate_with(drive, |e| batcher.push(e))?;
+    let (scan_stats, cancelled2) =
+        crate::volume::enumerate_with_cancel(drive, &is_cancelled, |e| batcher.push(e))?;
     let mut stats = batcher.finish()?;
-    stats.corrupt = scan_stats.corrupt; // пропуски пошкоджених записів (T-025)
-    Ok(stats)
+    stats.corrupt = scan_stats.corrupt;
+    Ok((stats, cancelled2))
 }
 
 #[cfg(test)]

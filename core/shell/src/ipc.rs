@@ -21,11 +21,11 @@ use crate::events;
 static COMMANDS_RECEIVED: AtomicU64 = AtomicU64::new(0);
 static COMMAND_ERRORS: AtomicU64 = AtomicU64::new(0);
 
-fn record_command() {
+pub(crate) fn record_command() {
     COMMANDS_RECEIVED.fetch_add(1, Ordering::Relaxed);
 }
 
-fn record_command_error() {
+pub(crate) fn record_command_error() {
     COMMAND_ERRORS.fetch_add(1, Ordering::Relaxed);
 }
 
@@ -289,10 +289,13 @@ mod tests {
         tauri::WebviewWindow<tauri::test::MockRuntime>,
     ) {
         let app = mock_builder()
+            .manage(crate::scan_runtime::ScanRuntime::new())
             .invoke_handler(tauri::generate_handler![
                 app_health,
                 app_ping,
-                app_test_stream
+                app_test_stream,
+                crate::scan_runtime::scan_start,
+                crate::scan_runtime::scan_stop,
             ])
             .build(mock_context(noop_assets()))
             .expect("mock app");

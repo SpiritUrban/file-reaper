@@ -9,6 +9,7 @@
 mod events;
 mod ipc;
 mod logging;
+mod scan_runtime;
 
 fn main() {
     // Логи — найперше: далі всі підсистеми вже під наглядом (T-003).
@@ -22,10 +23,13 @@ fn main() {
     }
 
     tauri::Builder::default()
+        .manage(scan_runtime::ScanRuntime::new())
         .invoke_handler(tauri::generate_handler![
             ipc::app_health,
             ipc::app_ping,
-            ipc::app_test_stream
+            ipc::app_test_stream,
+            scan_runtime::scan_start,
+            scan_runtime::scan_stop,
         ])
         .run(tauri::generate_context!())
         .expect("не вдалося запустити TrashRadar shell");

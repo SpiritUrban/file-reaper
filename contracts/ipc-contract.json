@@ -22,8 +22,16 @@
       "task": "T-005",
       "$comment": "Діагностика каналу подій: payload {count?, intervalMs?} -> ack {accepted} ОДРАЗУ; далі count подій app.test у фоні"
     },
-    "scan.start": { "status": "planned", "task": "T-033" },
-    "scan.stop": { "status": "planned", "task": "T-033" },
+    "scan.start": {
+      "status": "implemented",
+      "task": "T-033",
+      "$comment": "payload {volumes?: string[]} -> ack {accepted, volumeCount}; work + scan.progress in background"
+    },
+    "scan.stop": {
+      "status": "implemented",
+      "task": "T-033",
+      "$comment": "cooperative cancel; ack {stopping}; scanner stops ≤500ms; partial index kept"
+    },
     "category.window": { "status": "planned", "task": "T-014" },
     "category.set_threshold": { "status": "planned", "task": "T-038" },
     "candidate.mark": { "status": "planned", "task": "T-057" },
@@ -57,7 +65,11 @@
       "task": "T-032",
       "$comment": "Change Monitor live tick: {volume, created, modified, deleted, renamed}; UI refreshes category totals (T-055)"
     },
-    "scan.progress": { "status": "planned", "task": "T-033" },
+    "scan.progress": {
+      "status": "implemented",
+      "task": "T-033",
+      "$comment": "{volume, strategy, phase, filesIndexed, volumeIndex, volumeCount, done, cancelled}"
+    },
     "cleanup.total_updated": { "status": "planned", "task": "T-055" },
     "category.updated": { "status": "planned", "task": "T-055" },
     "preview.ready": { "status": "planned", "task": "T-067" },

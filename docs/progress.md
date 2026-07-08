@@ -61,6 +61,8 @@
 
 | T-032 Change Monitor: живе оновлення індексу | ✅ | 2026-07-09 | local | **App `change_monitor`:** `monitor_tick` (USN delta→`process_usn_sync` per volume); `ChangeMonitor` background loop + `CancellationToken`; poll default 1s, cap 5s (DoD); `MonitorEvent::{Applied,FullRescanRequired,NoCursor,Error}`; `IndexUpdatedNotice`. **Shell:** `index.updated` event + `emit_index_updated`. **Contracts/UI:** EventName. **DoD unit:** delete applied in one tick; poll ≤5s; stale→full rescan; cancel stops thread. Lifecycle start у shell — T-033. Перевірено: `cargo test -p trashradar-app change_monitor` (6); clippy `-D warnings`. |
 
+| T-033 IPC start/stop скану + progress | ✅ | 2026-07-09 | local | **App `scan_control`:** `ScanController`, `run_scan_session`, `CancellableVolumeScanner`, `SteppedTestScanner`; DoD cancel ≤500ms + partial batches. **scan-mft:** `enumerate_with_cancel` / `scan_volume_to_index_cancel`. **Shell `scan_runtime`:** `scan.start`/`scan.stop`, `ScanRuntime` (hot index + controller), MFT/walk auto strategy, `scan.progress` events. **Contracts/UI:** implemented. **DoD:** 4 unit scan_control + shell partial index on cancel. Перевірено: `cargo test -p trashradar-app scan_control`; `cargo test -p trashradar-shell` (18); clippy `-D warnings`. |
+
 ## Легенда
 
 ✅ виконано й верифіковано · 🔄 в роботі · ⛔ заблоковано (причина в нотатках)

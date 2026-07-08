@@ -18,6 +18,9 @@ tracing-subscriber = { workspace = true }
 trashradar-domain = { path = "../domain" }
 trashradar-app = { path = "../app" }
 trashradar-platform-win = { path = "../infra/platform-win" }
+trashradar-index-memory = { path = "../infra/index-memory" }
+trashradar-scan-mft = { path = "../infra/scan-mft" }
+trashradar-scan-walk = { path = "../infra/scan-walk" }
 
 [dev-dependencies]
 # Mock-рантайм Tauri: наскрізні тести диспетчеризації команд без вікна.

@@ -11,6 +11,7 @@
 
 pub mod change_monitor;
 pub mod ports;
+pub mod scan_control;
 pub mod scan_strategy;
 pub mod usn_apply;
 pub mod usn_fallback;

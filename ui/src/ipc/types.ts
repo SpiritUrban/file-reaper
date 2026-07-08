@@ -221,3 +221,32 @@ export interface IndexUpdatedEvent {
   deleted: number;
   renamed: number;
 }
+
+/** Параметри scan.start (T-033). */
+export interface ScanStartPayload {
+  /** Літери томів; omit = усі доступні. */
+  volumes?: string[];
+}
+
+/** Ack scan.start. */
+export interface ScanStartAck {
+  accepted: boolean;
+  volumeCount: number;
+}
+
+/** Ack scan.stop. */
+export interface ScanStopAck {
+  stopping: boolean;
+}
+
+/** Подія scan.progress (T-033). */
+export interface ScanProgressEvent {
+  volume: string;
+  strategy: string;
+  phase: string;
+  filesIndexed: number;
+  volumeIndex: number;
+  volumeCount: number;
+  done: boolean;
+  cancelled: boolean;
+}

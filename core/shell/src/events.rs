@@ -31,6 +31,8 @@ pub mod topic {
     pub const SCAN_JOURNAL_STALE: &str = "scan.journal_stale";
     /// Живе оновлення індексу від Change Monitor (T-032).
     pub const INDEX_UPDATED: &str = "index.updated";
+    /// Прогрес сесії скану по томах (T-033).
+    pub const SCAN_PROGRESS: &str = "scan.progress";
 }
 
 /// Payload `index.updated` (T-032): дельта після USN-тика.
@@ -125,7 +127,11 @@ pub fn emit_journal_stale<R: Runtime>(
 
 /// Реєстр реалізованих scan/index-подій (health / smoke; wiring у T-033).
 pub fn scan_event_topics() -> &'static [&'static str] {
-    &[topic::SCAN_JOURNAL_STALE, topic::INDEX_UPDATED]
+    &[
+        topic::SCAN_JOURNAL_STALE,
+        topic::INDEX_UPDATED,
+        topic::SCAN_PROGRESS,
+    ]
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

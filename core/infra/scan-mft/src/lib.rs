@@ -18,7 +18,7 @@ pub mod record;
 pub mod volume;
 
 #[cfg(windows)]
-pub use volume::{enumerate, enumerate_with, ScanStats};
+pub use volume::{enumerate, enumerate_with, enumerate_with_cancel, ScanStats};
 
 /// Джерело скану на базі прямого читання MFT (NTFS).
 #[cfg(windows)]

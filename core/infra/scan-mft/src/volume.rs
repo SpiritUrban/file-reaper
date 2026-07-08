@@ -197,10 +197,19 @@ pub struct ScanStats {
 
 /// Перелічує всі записи `$MFT` тому, викликаючи `sink` для кожного валідного
 /// запису (файл або тека). Повертає статистику проходу.
-pub fn enumerate_with(
+pub fn enumerate_with(drive: char, sink: impl FnMut(ScanEntry)) -> Result<ScanStats, CoreError> {
+    let (stats, _cancelled) = enumerate_with_cancel(drive, || false, sink)?;
+    Ok(stats)
+}
+
+/// Як [`enumerate_with`], але `is_cancelled` перевіряється між chunk-ами
+/// читання (T-033: кооперативна відміна ≤ 500 мс).
+/// Повертає `(stats, cancelled)`.
+pub fn enumerate_with_cancel(
     drive: char,
+    is_cancelled: impl Fn() -> bool,
     mut sink: impl FnMut(ScanEntry),
-) -> Result<ScanStats, CoreError> {
+) -> Result<(ScanStats, bool), CoreError> {
     let handle = open_volume(drive)?;
     let vol = query_volume_data(&handle)?;
 
@@ -226,8 +235,13 @@ pub fn enumerate_with(
 
     let mut stats = ScanStats::default();
     let mut buffer = vec![0u8; MAX_CHUNK_BYTES as usize];
+    let mut cancelled = false;
 
     'runs: for (lcn, clusters) in runs {
+        if is_cancelled() {
+            cancelled = true;
+            break;
+        }
         let run_bytes = clusters * cluster;
         let Some(lcn) = lcn else {
             // Розріджений екстент $MFT: записи в ньому відсутні, лише зсуваємо лічильник.
@@ -241,6 +255,10 @@ pub fn enumerate_with(
 
         let mut done = 0u64;
         while done < run_bytes {
+            if is_cancelled() {
+                cancelled = true;
+                break 'runs;
+            }
             if stats.records_scanned >= total_records {
                 break 'runs;
             }
@@ -289,7 +307,7 @@ pub fn enumerate_with(
         );
     }
 
-    Ok(stats)
+    Ok((stats, cancelled))
 }
 
 /// Перелічує весь том, збираючи записи у `Vec`. Зручність поверх
