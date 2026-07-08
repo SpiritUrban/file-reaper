@@ -6,27 +6,8 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod ipc;
 mod logging;
-
-use serde::Serialize;
-
-/// Відповідь команди `app.health` — єдиної команди каркаса.
-/// Використовується діагностичним екраном (T-009) для перевірки
-/// зв'язку UI ↔ Core.
-#[derive(Serialize)]
-struct HealthInfo {
-    app_version: &'static str,
-    core_status: &'static str,
-}
-
-#[tauri::command]
-fn app_health() -> HealthInfo {
-    tracing::debug!("запит app.health");
-    HealthInfo {
-        app_version: env!("CARGO_PKG_VERSION"),
-        core_status: "skeleton",
-    }
-}
 
 fn main() {
     // Логи — найперше: далі всі підсистеми вже під наглядом (T-003).
@@ -40,7 +21,7 @@ fn main() {
     }
 
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![app_health])
+        .invoke_handler(tauri::generate_handler![ipc::app_health, ipc::app_ping])
         .run(tauri::generate_context!())
         .expect("не вдалося запустити TrashRadar shell");
 }

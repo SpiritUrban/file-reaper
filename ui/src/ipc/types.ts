@@ -100,15 +100,30 @@ export interface CoreErrorPayload {
   message: string;
 }
 
-/** Відповідь команди app.health — єдиної команди каркаса. */
+/** Відповідь команди app.health. */
 export interface HealthInfo {
   appVersion: string;
   coreStatus: string;
 }
 
+/** Параметри app.ping (усе опційне: {} — миттєвий успіх). */
+export interface PingPayload {
+  /** Штучна затримка відповіді, мс — перевірка неблокування UI. */
+  delayMs?: number;
+  /** Запросити відмову — перевірка конверта помилок наскрізь. */
+  fail?: boolean;
+}
+
+/** Відповідь app.ping. */
+export interface PingReply {
+  version: string;
+  delayedMs: number;
+}
+
 /** Імена команд (contracts/ipc-contract.json → commands). */
 export type CommandName =
   | "app.health"
+  | "app.ping"
   | "scan.start"
   | "scan.stop"
   | "category.window"
