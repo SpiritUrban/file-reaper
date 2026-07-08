@@ -7,7 +7,14 @@
 
 /// Джерело повного скану тому. Реалізації: `scan-mft`, `scan-walk`.
 /// Контракт визначає T-021 / T-026; автовибір реалізації — T-028.
-pub trait ScanSource {}
+///
+/// Перший зріз контракту (T-021): перелічити всі записи тому як сирі
+/// [`ScanEntry`] (метадані без повного шляху). Побудова шляхів — T-022,
+/// батчева/стрімінгова видача зі зворотним тиском — T-024.
+pub trait ScanSource {
+    /// Перелічити всі файли та теки тому за його літерою.
+    fn scan_volume(&self, volume: char) -> Result<Vec<ScanEntry>, CoreError>;
+}
 
 /// Джерело інкрементальних змін тому. Реалізація: `scan-usn` (T-029/T-030).
 pub trait ChangeSource {}
@@ -16,6 +23,7 @@ use trashradar_domain::{
     candidate::{FileRecord, FileRecordSort},
     category::CategoryId,
     error::CoreError,
+    scan::ScanEntry,
 };
 
 /// Persistent-індекс кандидатів і журнал Quarantine.

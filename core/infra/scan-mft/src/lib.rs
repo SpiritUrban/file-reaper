@@ -1,5 +1,232 @@
-//! Адаптер `ScanSource`: прямий парсинг MFT тому NTFS.
+//! Адаптер `ScanSource`: прямий парсинг MFT тому NTFS (швидкий шлях).
 //!
-//! Реалізація: спайк T-020, промисловий парсер T-021, шляхи T-022,
-//! батчі T-024, помилки T-025 (docs/tasks.md, E3/F3.1).
-//! Каркас T-001 — реалізація сканування свідомо відсутня.
+//! Розкладка (docs/tasks.md, E3/F3.1):
+//! - [`record`] — чистий парсер байтів запису MFT (T-021), тестований у CI
+//!   без доступу до тому;
+//! - [`volume`] — читач `$MFT` через WinAPI (T-021), потребує адмін-прав;
+//!   перевіряється ігнорованим інтеграційним тестом на реальному томі.
+//!
+//! Побудова повних шляхів — T-022, батчі — T-024, обробка помилок — T-025.
+
+pub mod record;
+
+#[cfg(windows)]
+pub mod volume;
+
+#[cfg(windows)]
+pub use volume::{enumerate, enumerate_with, ScanStats};
+
+/// Джерело скану на базі прямого читання MFT (NTFS).
+#[cfg(windows)]
+#[derive(Debug, Default)]
+pub struct MftScanner;
+
+#[cfg(windows)]
+impl trashradar_app::ports::ScanSource for MftScanner {
+    fn scan_volume(
+        &self,
+        volume: char,
+    ) -> Result<Vec<trashradar_domain::scan::ScanEntry>, trashradar_domain::error::CoreError> {
+        volume::enumerate(volume)
+    }
+}
+
+// --- Інтеграційний тест DoD T-021 (перелік = контроль, розбіжність 0) --------
+//
+// Перевіряє на реальному томі, що прямий парсинг $MFT перелічує ту саму
+// популяцію файлів, що й незалежний контроль — OS-перелік FSCTL_ENUM_USN_DATA.
+// Жорстка умова DoD: жоден файл контролю не пропущений сирим парсером
+// (звірка за номером запису MFT). Сирий парсер може бути надмножиною
+// (системні метафайли 0–15) — це не розбіжність.
+//
+// ВАЖЛИВО: запускати на *тихому* томі (без активного запису). На живому
+// системному диску два послідовні проходи бачать різні знімки ФС: файли,
+// створені/видалені між проходами, дають хибну «розбіжність». Так само різні
+// імена одного запису — це гард-лінки (один MFT-запис під кількома іменами,
+// напр. WinSxS): парсер і USN обирають різні валідні імена того самого файла,
+// тож розбіжність імен звітується інформаційно, а не валить тест.
+// Верифіковано: тихий том F: — 0 пропущених, 0 різних імен.
+//
+// Потребує адмін-прав; запускається вручну на елевованій консолі:
+//   set TR_MFT_TEST_DRIVE=F
+//   cargo test -p trashradar-scan-mft --release raw_mft_matches_usn_enumeration -- --ignored --nocapture
+#[cfg(all(windows, test))]
+mod integration {
+    use std::collections::HashMap;
+    use std::ffi::c_void;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateFileW(
+            lp_file_name: *const u16,
+            dw_desired_access: u32,
+            dw_share_mode: u32,
+            lp_security_attributes: *mut c_void,
+            dw_creation_disposition: u32,
+            dw_flags_and_attributes: u32,
+            h_template_file: *mut c_void,
+        ) -> *mut c_void;
+        fn DeviceIoControl(
+            h_device: *mut c_void,
+            dw_io_control_code: u32,
+            lp_in_buffer: *const c_void,
+            n_in_buffer_size: u32,
+            lp_out_buffer: *mut c_void,
+            n_out_buffer_size: u32,
+            lp_bytes_returned: *mut u32,
+            lp_overlapped: *mut c_void,
+        ) -> i32;
+        fn CloseHandle(h_object: *mut c_void) -> i32;
+        fn GetLastError() -> u32;
+    }
+
+    const GENERIC_READ: u32 = 0x8000_0000;
+    const FILE_SHARE_READ: u32 = 0x0000_0001;
+    const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+    const OPEN_EXISTING: u32 = 3;
+    const FSCTL_ENUM_USN_DATA: u32 = 0x0009_00B3;
+    const ERROR_HANDLE_EOF: u32 = 38;
+    const MFT_REF_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
+
+    #[repr(C)]
+    struct MftEnumDataV0 {
+        start_file_reference_number: u64,
+        low_usn: i64,
+        high_usn: i64,
+    }
+
+    /// Незалежний контроль: (номер запису MFT → ім'я) з FSCTL_ENUM_USN_DATA.
+    fn usn_enumeration(drive: char) -> HashMap<u64, String> {
+        let path: Vec<u16> = format!("\\\\.\\{}:", drive.to_ascii_uppercase())
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let handle = unsafe {
+            CreateFileW(
+                path.as_ptr(),
+                GENERIC_READ,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                std::ptr::null_mut(),
+                OPEN_EXISTING,
+                0,
+                std::ptr::null_mut(),
+            )
+        };
+        assert!(
+            handle as isize != -1,
+            "USN control: відкриття тому не вдалося (потрібні адмін-права)"
+        );
+
+        let mut map = HashMap::new();
+        let mut buffer = vec![0u8; 1 << 20];
+        let mut enum_data = MftEnumDataV0 {
+            start_file_reference_number: 0,
+            low_usn: 0,
+            high_usn: i64::MAX,
+        };
+        loop {
+            let mut returned: u32 = 0;
+            let ok = unsafe {
+                DeviceIoControl(
+                    handle,
+                    FSCTL_ENUM_USN_DATA,
+                    &enum_data as *const _ as *const c_void,
+                    std::mem::size_of::<MftEnumDataV0>() as u32,
+                    buffer.as_mut_ptr() as *mut c_void,
+                    buffer.len() as u32,
+                    &mut returned,
+                    std::ptr::null_mut(),
+                )
+            };
+            if ok == 0 {
+                let err = unsafe { GetLastError() };
+                assert_eq!(
+                    err, ERROR_HANDLE_EOF,
+                    "USN control: DeviceIoControl помилка {err}"
+                );
+                break;
+            }
+            if returned <= 8 {
+                break;
+            }
+            enum_data.start_file_reference_number =
+                u64::from_le_bytes(buffer[0..8].try_into().unwrap());
+
+            let mut off = 8usize;
+            let limit = returned as usize;
+            while off + 60 <= limit {
+                let record_length =
+                    u32::from_le_bytes(buffer[off..off + 4].try_into().unwrap()) as usize;
+                let major = u16::from_le_bytes(buffer[off + 4..off + 6].try_into().unwrap());
+                if record_length == 0 || off + record_length > limit {
+                    break;
+                }
+                if major == 2 {
+                    let frn = u64::from_le_bytes(buffer[off + 8..off + 16].try_into().unwrap())
+                        & MFT_REF_MASK;
+                    let name_len =
+                        u16::from_le_bytes(buffer[off + 56..off + 58].try_into().unwrap()) as usize;
+                    let name_off =
+                        u16::from_le_bytes(buffer[off + 58..off + 60].try_into().unwrap()) as usize;
+                    let s = off + name_off;
+                    let e = s + name_len;
+                    if e <= limit {
+                        let units: Vec<u16> = buffer[s..e]
+                            .chunks_exact(2)
+                            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                            .collect();
+                        map.insert(frn, String::from_utf16_lossy(&units));
+                    }
+                }
+                off += record_length;
+            }
+        }
+        unsafe { CloseHandle(handle) };
+        map
+    }
+
+    #[test]
+    #[ignore = "DoD T-021: потребує адмін-прав і реального тому; TR_MFT_TEST_DRIVE"]
+    fn raw_mft_matches_usn_enumeration() {
+        let drive = std::env::var("TR_MFT_TEST_DRIVE")
+            .ok()
+            .and_then(|s| s.chars().next())
+            .unwrap_or('C');
+
+        // Сирий парсинг $MFT: номер запису → ім'я.
+        let mut raw: HashMap<u64, String> = HashMap::new();
+        let stats = super::enumerate_with(drive, |e| {
+            raw.insert(e.file_ref, e.name);
+        })
+        .expect("сирий парсинг $MFT");
+
+        // Незалежний контроль.
+        let control = usn_enumeration(drive);
+
+        let mut missing = 0u64;
+        let mut differing_name = 0u64; // гард-лінки / інший простір імен — не помилка
+        for (frn, name) in &control {
+            match raw.get(frn) {
+                None => missing += 1,
+                Some(raw_name) if raw_name != name => differing_name += 1,
+                _ => {}
+            }
+        }
+
+        println!(
+            "Том {drive}: сирий $MFT — {} записів ({} тек); USN-контроль — {} записів; \
+             відсутніх у сирому: {}; різних імен (гард-лінки): {}",
+            stats.entries,
+            stats.directories,
+            control.len(),
+            missing,
+            differing_name
+        );
+
+        // DoD: на тихому томі жоден файл контролю не пропущений сирим парсером.
+        assert_eq!(
+            missing, 0,
+            "сирий парсер пропустив {missing} файлів контролю (том має бути тихим)"
+        );
+    }
+}
