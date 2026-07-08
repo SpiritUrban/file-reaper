@@ -3,16 +3,79 @@
 //! Реалізація: T-010 (підключення), T-011 (схема v1), T-012 (міграції),
 //! T-013 (батчевий запис), T-014 (віконні запити), T-078 (журнал Quarantine).
 
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::{
     error::Error,
     fmt, fs,
     path::{Path, PathBuf},
     time::Duration,
 };
+use trashradar_domain::{
+    candidate::{
+        ByteSize, CandidateId, CandidateUnit, Decision, FileKind, FsTimestamp, SafetyLevel,
+    },
+    category::CategoryId,
+};
 
 const DATABASE_FILE_NAME: &str = "index.sqlite3";
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+const SCHEMA_VERSION_V1: i64 = 1;
+
+/// Migration v1 creates the persistent file-record layer used by scanner output and
+/// MVP detectors. Later tasks add the migration runner (T-012), batched writer
+/// (T-013), and paged read API (T-014); this script is intentionally idempotent so
+/// databases created by T-010 can be opened and upgraded in place.
+const SCHEMA_V1_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS __trashradar_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS file_records (
+    candidate_id INTEGER PRIMARY KEY,
+    path TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+    created_at_filetime INTEGER,
+    modified_at_filetime INTEGER,
+    accessed_at_filetime INTEGER,
+    file_kind TEXT NOT NULL CHECK (
+        file_kind IN ('video', 'image', 'audio', 'archive', 'installer', 'disk_image', 'document', 'other')
+    ),
+    candidate_unit TEXT NOT NULL CHECK (candidate_unit IN ('file', 'folder')),
+    category TEXT NOT NULL CHECK (
+        category IN (
+            'large_files',
+            'old_files',
+            'forgotten_videos',
+            'duplicates',
+            'archives',
+            'installers',
+            'temp_files',
+            'app_caches',
+            'dev_artifacts'
+        )
+    ),
+    safety TEXT NOT NULL CHECK (safety IN ('safe_to_bulk', 'review_recommended')),
+    decision TEXT NOT NULL DEFAULT 'undecided' CHECK (decision IN ('undecided', 'keep', 'marked')),
+    detector_id TEXT NOT NULL,
+    explanation TEXT NOT NULL DEFAULT '',
+    attributes INTEGER NOT NULL DEFAULT 0 CHECK (attributes >= 0),
+    is_readonly INTEGER NOT NULL DEFAULT 0 CHECK (is_readonly IN (0, 1)),
+    is_hidden INTEGER NOT NULL DEFAULT 0 CHECK (is_hidden IN (0, 1)),
+    is_system INTEGER NOT NULL DEFAULT 0 CHECK (is_system IN (0, 1)),
+    is_temporary INTEGER NOT NULL DEFAULT 0 CHECK (is_temporary IN (0, 1)),
+    UNIQUE (category, path)
+);
+
+CREATE INDEX IF NOT EXISTS idx_file_records_category_size
+    ON file_records (category, size_bytes DESC, candidate_id);
+CREATE INDEX IF NOT EXISTS idx_file_records_category_accessed
+    ON file_records (category, accessed_at_filetime, candidate_id);
+CREATE INDEX IF NOT EXISTS idx_file_records_kind
+    ON file_records (file_kind, candidate_id);
+
+PRAGMA user_version = 1;
+"#;
 
 pub type Result<T> = std::result::Result<T, IndexSqliteError>;
 
@@ -20,6 +83,9 @@ pub type Result<T> = std::result::Result<T, IndexSqliteError>;
 pub enum IndexSqliteError {
     Io(std::io::Error),
     Sqlite(rusqlite::Error),
+    UnsupportedSchemaVersion(i64),
+    InvalidUnsignedInteger { field: &'static str, value: u64 },
+    InvalidEnumValue { field: &'static str, value: String },
 }
 
 impl fmt::Display for IndexSqliteError {
@@ -27,6 +93,18 @@ impl fmt::Display for IndexSqliteError {
         match self {
             Self::Io(error) => write!(f, "sqlite index I/O error: {error}"),
             Self::Sqlite(error) => write!(f, "sqlite index error: {error}"),
+            Self::UnsupportedSchemaVersion(version) => {
+                write!(f, "unsupported sqlite index schema version: {version}")
+            }
+            Self::InvalidUnsignedInteger { field, value } => {
+                write!(
+                    f,
+                    "value {value} for {field} does not fit into SQLite INTEGER"
+                )
+            }
+            Self::InvalidEnumValue { field, value } => {
+                write!(f, "invalid value {value:?} for {field}")
+            }
         }
     }
 }
@@ -36,6 +114,9 @@ impl Error for IndexSqliteError {
         match self {
             Self::Io(error) => Some(error),
             Self::Sqlite(error) => Some(error),
+            Self::UnsupportedSchemaVersion(_)
+            | Self::InvalidUnsignedInteger { .. }
+            | Self::InvalidEnumValue { .. } => None,
         }
     }
 }
@@ -58,6 +139,33 @@ pub struct IndexDatabase {
     connection: Connection,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FileAttributes {
+    pub raw_bits: u32,
+    pub is_readonly: bool,
+    pub is_hidden: bool,
+    pub is_system: bool,
+    pub is_temporary: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileRecord {
+    pub candidate_id: CandidateId,
+    pub path: String,
+    pub size: ByteSize,
+    pub created_at: Option<FsTimestamp>,
+    pub modified_at: Option<FsTimestamp>,
+    pub accessed_at: Option<FsTimestamp>,
+    pub kind: FileKind,
+    pub unit: CandidateUnit,
+    pub category: CategoryId,
+    pub safety: SafetyLevel,
+    pub decision: Decision,
+    pub detector_id: String,
+    pub explanation: String,
+    pub attributes: FileAttributes,
+}
+
 impl IndexDatabase {
     pub fn open_profile(profile_dir: impl AsRef<Path>) -> Result<Self> {
         Self::open(profile_dir.as_ref().join(DATABASE_FILE_NAME))
@@ -72,7 +180,7 @@ impl IndexDatabase {
 
         let connection = Connection::open(&path)?;
         configure_connection(&connection)?;
-        ensure_bootstrap_schema(&connection)?;
+        ensure_schema(&connection)?;
 
         Ok(Self { path, connection })
     }
@@ -92,6 +200,12 @@ impl IndexDatabase {
             .connection
             .query_row("PRAGMA foreign_keys", [], |row| row.get(0))?;
         Ok(enabled != 0)
+    }
+
+    pub fn schema_version(&self) -> Result<i64> {
+        self.connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .map_err(Into::into)
     }
 
     pub fn read_meta(&self, key: &str) -> Result<Option<String>> {
@@ -116,6 +230,132 @@ impl IndexDatabase {
 
         Ok(())
     }
+
+    pub fn upsert_file_record(&mut self, record: &FileRecord) -> Result<()> {
+        let candidate_id = sqlite_integer("candidate_id", record.candidate_id.0)?;
+        let size_bytes = sqlite_integer("size_bytes", record.size.0)?;
+        let attributes = sqlite_integer("attributes", u64::from(record.attributes.raw_bits))?;
+        let transaction = self.connection.transaction()?;
+
+        transaction.execute(
+            "INSERT INTO file_records (
+                candidate_id,
+                path,
+                size_bytes,
+                created_at_filetime,
+                modified_at_filetime,
+                accessed_at_filetime,
+                file_kind,
+                candidate_unit,
+                category,
+                safety,
+                decision,
+                detector_id,
+                explanation,
+                attributes,
+                is_readonly,
+                is_hidden,
+                is_system,
+                is_temporary
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+            ON CONFLICT(candidate_id) DO UPDATE SET
+                path = excluded.path,
+                size_bytes = excluded.size_bytes,
+                created_at_filetime = excluded.created_at_filetime,
+                modified_at_filetime = excluded.modified_at_filetime,
+                accessed_at_filetime = excluded.accessed_at_filetime,
+                file_kind = excluded.file_kind,
+                candidate_unit = excluded.candidate_unit,
+                category = excluded.category,
+                safety = excluded.safety,
+                decision = excluded.decision,
+                detector_id = excluded.detector_id,
+                explanation = excluded.explanation,
+                attributes = excluded.attributes,
+                is_readonly = excluded.is_readonly,
+                is_hidden = excluded.is_hidden,
+                is_system = excluded.is_system,
+                is_temporary = excluded.is_temporary",
+            params![
+                candidate_id,
+                record.path.as_str(),
+                size_bytes,
+                record.created_at.map(|timestamp| timestamp.0),
+                record.modified_at.map(|timestamp| timestamp.0),
+                record.accessed_at.map(|timestamp| timestamp.0),
+                file_kind_name(record.kind),
+                candidate_unit_name(record.unit),
+                category_name(record.category),
+                safety_level_name(record.safety),
+                decision_name(record.decision),
+                record.detector_id.as_str(),
+                record.explanation.as_str(),
+                attributes,
+                bool_integer(record.attributes.is_readonly),
+                bool_integer(record.attributes.is_hidden),
+                bool_integer(record.attributes.is_system),
+                bool_integer(record.attributes.is_temporary),
+            ],
+        )?;
+        transaction.commit()?;
+
+        Ok(())
+    }
+
+    pub fn read_file_record(&self, candidate_id: CandidateId) -> Result<Option<FileRecord>> {
+        let candidate_id = sqlite_integer("candidate_id", candidate_id.0)?;
+        let row = self
+            .connection
+            .query_row(
+                "SELECT
+                    candidate_id,
+                    path,
+                    size_bytes,
+                    created_at_filetime,
+                    modified_at_filetime,
+                    accessed_at_filetime,
+                    file_kind,
+                    candidate_unit,
+                    category,
+                    safety,
+                    decision,
+                    detector_id,
+                    explanation,
+                    attributes,
+                    is_readonly,
+                    is_hidden,
+                    is_system,
+                    is_temporary
+                FROM file_records
+                WHERE candidate_id = ?1",
+                [candidate_id],
+                |row| {
+                    Ok(StoredFileRecord {
+                        candidate_id: row.get(0)?,
+                        path: row.get(1)?,
+                        size_bytes: row.get(2)?,
+                        created_at: row.get(3)?,
+                        modified_at: row.get(4)?,
+                        accessed_at: row.get(5)?,
+                        file_kind: row.get(6)?,
+                        unit: row.get(7)?,
+                        category: row.get(8)?,
+                        safety: row.get(9)?,
+                        decision: row.get(10)?,
+                        detector_id: row.get(11)?,
+                        explanation: row.get(12)?,
+                        attributes: row.get(13)?,
+                        is_readonly: row.get(14)?,
+                        is_hidden: row.get(15)?,
+                        is_system: row.get(16)?,
+                        is_temporary: row.get(17)?,
+                    })
+                },
+            )
+            .optional()?;
+
+        row.map(FileRecord::try_from).transpose()
+    }
 }
 
 fn configure_connection(connection: &Connection) -> Result<()> {
@@ -127,15 +367,196 @@ fn configure_connection(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn ensure_bootstrap_schema(connection: &Connection) -> Result<()> {
-    connection.execute_batch(
-        "CREATE TABLE IF NOT EXISTS __trashradar_meta (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-        );",
-    )?;
+fn ensure_schema(connection: &Connection) -> Result<()> {
+    let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+
+    match version {
+        0 => connection.execute_batch(SCHEMA_V1_SQL)?,
+        SCHEMA_VERSION_V1 => {}
+        version => return Err(IndexSqliteError::UnsupportedSchemaVersion(version)),
+    }
 
     Ok(())
+}
+
+#[derive(Debug)]
+struct StoredFileRecord {
+    candidate_id: i64,
+    path: String,
+    size_bytes: i64,
+    created_at: Option<i64>,
+    modified_at: Option<i64>,
+    accessed_at: Option<i64>,
+    file_kind: String,
+    unit: String,
+    category: String,
+    safety: String,
+    decision: String,
+    detector_id: String,
+    explanation: String,
+    attributes: i64,
+    is_readonly: i64,
+    is_hidden: i64,
+    is_system: i64,
+    is_temporary: i64,
+}
+
+impl TryFrom<StoredFileRecord> for FileRecord {
+    type Error = IndexSqliteError;
+
+    fn try_from(record: StoredFileRecord) -> Result<Self> {
+        Ok(Self {
+            candidate_id: CandidateId(unsigned_integer("candidate_id", record.candidate_id)?),
+            path: record.path,
+            size: ByteSize(unsigned_integer("size_bytes", record.size_bytes)?),
+            created_at: record.created_at.map(FsTimestamp),
+            modified_at: record.modified_at.map(FsTimestamp),
+            accessed_at: record.accessed_at.map(FsTimestamp),
+            kind: parse_file_kind(&record.file_kind)?,
+            unit: parse_candidate_unit(&record.unit)?,
+            category: parse_category(&record.category)?,
+            safety: parse_safety_level(&record.safety)?,
+            decision: parse_decision(&record.decision)?,
+            detector_id: record.detector_id,
+            explanation: record.explanation,
+            attributes: FileAttributes {
+                raw_bits: unsigned_integer("attributes", record.attributes)? as u32,
+                is_readonly: record.is_readonly != 0,
+                is_hidden: record.is_hidden != 0,
+                is_system: record.is_system != 0,
+                is_temporary: record.is_temporary != 0,
+            },
+        })
+    }
+}
+
+fn sqlite_integer(field: &'static str, value: u64) -> Result<i64> {
+    i64::try_from(value).map_err(|_| IndexSqliteError::InvalidUnsignedInteger { field, value })
+}
+
+fn unsigned_integer(field: &'static str, value: i64) -> Result<u64> {
+    if value < 0 {
+        return Err(IndexSqliteError::InvalidEnumValue {
+            field,
+            value: value.to_string(),
+        });
+    }
+
+    Ok(value as u64)
+}
+
+fn bool_integer(value: bool) -> i64 {
+    i64::from(value)
+}
+
+fn file_kind_name(kind: FileKind) -> &'static str {
+    match kind {
+        FileKind::Video => "video",
+        FileKind::Image => "image",
+        FileKind::Audio => "audio",
+        FileKind::Archive => "archive",
+        FileKind::Installer => "installer",
+        FileKind::DiskImage => "disk_image",
+        FileKind::Document => "document",
+        FileKind::Other => "other",
+    }
+}
+
+fn parse_file_kind(value: &str) -> Result<FileKind> {
+    match value {
+        "video" => Ok(FileKind::Video),
+        "image" => Ok(FileKind::Image),
+        "audio" => Ok(FileKind::Audio),
+        "archive" => Ok(FileKind::Archive),
+        "installer" => Ok(FileKind::Installer),
+        "disk_image" => Ok(FileKind::DiskImage),
+        "document" => Ok(FileKind::Document),
+        "other" => Ok(FileKind::Other),
+        value => invalid_enum("file_kind", value),
+    }
+}
+
+fn candidate_unit_name(unit: CandidateUnit) -> &'static str {
+    match unit {
+        CandidateUnit::File => "file",
+        CandidateUnit::Folder => "folder",
+    }
+}
+
+fn parse_candidate_unit(value: &str) -> Result<CandidateUnit> {
+    match value {
+        "file" => Ok(CandidateUnit::File),
+        "folder" => Ok(CandidateUnit::Folder),
+        value => invalid_enum("candidate_unit", value),
+    }
+}
+
+fn category_name(category: CategoryId) -> &'static str {
+    match category {
+        CategoryId::LargeFiles => "large_files",
+        CategoryId::OldFiles => "old_files",
+        CategoryId::ForgottenVideos => "forgotten_videos",
+        CategoryId::Duplicates => "duplicates",
+        CategoryId::Archives => "archives",
+        CategoryId::Installers => "installers",
+        CategoryId::TempFiles => "temp_files",
+        CategoryId::AppCaches => "app_caches",
+        CategoryId::DevArtifacts => "dev_artifacts",
+    }
+}
+
+fn parse_category(value: &str) -> Result<CategoryId> {
+    match value {
+        "large_files" => Ok(CategoryId::LargeFiles),
+        "old_files" => Ok(CategoryId::OldFiles),
+        "forgotten_videos" => Ok(CategoryId::ForgottenVideos),
+        "duplicates" => Ok(CategoryId::Duplicates),
+        "archives" => Ok(CategoryId::Archives),
+        "installers" => Ok(CategoryId::Installers),
+        "temp_files" => Ok(CategoryId::TempFiles),
+        "app_caches" => Ok(CategoryId::AppCaches),
+        "dev_artifacts" => Ok(CategoryId::DevArtifacts),
+        value => invalid_enum("category", value),
+    }
+}
+
+fn safety_level_name(safety: SafetyLevel) -> &'static str {
+    match safety {
+        SafetyLevel::SafeToBulk => "safe_to_bulk",
+        SafetyLevel::ReviewRecommended => "review_recommended",
+    }
+}
+
+fn parse_safety_level(value: &str) -> Result<SafetyLevel> {
+    match value {
+        "safe_to_bulk" => Ok(SafetyLevel::SafeToBulk),
+        "review_recommended" => Ok(SafetyLevel::ReviewRecommended),
+        value => invalid_enum("safety", value),
+    }
+}
+
+fn decision_name(decision: Decision) -> &'static str {
+    match decision {
+        Decision::Undecided => "undecided",
+        Decision::Keep => "keep",
+        Decision::Marked => "marked",
+    }
+}
+
+fn parse_decision(value: &str) -> Result<Decision> {
+    match value {
+        "undecided" => Ok(Decision::Undecided),
+        "keep" => Ok(Decision::Keep),
+        "marked" => Ok(Decision::Marked),
+        value => invalid_enum("decision", value),
+    }
+}
+
+fn invalid_enum<T>(field: &'static str, value: &str) -> Result<T> {
+    Err(IndexSqliteError::InvalidEnumValue {
+        field,
+        value: value.to_string(),
+    })
 }
 
 #[cfg(test)]
@@ -193,6 +614,93 @@ mod tests {
             reader.read_meta("probe").expect("read after commit"),
             Some("during".to_string())
         );
+
+        cleanup(profile_dir);
+    }
+
+    #[test]
+    fn creates_schema_v1_for_file_records() {
+        let profile_dir = temp_profile_dir("schema-v1");
+        let database = IndexDatabase::open_profile(&profile_dir).expect("open profile database");
+
+        assert_eq!(database.schema_version().expect("schema version"), 1);
+
+        let columns: Vec<String> = database
+            .connection
+            .prepare("PRAGMA table_info(file_records)")
+            .expect("prepare table info")
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("query table info")
+            .collect::<std::result::Result<_, _>>()
+            .expect("read columns");
+
+        for expected in [
+            "candidate_id",
+            "path",
+            "size_bytes",
+            "created_at_filetime",
+            "modified_at_filetime",
+            "accessed_at_filetime",
+            "file_kind",
+            "candidate_unit",
+            "category",
+            "safety",
+            "decision",
+            "detector_id",
+            "explanation",
+            "attributes",
+            "is_readonly",
+            "is_hidden",
+            "is_system",
+            "is_temporary",
+        ] {
+            assert!(
+                columns.iter().any(|column| column == expected),
+                "missing column {expected}"
+            );
+        }
+
+        cleanup(profile_dir);
+    }
+
+    #[test]
+    fn upserts_and_reads_file_record_with_mvp_attributes() {
+        let profile_dir = temp_profile_dir("file-record");
+        let mut database =
+            IndexDatabase::open_profile(&profile_dir).expect("open profile database");
+        let record = FileRecord {
+            candidate_id: CandidateId(42),
+            path: r"C:\Users\Ada\Videos\raw.mov".to_string(),
+            size: ByteSize(4_294_967_296),
+            created_at: Some(FsTimestamp(132_537_600_000_000_000)),
+            modified_at: Some(FsTimestamp(132_624_000_000_000_000)),
+            accessed_at: Some(FsTimestamp(132_710_400_000_000_000)),
+            kind: FileKind::Video,
+            unit: CandidateUnit::File,
+            category: CategoryId::ForgottenVideos,
+            safety: SafetyLevel::ReviewRecommended,
+            decision: Decision::Undecided,
+            detector_id: "forgotten_videos.v1".to_string(),
+            explanation: "large video not opened recently".to_string(),
+            attributes: FileAttributes {
+                raw_bits: 0x23,
+                is_readonly: true,
+                is_hidden: true,
+                is_system: false,
+                is_temporary: false,
+            },
+        };
+
+        database
+            .upsert_file_record(&record)
+            .expect("upsert file record");
+
+        let stored = database
+            .read_file_record(CandidateId(42))
+            .expect("read file record")
+            .expect("stored record");
+
+        assert_eq!(stored, record);
 
         cleanup(profile_dir);
     }
