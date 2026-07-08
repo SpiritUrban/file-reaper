@@ -6,6 +6,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod events;
 mod ipc;
 mod logging;
 
@@ -21,7 +22,11 @@ fn main() {
     }
 
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![ipc::app_health, ipc::app_ping])
+        .invoke_handler(tauri::generate_handler![
+            ipc::app_health,
+            ipc::app_ping,
+            ipc::app_test_stream
+        ])
         .run(tauri::generate_context!())
         .expect("не вдалося запустити TrashRadar shell");
 }
