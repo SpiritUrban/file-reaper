@@ -7,6 +7,7 @@ edition.workspace = true
 [dependencies]
 trashradar-domain = { path = "../../domain" }
 trashradar-app = { path = "../../app" }
+tracing = { workspace = true }
 
 [dev-dependencies]
 # Для елевованого інтеграційного тесту T-024: скан у справжній HotIndex.

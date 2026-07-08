@@ -47,6 +47,8 @@ pub struct IndexingStats {
     pub files_indexed: u64,
     /// Пропущено (шлях не розкрутився — сирота/цикл).
     pub skipped_no_path: u64,
+    /// Пошкоджені записи MFT, пропущені з логом (T-025).
+    pub corrupt: u64,
     /// Кількість зданих батчів.
     pub batches: u64,
 }
@@ -153,8 +155,10 @@ where
 
     // Прохід 2: файли → батчі у приймач (сток паузить продюсера = зворотний тиск).
     let mut batcher = Batcher::new(&resolver, batch_size, sink);
-    crate::volume::enumerate_with(drive, |e| batcher.push(e))?;
-    batcher.finish()
+    let scan_stats = crate::volume::enumerate_with(drive, |e| batcher.push(e))?;
+    let mut stats = batcher.finish()?;
+    stats.corrupt = scan_stats.corrupt; // пропуски пошкоджених записів (T-025)
+    Ok(stats)
 }
 
 #[cfg(test)]

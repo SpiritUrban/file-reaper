@@ -124,7 +124,7 @@ fn open_volume(drive: char) -> Result<VolumeHandle, CoreError> {
     };
     if handle as isize == -1 {
         return Err(last_os_error(&format!(
-            "Не вдалося відкрити том {drive}: (потрібні права адміністратора)"
+            "Не вдалося відкрити том {drive}: (потрібні адмін-права або том зайнятий/недоступний)"
         )));
     }
     Ok(VolumeHandle(handle))
@@ -191,6 +191,8 @@ pub struct ScanStats {
     pub records_scanned: u64,
     pub entries: u64,
     pub directories: u64,
+    /// Пошкоджені записи, пропущені з логом (T-025).
+    pub corrupt: u64,
 }
 
 /// Перелічує всі записи `$MFT` тому, викликаючи `sink` для кожного валідного
@@ -254,17 +256,37 @@ pub fn enumerate_with(
                 let rec = &buffer[pos..pos + rec_size as usize];
                 let record_number = stats.records_scanned;
                 stats.records_scanned += 1;
-                if let Some(entry) = parse_record(rec, record_number, sector) {
-                    stats.entries += 1;
-                    if entry.is_directory {
-                        stats.directories += 1;
+                match parse_record(rec, record_number, sector) {
+                    Ok(Some(entry)) => {
+                        stats.entries += 1;
+                        if entry.is_directory {
+                            stats.directories += 1;
+                        }
+                        sink(entry);
                     }
-                    sink(entry);
+                    Ok(None) => {} // нормальний пропуск (невживаний/розширювальний)
+                    Err(err) => {
+                        // Пошкоджений запис: пропускаємо з логом, скан триває (T-025).
+                        stats.corrupt += 1;
+                        tracing::debug!(
+                            record = record_number,
+                            reason = err.reason(),
+                            "пропущено пошкоджений запис MFT"
+                        );
+                    }
                 }
                 pos += rec_size as usize;
             }
             done += chunk as u64;
         }
+    }
+
+    if stats.corrupt > 0 {
+        tracing::warn!(
+            corrupt = stats.corrupt,
+            scanned = stats.records_scanned,
+            "MFT-скан пропустив пошкоджені записи"
+        );
     }
 
     Ok(stats)
@@ -276,4 +298,17 @@ pub fn enumerate(drive: char) -> Result<Vec<ScanEntry>, CoreError> {
     let mut out = Vec::new();
     enumerate_with(drive, |e| out.push(e))?;
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use trashradar_domain::error::ErrorCode;
+
+    #[test]
+    fn non_alphabetic_drive_is_invalid_argument() {
+        // Недоступний/некоректний том → чиста типізована помилка, не паніка (T-025).
+        let err = enumerate('1').expect_err("некоректна літера тому");
+        assert_eq!(err.code, ErrorCode::InvalidArgument);
+    }
 }

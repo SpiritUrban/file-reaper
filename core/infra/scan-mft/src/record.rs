@@ -28,6 +28,35 @@ const DOS_HIDDEN: u32 = 0x0002;
 const DOS_SYSTEM: u32 = 0x0004;
 const DOS_TEMPORARY: u32 = 0x0100;
 
+/// Пошкодження запису MFT (T-025). Такий запис пропускається з логом, а скан
+/// доходить до кінця зі статистикою пропусків. Відрізняється від нормального
+/// пропуску (невживаний/розширювальний/без імені запис), який не є помилкою.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordError {
+    /// Сигнатура `BAAD` — запис позначено файловою системою як пошкоджений.
+    BadSignature,
+    /// Update Sequence Array не збігається — запис торнутий (частковий запис).
+    TornFixup,
+    /// Структурно некоректний запис (зсуви/довжини виходять за межі).
+    Malformed,
+}
+
+impl RecordError {
+    pub fn reason(self) -> &'static str {
+        match self {
+            RecordError::BadSignature => "bad_signature",
+            RecordError::TornFixup => "torn_fixup",
+            RecordError::Malformed => "malformed",
+        }
+    }
+}
+
+impl std::fmt::Display for RecordError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.reason())
+    }
+}
+
 fn u16le(b: &[u8], at: usize) -> Option<u16> {
     b.get(at..at + 2)
         .map(|s| u16::from_le_bytes(s.try_into().unwrap()))
@@ -86,55 +115,74 @@ fn apply_fixups(
     usa_offset: usize,
     usa_count: usize,
     bytes_per_sector: usize,
-) -> Option<()> {
+) -> Result<(), RecordError> {
     if usa_count == 0 || bytes_per_sector < 2 {
-        return None;
+        return Err(RecordError::Malformed);
     }
-    let usn = u16le(buf, usa_offset)?;
+    let usn = u16le(buf, usa_offset).ok_or(RecordError::Malformed)?;
     let sectors = usa_count - 1;
     for i in 0..sectors {
         let sector_end = (i + 1) * bytes_per_sector;
         if sector_end > buf.len() {
-            return None;
+            return Err(RecordError::Malformed);
         }
         let last2 = sector_end - 2;
         let usa_entry = usa_offset + 2 * (i + 1);
-        let original = u16le(buf, usa_entry)?;
+        let original = u16le(buf, usa_entry).ok_or(RecordError::Malformed)?;
         // Кожен сектор мусить нести check-значення USN на своїх останніх 2 байтах.
-        if u16le(buf, last2)? != usn {
-            return None;
+        if u16le(buf, last2).ok_or(RecordError::Malformed)? != usn {
+            return Err(RecordError::TornFixup);
         }
         let bytes = original.to_le_bytes();
         buf[last2] = bytes[0];
         buf[last2 + 1] = bytes[1];
     }
-    Some(())
+    Ok(())
 }
 
-/// Розбирає один запис MFT завдовжки `record_size` байтів.
+/// Розбирає один запис MFT завдовжки `record_size` байтів (T-021, T-025).
 ///
-/// Повертає `None` для записів, які не є кандидатами на перелік: невживані,
-/// розширювальні (extension) записи, або без жодного `$FILE_NAME`.
-pub fn parse_record(raw: &[u8], record_number: u64, bytes_per_sector: u16) -> Option<ScanEntry> {
-    if raw.len() < 0x30 || &raw[0..4] != b"FILE" {
-        return None;
+/// - `Ok(Some(entry))` — валідний файл/тека;
+/// - `Ok(None)` — нормальний пропуск (невживаний/розширювальний запис,
+///   нерозмічена область, запис без `$FILE_NAME`) — це НЕ помилка;
+/// - `Err(RecordError)` — пошкоджений запис (`BAAD`, торнутий фіксап,
+///   структурна вада): пропускається з логом, скан продовжується (T-025).
+pub fn parse_record(
+    raw: &[u8],
+    record_number: u64,
+    bytes_per_sector: u16,
+) -> Result<Option<ScanEntry>, RecordError> {
+    if raw.len() < 0x30 {
+        return Ok(None); // надто коротко для заголовка — нерозмічена область
     }
-    let flags = u16le(raw, 0x16)?;
-    if flags & FLAG_IN_USE == 0 {
-        return None; // невживаний запис
-    }
-    // Розширювальний запис: його атрибути належать базовому — пропускаємо.
-    if u64le(raw, 0x20)? & MFT_REF_MASK != 0 {
-        return None;
+    match &raw[0..4] {
+        b"FILE" => {}
+        b"BAAD" => return Err(RecordError::BadSignature),
+        _ => return Ok(None), // нулі/сміття — нерозміщений запис, не помилка
     }
 
-    let usa_offset = u16le(raw, 0x04)? as usize;
-    let usa_count = u16le(raw, 0x06)? as usize;
+    let flags = u16le(raw, 0x16).ok_or(RecordError::Malformed)?;
+    if flags & FLAG_IN_USE == 0 {
+        return Ok(None); // невживаний (видалений) запис
+    }
+    // Розширювальний запис: його атрибути належать базовому — пропускаємо.
+    if u64le(raw, 0x20).ok_or(RecordError::Malformed)? & MFT_REF_MASK != 0 {
+        return Ok(None);
+    }
+
+    let usa_offset = u16le(raw, 0x04).ok_or(RecordError::Malformed)? as usize;
+    let usa_count = u16le(raw, 0x06).ok_or(RecordError::Malformed)? as usize;
     let mut buf = raw.to_vec();
     apply_fixups(&mut buf, usa_offset, usa_count, bytes_per_sector as usize)?;
 
     let is_directory = flags & FLAG_DIRECTORY != 0;
-    let first_attr = u16le(&buf, 0x14)? as usize;
+    Ok(parse_attributes(&buf, record_number, is_directory))
+}
+
+/// Розбирає список атрибутів запису після застосування фіксапів.
+/// `None` — запис не дає корисної одиниці (немає `$FILE_NAME` тощо).
+fn parse_attributes(buf: &[u8], record_number: u64, is_directory: bool) -> Option<ScanEntry> {
+    let first_attr = u16le(buf, 0x14)? as usize;
 
     let mut best_name: Option<(u8, String, u64)> = None; // (rank, name, parent_ref)
     let mut si: Option<(u64, u64, u64, u32)> = None; // created, modified, accessed, dos
@@ -143,11 +191,11 @@ pub fn parse_record(raw: &[u8], record_number: u64, bytes_per_sector: u16) -> Op
 
     let mut off = first_attr;
     while off + 8 <= buf.len() {
-        let atype = u32le(&buf, off)?;
+        let atype = u32le(buf, off)?;
         if atype == ATTR_END {
             break;
         }
-        let alen = u32le(&buf, off + 4)? as usize;
+        let alen = u32le(buf, off + 4)? as usize;
         if alen < 8 || off + alen > buf.len() {
             break;
         }
@@ -155,20 +203,20 @@ pub fn parse_record(raw: &[u8], record_number: u64, bytes_per_sector: u16) -> Op
 
         match atype {
             ATTR_STANDARD_INFORMATION => {
-                let voff = u16le(&buf, off + 0x14)? as usize;
+                let voff = u16le(buf, off + 0x14)? as usize;
                 let v = off + voff;
                 si = Some((
-                    u64le(&buf, v)?,
-                    u64le(&buf, v + 0x08)?,
-                    u64le(&buf, v + 0x18)?,
-                    u32le(&buf, v + 0x20)?,
+                    u64le(buf, v)?,
+                    u64le(buf, v + 0x08)?,
+                    u64le(buf, v + 0x18)?,
+                    u32le(buf, v + 0x20)?,
                 ));
             }
             ATTR_FILE_NAME => {
-                let voff = u16le(&buf, off + 0x14)? as usize;
+                let voff = u16le(buf, off + 0x14)? as usize;
                 let v = off + voff;
-                let parent = u64le(&buf, v)? & MFT_REF_MASK;
-                fn_real_size = u64le(&buf, v + 0x30)?;
+                let parent = u64le(buf, v)? & MFT_REF_MASK;
+                fn_real_size = u64le(buf, v + 0x30)?;
                 let name_len = *buf.get(v + 0x40)? as usize;
                 let namespace = *buf.get(v + 0x41)?;
                 let start = v + 0x42;
@@ -183,9 +231,9 @@ pub fn parse_record(raw: &[u8], record_number: u64, bytes_per_sector: u16) -> Op
             // Лише unnamed default-потік (name_length == 0) дає розмір файла.
             ATTR_DATA if buf.get(off + 9).copied() == Some(0) => {
                 data_size = Some(if non_resident == 0 {
-                    u32le(&buf, off + 0x10)? as u64
+                    u32le(buf, off + 0x10)? as u64
                 } else {
-                    u64le(&buf, off + 0x30)?
+                    u64le(buf, off + 0x30)?
                 });
             }
             _ => {}
@@ -226,7 +274,7 @@ pub fn extract_mft_runs(raw: &[u8], bytes_per_sector: u16) -> Option<Vec<(Option
     let usa_offset = u16le(raw, 0x04)? as usize;
     let usa_count = u16le(raw, 0x06)? as usize;
     let mut buf = raw.to_vec();
-    apply_fixups(&mut buf, usa_offset, usa_count, bytes_per_sector as usize)?;
+    apply_fixups(&mut buf, usa_offset, usa_count, bytes_per_sector as usize).ok()?;
 
     let mut off = u16le(&buf, 0x14)? as usize;
     while off + 8 <= buf.len() {
@@ -399,7 +447,9 @@ mod tests {
     #[test]
     fn parses_file_record_metadata() {
         let rec = build_record("holiday.mp4", 5, false, 10);
-        let e = parse_record(&rec, 42, SECTOR).expect("valid file record");
+        let e = parse_record(&rec, 42, SECTOR)
+            .expect("not corrupt")
+            .expect("valid file record");
         assert_eq!(e.file_ref, 42);
         assert_eq!(e.parent_ref, 5);
         assert_eq!(e.name, "holiday.mp4");
@@ -416,7 +466,9 @@ mod tests {
     #[test]
     fn directory_record_has_zero_size_and_flag() {
         let rec = build_record("Videos", 5, true, 0);
-        let e = parse_record(&rec, 7, SECTOR).expect("valid dir record");
+        let e = parse_record(&rec, 7, SECTOR)
+            .expect("not corrupt")
+            .expect("valid dir record");
         assert!(e.is_directory);
         assert_eq!(e.size, ByteSize(0));
         assert_eq!(e.name, "Videos");
@@ -426,37 +478,46 @@ mod tests {
     fn fixups_restore_sector_tail_bytes() {
         let rec = build_record("f.txt", 5, false, 4);
         // Після фіксапів останні 2 байти секторів = оригінали з USA.
-        let e = parse_record(&rec, 1, SECTOR);
-        assert!(e.is_some());
+        assert!(matches!(parse_record(&rec, 1, SECTOR), Ok(Some(_))));
     }
 
     #[test]
-    fn rejects_record_with_torn_fixup() {
+    fn torn_fixup_is_reported_as_corrupt() {
         let mut rec = build_record("f.txt", 5, false, 4);
         // Псуємо check-значення на межі сектора → запис вважається торнутим.
         put16(&mut rec, 510, 0x9999);
-        assert!(parse_record(&rec, 1, SECTOR).is_none());
+        assert_eq!(parse_record(&rec, 1, SECTOR), Err(RecordError::TornFixup));
     }
 
     #[test]
-    fn skips_unused_record() {
-        let mut rec = build_record("f.txt", 5, false, 4);
-        put16(&mut rec, 0x16, 0); // прапорець in-use знято
-        assert!(parse_record(&rec, 1, SECTOR).is_none());
-    }
-
-    #[test]
-    fn skips_extension_record() {
-        let mut rec = build_record("f.txt", 5, false, 4);
-        put64(&mut rec, 0x20, 99); // base ref != 0 → розширювальний запис
-        assert!(parse_record(&rec, 1, SECTOR).is_none());
-    }
-
-    #[test]
-    fn skips_non_file_signature() {
+    fn baad_signature_is_reported_as_corrupt() {
         let mut rec = build_record("f.txt", 5, false, 4);
         rec[0..4].copy_from_slice(b"BAAD");
-        assert!(parse_record(&rec, 1, SECTOR).is_none());
+        assert_eq!(
+            parse_record(&rec, 1, SECTOR),
+            Err(RecordError::BadSignature)
+        );
+    }
+
+    #[test]
+    fn unused_record_is_benign_skip() {
+        let mut rec = build_record("f.txt", 5, false, 4);
+        put16(&mut rec, 0x16, 0); // прапорець in-use знято
+        assert_eq!(parse_record(&rec, 1, SECTOR), Ok(None));
+    }
+
+    #[test]
+    fn extension_record_is_benign_skip() {
+        let mut rec = build_record("f.txt", 5, false, 4);
+        put64(&mut rec, 0x20, 99); // base ref != 0 → розширювальний запис
+        assert_eq!(parse_record(&rec, 1, SECTOR), Ok(None));
+    }
+
+    #[test]
+    fn unallocated_record_is_benign_skip() {
+        // Нульова сигнатура (нерозміщений запис) — не помилка.
+        let rec = vec![0u8; REC];
+        assert_eq!(parse_record(&rec, 1, SECTOR), Ok(None));
     }
 
     #[test]
@@ -483,7 +544,7 @@ mod tests {
         }
         put32(&mut rec, dos + alen, ATTR_END);
 
-        let e = parse_record(&rec, 1, SECTOR).unwrap();
+        let e = parse_record(&rec, 1, SECTOR).unwrap().unwrap();
         assert_eq!(e.name, "longname.txt");
     }
 

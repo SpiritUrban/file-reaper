@@ -3671,6 +3671,7 @@ dependencies = [
 name = "trashradar-scan-mft"
 version = "0.1.0"
 dependencies = [
+ "tracing",
  "trashradar-app",
  "trashradar-domain",
  "trashradar-index-memory",
