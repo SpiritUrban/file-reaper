@@ -1,0 +1,15 @@
+[package]
+name = "trashradar-shell"
+description = "Tauri-оболонка: вікно, IPC-міст, життєвий цикл. Бізнес-логіки — нуль."
+version.workspace = true
+edition.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+trashradar-domain = { path = "../domain" }
+trashradar-app = { path = "../app" }

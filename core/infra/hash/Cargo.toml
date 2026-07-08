@@ -1,0 +1,9 @@
+[package]
+name = "trashradar-hash"
+description = "Адаптер Hasher: частковий хеш і потоковий BLAKE3 для каскаду дублікатів."
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+trashradar-domain = { path = "../../domain" }
+trashradar-app = { path = "../../app" }

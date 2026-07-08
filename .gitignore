@@ -1,0 +1,24 @@
+# Node / UI
+node_modules/
+ui/dist/
+*.tsbuildinfo
+*.local
+
+# Rust / Core
+core/target/
+**/*.rs.bk
+
+# Tauri
+core/shell/gen/
+
+# Claude Code (локальні налаштування)
+.claude/settings.local.json
+
+# IDE / OS
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
+
+# Logs
+*.log

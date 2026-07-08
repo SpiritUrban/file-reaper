@@ -1,0 +1,7 @@
+[package]
+name = "trashradar-platform-win"
+description = "Спільні WinAPI-обгортки: elevation, томи, атрибути файлів."
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

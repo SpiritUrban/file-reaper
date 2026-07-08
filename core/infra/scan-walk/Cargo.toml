@@ -1,0 +1,9 @@
+[package]
+name = "trashradar-scan-walk"
+description = "Адаптер ScanSource: паралельний обхід каталогів (резервний шлях)."
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+trashradar-domain = { path = "../../domain" }
+trashradar-app = { path = "../../app" }

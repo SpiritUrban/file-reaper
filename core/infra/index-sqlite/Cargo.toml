@@ -1,0 +1,9 @@
+[package]
+name = "trashradar-index-sqlite"
+description = "Адаптер IndexStore: persistent-індекс, міграції, журнал Quarantine (SQLite/WAL)."
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+trashradar-domain = { path = "../../domain" }
+trashradar-app = { path = "../../app" }

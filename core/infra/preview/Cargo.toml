@@ -1,0 +1,9 @@
+[package]
+name = "trashradar-preview"
+description = "Адаптер PreviewStore: черга P0–P3, декодери, скраб-смуги, кеш превью."
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+trashradar-domain = { path = "../../domain" }
+trashradar-app = { path = "../../app" }

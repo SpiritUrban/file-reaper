@@ -1,0 +1,9 @@
+[package]
+name = "trashradar-index-memory"
+description = "Адаптер HotIndex: компактний in-memory індекс з інтернуванням шляхів."
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+trashradar-domain = { path = "../../domain" }
+trashradar-app = { path = "../../app" }

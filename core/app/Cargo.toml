@@ -1,0 +1,8 @@
+[package]
+name = "trashradar-app"
+description = "Application Layer: use cases, оркестратори, порти. Залежить лише від domain."
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+trashradar-domain = { path = "../domain" }
