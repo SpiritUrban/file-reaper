@@ -11,7 +11,13 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# time: затримки/таймаути в async-командах. Tokio вже в дереві через Tauri.
+tokio = { version = "1", features = ["time"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 trashradar-domain = { path = "../domain" }
 trashradar-app = { path = "../app" }
+
+[dev-dependencies]
+# Mock-рантайм Tauri: наскрізні тести диспетчеризації команд без вікна.
+tauri = { version = "2", features = ["test"] }
