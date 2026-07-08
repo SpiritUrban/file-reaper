@@ -85,5 +85,7 @@ export async function subscribe<TPayload>(
   if (!isTauri()) {
     return () => undefined;
   }
-  return listen<TPayload>(name, (event) => handler(event.payload));
+  // Tauri забороняє крапки в іменах подій: на дроті app.test → app:test.
+  // Дзеркальне перетворення — core/shell/src/events.rs (wire_name).
+  return listen<TPayload>(name.replace(/\./g, ":"), (event) => handler(event.payload));
 }

@@ -1,0 +1,7 @@
+{
+  "$schema": "https://schema.tauri.app/capability/2",
+  "identifier": "main-window",
+  "description": "Базові можливості головного вікна: канал подій Core→UI (T-005). Розширюється лише явно, разом із задачею, що цього потребує.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

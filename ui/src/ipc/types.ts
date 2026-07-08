@@ -120,10 +120,30 @@ export interface PingReply {
   delayedMs: number;
 }
 
+/** Параметри app.test_stream (діагностика каналу подій). */
+export interface TestStreamPayload {
+  /** Скільки подій надіслати (1..=1000, дефолт 5). */
+  count?: number;
+  /** Пауза між подіями, мс (0..=1000, дефолт 50). */
+  intervalMs?: number;
+}
+
+/** Неблокуюче підтвердження прийняття app.test_stream. */
+export interface TestStreamAck {
+  accepted: number;
+}
+
+/** Подія діагностичного потоку (топік app.test). */
+export interface TestEvent {
+  seq: number;
+  of: number;
+}
+
 /** Імена команд (contracts/ipc-contract.json → commands). */
 export type CommandName =
   | "app.health"
   | "app.ping"
+  | "app.test_stream"
   | "scan.start"
   | "scan.stop"
   | "category.window"
@@ -140,6 +160,7 @@ export type CommandName =
 
 /** Імена подій (contracts/ipc-contract.json → events). */
 export type EventName =
+  | "app.test"
   | "scan.progress"
   | "cleanup.total_updated"
   | "category.updated"

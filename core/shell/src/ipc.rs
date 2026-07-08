@@ -11,7 +11,10 @@
 //!   функція тут + рядок у generate_handler + запис у contracts/.
 
 use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, Runtime};
 use trashradar_domain::error::CoreError;
+
+use crate::events;
 
 /// Відповідь `app.health` — використовується діагностикою (T-009).
 #[derive(Debug, Serialize)]
@@ -76,6 +79,58 @@ pub async fn app_ping(payload: Option<PingPayload>) -> Result<PingReply, CoreErr
     })
 }
 
+/// Параметри `app.test_stream`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TestStreamPayload {
+    /// Скільки подій надіслати (1..=1000, дефолт 5).
+    #[serde(default)]
+    pub count: Option<u32>,
+    /// Пауза між подіями, мс (0..=1000, дефолт 50).
+    #[serde(default)]
+    pub interval_ms: Option<u64>,
+}
+
+/// Неблокуюче підтвердження прийняття `app.test_stream`.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TestStreamAck {
+    pub accepted: u32,
+}
+
+/// Подія діагностичного потоку (топік `app.test`).
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TestEvent {
+    pub seq: u32,
+    pub of: u32,
+}
+
+/// Діагностичний стрім подій: команда підтверджує прийняття ОДРАЗУ,
+/// а події `app.test` летять у фоні — модель «команда → потік подій»
+/// з architecture.md §1.2 у мініатюрі.
+#[tauri::command]
+pub async fn app_test_stream<R: Runtime>(
+    app: AppHandle<R>,
+    payload: Option<TestStreamPayload>,
+) -> Result<TestStreamAck, CoreError> {
+    let payload = payload.unwrap_or_default();
+    let count = payload.count.unwrap_or(5).clamp(1, 1000);
+    let interval = std::time::Duration::from_millis(payload.interval_ms.unwrap_or(50).min(1000));
+    tracing::debug!(count, ?interval, "запит app.test_stream");
+
+    tauri::async_runtime::spawn(async move {
+        for seq in 1..=count {
+            events::emit(&app, events::topic::APP_TEST, &TestEvent { seq, of: count });
+            if seq < count {
+                tokio::time::sleep(interval).await;
+            }
+        }
+    });
+
+    Ok(TestStreamAck { accepted: count })
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Instant;
@@ -94,7 +149,11 @@ mod tests {
         tauri::WebviewWindow<tauri::test::MockRuntime>,
     ) {
         let app = mock_builder()
-            .invoke_handler(tauri::generate_handler![app_health, app_ping])
+            .invoke_handler(tauri::generate_handler![
+                app_health,
+                app_ping,
+                app_test_stream
+            ])
             .build(mock_context(noop_assets()))
             .expect("mock app");
         let webview = WebviewWindowBuilder::new(&app, "main", Default::default())
@@ -171,6 +230,119 @@ mod tests {
             .expect("повільний ping успішний");
         let reply: PingReply = serde_json::from_value(body_json(slow)).expect("reply");
         assert_eq!(reply.delayed_ms, 400);
+    }
+
+    /// Rust-підписник шини: збирає TestEvent-и у канал.
+    fn listen_test_events(
+        app: &tauri::App<tauri::test::MockRuntime>,
+    ) -> (tauri::EventId, std::sync::mpsc::Receiver<TestEvent>) {
+        use tauri::Listener;
+        let (tx, rx) = std::sync::mpsc::channel::<TestEvent>();
+        let id = app.listen(
+            crate::events::wire_name(crate::events::topic::APP_TEST),
+            move |event| {
+                let parsed: TestEvent = serde_json::from_str(event.payload()).expect("payload");
+                let _ = tx.send(parsed);
+            },
+        );
+        (id, rx)
+    }
+
+    fn drain_for(
+        rx: &std::sync::mpsc::Receiver<TestEvent>,
+        window: std::time::Duration,
+    ) -> Vec<TestEvent> {
+        let deadline = Instant::now() + window;
+        let mut received = Vec::new();
+        loop {
+            let now = Instant::now();
+            if now >= deadline {
+                break;
+            }
+            match rx.recv_timeout(deadline - now) {
+                Ok(event) => received.push(event),
+                Err(_) => break,
+            }
+        }
+        received
+    }
+
+    #[test]
+    fn test_stream_delivers_all_events_to_subscriber() {
+        let (app, webview) = test_app();
+        let (_id, rx) = listen_test_events(&app);
+        let ack = get_ipc_response(
+            &webview,
+            request(
+                "app_test_stream",
+                json!({ "payload": { "count": 5, "intervalMs": 1 } }),
+            ),
+        )
+        .expect("ack");
+        let ack: TestStreamAck = serde_json::from_value(body_json(ack)).expect("форма ack");
+        assert_eq!(ack.accepted, 5);
+
+        let received = drain_for(&rx, std::time::Duration::from_millis(1500));
+        assert_eq!(received.len(), 5, "усі події дійшли: {received:?}");
+        assert_eq!(received[0], TestEvent { seq: 1, of: 5 });
+        assert_eq!(received[4], TestEvent { seq: 5, of: 5 });
+    }
+
+    #[test]
+    fn ack_returns_before_stream_completes() {
+        let (app, webview) = test_app();
+        let (_id, rx) = listen_test_events(&app);
+        let started = Instant::now();
+        get_ipc_response(
+            &webview,
+            request(
+                "app_test_stream",
+                json!({ "payload": { "count": 4, "intervalMs": 150 } }),
+            ),
+        )
+        .expect("ack");
+        let ack_elapsed = started.elapsed();
+        assert!(
+            ack_elapsed.as_millis() < 300,
+            "підтвердження прийняття не чекає завершення потоку: {ack_elapsed:?}"
+        );
+        // Потік завершується вже ПІСЛЯ підтвердження.
+        let received = drain_for(&rx, std::time::Duration::from_millis(2000));
+        assert_eq!(received.len(), 4);
+    }
+
+    #[test]
+    fn unlisten_stops_delivery() {
+        use tauri::Listener;
+        let (app, webview) = test_app();
+        let (id, rx) = listen_test_events(&app);
+
+        get_ipc_response(
+            &webview,
+            request(
+                "app_test_stream",
+                json!({ "payload": { "count": 2, "intervalMs": 1 } }),
+            ),
+        )
+        .expect("перший потік");
+        let first = drain_for(&rx, std::time::Duration::from_millis(1000));
+        assert_eq!(first.len(), 2, "до відписки події доходять");
+
+        app.unlisten(id);
+
+        get_ipc_response(
+            &webview,
+            request(
+                "app_test_stream",
+                json!({ "payload": { "count": 3, "intervalMs": 1 } }),
+            ),
+        )
+        .expect("другий потік");
+        let after = drain_for(&rx, std::time::Duration::from_millis(500));
+        assert!(
+            after.is_empty(),
+            "після відписки доставка зупинена, отримано: {after:?}"
+        );
     }
 
     #[test]

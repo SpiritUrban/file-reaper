@@ -13,6 +13,11 @@
       "task": "T-004",
       "$comment": "Діагностика: payload {delayMs?, fail?} -> {version, delayedMs}; fail=true повертає error_envelope (invalid_argument)"
     },
+    "app.test_stream": {
+      "status": "implemented",
+      "task": "T-005",
+      "$comment": "Діагностика каналу подій: payload {count?, intervalMs?} -> ack {accepted} ОДРАЗУ; далі count подій app.test у фоні"
+    },
     "scan.start": { "status": "planned", "task": "T-033" },
     "scan.stop": { "status": "planned", "task": "T-033" },
     "category.window": { "status": "planned", "task": "T-014" },
@@ -28,6 +33,11 @@
     "search.candidates": { "status": "planned", "task": "T-018" }
   },
   "events": {
+    "app.test": {
+      "status": "implemented",
+      "task": "T-005",
+      "$comment": "Діагностичний потік {seq, of} — породжується командою app.test_stream"
+    },
     "scan.progress": { "status": "planned", "task": "T-033" },
     "cleanup.total_updated": { "status": "planned", "task": "T-055" },
     "category.updated": { "status": "planned", "task": "T-055" },
