@@ -66,8 +66,7 @@ pub fn init() -> Result<PathBuf, String> {
 
 /// `%LOCALAPPDATA%\TrashRadar\logs`.
 fn default_log_dir() -> Option<PathBuf> {
-    std::env::var_os("LOCALAPPDATA")
-        .map(|base| PathBuf::from(base).join("TrashRadar").join("logs"))
+    std::env::var_os("LOCALAPPDATA").map(|base| PathBuf::from(base).join("TrashRadar").join("logs"))
 }
 
 /// Паніки — у лог (з тим самим форматом), потім стандартний обробник.
