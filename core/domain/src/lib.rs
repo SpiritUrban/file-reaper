@@ -10,5 +10,6 @@
 
 pub mod candidate;
 pub mod category;
+pub mod error;
 pub mod quarantine;
 pub mod scan;
