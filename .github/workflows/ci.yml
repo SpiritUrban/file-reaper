@@ -59,3 +59,23 @@ jobs:
           workspaces: core
       - run: cargo check -p trashradar-shell
       - run: cargo clippy -p trashradar-shell -- -D warnings
+
+  bench:
+    name: Bench (index regression gate)
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: benches/index-bench
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: benches/index-bench
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      # Гейт T-019: детермінована метрика пам'яті валить білд при регресі >15%
+      # від закоміченого baseline.json; тайминги — попередження + абсолютна стеля.
+      - run: cargo run --release

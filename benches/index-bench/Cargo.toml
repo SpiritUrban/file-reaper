@@ -1,0 +1,22 @@
+[package]
+name = "trashradar-bench-index"
+description = "Бенчмарк-гейт in-memory індексу: пам'ять і швидкість на еталонному наборі (T-019)."
+version = "0.1.0"
+edition = "2021"
+license = "UNLICENSED"
+publish = false
+
+[[bin]]
+name = "index-bench"
+path = "src/main.rs"
+
+[dependencies]
+trashradar-domain = { path = "../../core/domain" }
+trashradar-app = { path = "../../core/app" }
+trashradar-index-memory = { path = "../../core/infra/index-memory" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+# Еталонні заміри роблять у release, щоб бенчмарк відбивав реальну збірку.
+opt-level = 3

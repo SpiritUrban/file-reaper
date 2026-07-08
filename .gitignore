@@ -6,6 +6,7 @@ ui/dist/
 
 # Rust / Core
 core/target/
+benches/**/target/
 **/*.rs.bk
 
 # Tauri
