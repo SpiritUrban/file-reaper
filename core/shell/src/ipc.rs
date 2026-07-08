@@ -11,6 +11,7 @@
 //!   функція тут + рядок у generate_handler + запис у contracts/.
 
 use serde::{Deserialize, Serialize};
+use std::time::Instant;
 use tauri::{AppHandle, Runtime};
 use trashradar_domain::error::CoreError;
 
@@ -120,11 +121,19 @@ pub async fn app_test_stream<R: Runtime>(
     tracing::debug!(count, ?interval, "запит app.test_stream");
 
     tauri::async_runtime::spawn(async move {
+        let mut counter_throttle =
+            events::CounterThrottle::new_at(std::time::Duration::from_millis(100), Instant::now());
         for seq in 1..=count {
             events::emit(&app, events::topic::APP_TEST, &TestEvent { seq, of: count });
+            if let Some(snapshot) = counter_throttle.observe(Instant::now(), 1) {
+                events::emit(&app, events::topic::APP_TEST_COUNTER, &snapshot);
+            }
             if seq < count {
                 tokio::time::sleep(interval).await;
             }
+        }
+        if let Some(snapshot) = counter_throttle.flush(Instant::now()) {
+            events::emit(&app, events::topic::APP_TEST_COUNTER, &snapshot);
         }
     });
 

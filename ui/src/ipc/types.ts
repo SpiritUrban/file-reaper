@@ -139,6 +139,12 @@ export interface TestEvent {
   of: number;
 }
 
+/** Aggregated diagnostic counter event for T-006 throttling checks. */
+export interface CounterSnapshot {
+  delta: number;
+  total: number;
+}
+
 /** Імена команд (contracts/ipc-contract.json → commands). */
 export type CommandName =
   | "app.health"
@@ -161,6 +167,7 @@ export type CommandName =
 /** Імена подій (contracts/ipc-contract.json → events). */
 export type EventName =
   | "app.test"
+  | "app.test_counter"
   | "scan.progress"
   | "cleanup.total_updated"
   | "category.updated"
