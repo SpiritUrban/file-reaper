@@ -20,11 +20,11 @@ use trashradar_domain::{
 const DATABASE_FILE_NAME: &str = "index.sqlite3";
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const SCHEMA_VERSION_V1: i64 = 1;
+const LATEST_SCHEMA_VERSION: i64 = SCHEMA_VERSION_V1;
 
 /// Migration v1 creates the persistent file-record layer used by scanner output and
-/// MVP detectors. Later tasks add the migration runner (T-012), batched writer
-/// (T-013), and paged read API (T-014); this script is intentionally idempotent so
-/// databases created by T-010 can be opened and upgraded in place.
+/// MVP detectors. The migration runner executes this script for databases created
+/// by T-010; later tasks add the batched writer (T-013) and paged read API (T-014).
 const SCHEMA_V1_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS __trashradar_meta (
     key TEXT PRIMARY KEY,
@@ -77,6 +77,11 @@ CREATE INDEX IF NOT EXISTS idx_file_records_kind
 PRAGMA user_version = 1;
 "#;
 
+const MIGRATIONS: &[Migration] = &[Migration {
+    version: SCHEMA_VERSION_V1,
+    sql: SCHEMA_V1_SQL,
+}];
+
 pub type Result<T> = std::result::Result<T, IndexSqliteError>;
 
 #[derive(Debug)]
@@ -84,8 +89,19 @@ pub enum IndexSqliteError {
     Io(std::io::Error),
     Sqlite(rusqlite::Error),
     UnsupportedSchemaVersion(i64),
-    InvalidUnsignedInteger { field: &'static str, value: u64 },
-    InvalidEnumValue { field: &'static str, value: String },
+    SchemaMigrationFailed {
+        from: i64,
+        to: i64,
+        source: rusqlite::Error,
+    },
+    InvalidUnsignedInteger {
+        field: &'static str,
+        value: u64,
+    },
+    InvalidEnumValue {
+        field: &'static str,
+        value: String,
+    },
 }
 
 impl fmt::Display for IndexSqliteError {
@@ -95,6 +111,12 @@ impl fmt::Display for IndexSqliteError {
             Self::Sqlite(error) => write!(f, "sqlite index error: {error}"),
             Self::UnsupportedSchemaVersion(version) => {
                 write!(f, "unsupported sqlite index schema version: {version}")
+            }
+            Self::SchemaMigrationFailed { from, to, source } => {
+                write!(
+                    f,
+                    "failed to migrate sqlite index schema from {from} to {to}: {source}"
+                )
             }
             Self::InvalidUnsignedInteger { field, value } => {
                 write!(
@@ -114,6 +136,7 @@ impl Error for IndexSqliteError {
         match self {
             Self::Io(error) => Some(error),
             Self::Sqlite(error) => Some(error),
+            Self::SchemaMigrationFailed { source, .. } => Some(source),
             Self::UnsupportedSchemaVersion(_)
             | Self::InvalidUnsignedInteger { .. }
             | Self::InvalidEnumValue { .. } => None,
@@ -137,6 +160,12 @@ impl From<rusqlite::Error> for IndexSqliteError {
 pub struct IndexDatabase {
     path: PathBuf,
     connection: Connection,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Migration {
+    version: i64,
+    sql: &'static str,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -178,9 +207,17 @@ impl IndexDatabase {
             fs::create_dir_all(parent)?;
         }
 
-        let connection = Connection::open(&path)?;
-        configure_connection(&connection)?;
-        ensure_schema(&connection)?;
+        let mut connection = open_configured_connection(&path)?;
+        if let Err(error) = ensure_schema(&mut connection) {
+            if !requires_cold_start_reset(&error) {
+                return Err(error);
+            }
+
+            drop(connection);
+            reset_database_files(&path)?;
+            connection = open_configured_connection(&path)?;
+            ensure_schema(&mut connection)?;
+        }
 
         Ok(Self { path, connection })
     }
@@ -358,6 +395,12 @@ impl IndexDatabase {
     }
 }
 
+fn open_configured_connection(path: &Path) -> Result<Connection> {
+    let connection = Connection::open(path)?;
+    configure_connection(&connection)?;
+    Ok(connection)
+}
+
 fn configure_connection(connection: &Connection) -> Result<()> {
     connection.pragma_update(None, "journal_mode", "WAL")?;
     connection.pragma_update(None, "synchronous", "NORMAL")?;
@@ -367,16 +410,82 @@ fn configure_connection(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn ensure_schema(connection: &Connection) -> Result<()> {
+fn ensure_schema(connection: &mut Connection) -> Result<()> {
     let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
 
-    match version {
-        0 => connection.execute_batch(SCHEMA_V1_SQL)?,
-        SCHEMA_VERSION_V1 => {}
-        version => return Err(IndexSqliteError::UnsupportedSchemaVersion(version)),
+    if version > LATEST_SCHEMA_VERSION {
+        return Err(IndexSqliteError::UnsupportedSchemaVersion(version));
+    }
+
+    let mut current_version = version;
+    for migration in MIGRATIONS
+        .iter()
+        .filter(|migration| migration.version > version)
+    {
+        run_migration(connection, current_version, migration)?;
+        current_version = migration.version;
     }
 
     Ok(())
+}
+
+fn run_migration(connection: &mut Connection, from: i64, migration: &Migration) -> Result<()> {
+    let transaction =
+        connection
+            .transaction()
+            .map_err(|source| IndexSqliteError::SchemaMigrationFailed {
+                from,
+                to: migration.version,
+                source,
+            })?;
+
+    transaction.execute_batch(migration.sql).map_err(|source| {
+        IndexSqliteError::SchemaMigrationFailed {
+            from,
+            to: migration.version,
+            source,
+        }
+    })?;
+
+    transaction
+        .commit()
+        .map_err(|source| IndexSqliteError::SchemaMigrationFailed {
+            from,
+            to: migration.version,
+            source,
+        })?;
+
+    Ok(())
+}
+
+fn requires_cold_start_reset(error: &IndexSqliteError) -> bool {
+    matches!(error, IndexSqliteError::SchemaMigrationFailed { .. })
+}
+
+fn reset_database_files(path: &Path) -> Result<()> {
+    for file_path in database_files(path) {
+        match fs::remove_file(&file_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+
+    Ok(())
+}
+
+fn database_files(path: &Path) -> [PathBuf; 3] {
+    [
+        path.to_path_buf(),
+        path_with_suffix(path, "-wal"),
+        path_with_suffix(path, "-shm"),
+    ]
+}
+
+fn path_with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut value = path.as_os_str().to_os_string();
+    value.push(suffix);
+    PathBuf::from(value)
 }
 
 #[derive(Debug)]
@@ -659,6 +768,91 @@ mod tests {
                 "missing column {expected}"
             );
         }
+
+        cleanup(profile_dir);
+    }
+
+    #[test]
+    fn migrates_t010_database_to_latest_schema() {
+        let profile_dir = temp_profile_dir("migrate-t010");
+        let database_path = profile_dir.join(DATABASE_FILE_NAME);
+        fs::create_dir_all(&profile_dir).expect("create profile dir");
+
+        {
+            let connection = Connection::open(&database_path).expect("open legacy database");
+            connection
+                .execute_batch(
+                    "CREATE TABLE __trashradar_meta (
+                        key TEXT PRIMARY KEY,
+                        value TEXT NOT NULL
+                    );
+                    INSERT INTO __trashradar_meta (key, value) VALUES ('legacy', 'kept');
+                    PRAGMA user_version = 0;",
+                )
+                .expect("create legacy schema");
+        }
+
+        let database = IndexDatabase::open(&database_path).expect("migrate database");
+
+        assert_eq!(database.schema_version().expect("schema version"), 1);
+        assert_eq!(
+            database.read_meta("legacy").expect("read migrated meta"),
+            Some("kept".to_string())
+        );
+
+        let table_exists: i64 = database
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'file_records'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query file_records table");
+        assert_eq!(table_exists, 1);
+
+        cleanup(profile_dir);
+    }
+
+    #[test]
+    fn failed_schema_migration_reopens_with_clean_cold_start() {
+        let profile_dir = temp_profile_dir("migration-cold-start");
+        let database_path = profile_dir.join(DATABASE_FILE_NAME);
+        fs::create_dir_all(&profile_dir).expect("create profile dir");
+
+        {
+            let connection = Connection::open(&database_path).expect("open legacy database");
+            connection
+                .execute_batch(
+                    "CREATE TABLE __trashradar_meta (
+                        key TEXT PRIMARY KEY,
+                        value TEXT NOT NULL
+                    );
+                    INSERT INTO __trashradar_meta (key, value) VALUES ('legacy', 'discarded');
+                    CREATE TABLE file_records (bad INTEGER NOT NULL);
+                    PRAGMA user_version = 0;",
+                )
+                .expect("create broken legacy schema");
+        }
+
+        let database = IndexDatabase::open(&database_path).expect("cold-start database");
+
+        assert_eq!(database.schema_version().expect("schema version"), 1);
+        assert_eq!(
+            database.read_meta("legacy").expect("read legacy meta"),
+            None
+        );
+
+        let columns: Vec<String> = database
+            .connection
+            .prepare("PRAGMA table_info(file_records)")
+            .expect("prepare table info")
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("query table info")
+            .collect::<std::result::Result<_, _>>()
+            .expect("read columns");
+
+        assert!(columns.iter().any(|column| column == "candidate_id"));
+        assert!(!columns.iter().any(|column| column == "bad"));
 
         cleanup(profile_dir);
     }
