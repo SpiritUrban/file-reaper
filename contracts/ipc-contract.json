@@ -52,6 +52,11 @@
       "task": "T-031",
       "$comment": "USN journal overwritten/stale → {volume, reason, message, fullRescan:true}; auto full rescan follows (orchestrator T-033)"
     },
+    "index.updated": {
+      "status": "implemented",
+      "task": "T-032",
+      "$comment": "Change Monitor live tick: {volume, created, modified, deleted, renamed}; UI refreshes category totals (T-055)"
+    },
     "scan.progress": { "status": "planned", "task": "T-033" },
     "cleanup.total_updated": { "status": "planned", "task": "T-055" },
     "category.updated": { "status": "planned", "task": "T-055" },

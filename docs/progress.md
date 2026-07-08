@@ -59,6 +59,8 @@
 
 | T-031 Фолбек на повний скан при перезаписаному журналі | ✅ | 2026-07-09 | local | **Domain:** `FullRescanReason` + `user_message`. **App `usn_fallback`:** `process_usn_sync` → `UsnSyncResult::{Applied, FullRescanRequired}`; stale → `clear_usn_cursor` + reset `FrnPathCache` + `FullRescanRequest` (volume/reason/message). **IndexStore:** `clear_usn_cursor`. **Shell:** подія `scan.journal_stale` + `emit_journal_stale` / `JournalStaleEvent` (wiring старту скану — T-033). **UI types:** EventName + payload. **DoD unit:** journal_id_changed clears cursor + message; usn_below_lowest message; applied ≠ full rescan. Перевірено: usn_fallback + shell journal_stale tests; clippy `-D warnings`. |
 
+| T-032 Change Monitor: живе оновлення індексу | ✅ | 2026-07-09 | local | **App `change_monitor`:** `monitor_tick` (USN delta→`process_usn_sync` per volume); `ChangeMonitor` background loop + `CancellationToken`; poll default 1s, cap 5s (DoD); `MonitorEvent::{Applied,FullRescanRequired,NoCursor,Error}`; `IndexUpdatedNotice`. **Shell:** `index.updated` event + `emit_index_updated`. **Contracts/UI:** EventName. **DoD unit:** delete applied in one tick; poll ≤5s; stale→full rescan; cancel stops thread. Lifecycle start у shell — T-033. Перевірено: `cargo test -p trashradar-app change_monitor` (6); clippy `-D warnings`. |
+
 ## Легенда
 
 ✅ виконано й верифіковано · 🔄 в роботі · ⛔ заблоковано (причина в нотатках)

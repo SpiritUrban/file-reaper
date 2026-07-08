@@ -196,6 +196,7 @@ export type EventName =
   | "app.test"
   | "app.test_counter"
   | "scan.journal_stale"
+  | "index.updated"
   | "scan.progress"
   | "cleanup.total_updated"
   | "category.updated"
@@ -210,4 +211,13 @@ export interface JournalStaleEvent {
   reason: string;
   message: string;
   fullRescan: boolean;
+}
+
+/** Подія index.updated (T-032): Change Monitor застосував USN-дельту. */
+export interface IndexUpdatedEvent {
+  volume: string;
+  created: number;
+  modified: number;
+  deleted: number;
+  renamed: number;
 }

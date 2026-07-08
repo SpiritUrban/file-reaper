@@ -29,6 +29,49 @@ pub mod topic {
     /// USN journal застарів → авто-фолбек на повний скан (T-031).
     /// Використовується оркестратором скану (T-033) через [`emit_journal_stale`].
     pub const SCAN_JOURNAL_STALE: &str = "scan.journal_stale";
+    /// Живе оновлення індексу від Change Monitor (T-032).
+    pub const INDEX_UPDATED: &str = "index.updated";
+}
+
+/// Payload `index.updated` (T-032): дельта після USN-тика.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)] // emit: Change Monitor listener / T-033 wiring
+pub struct IndexUpdatedEvent {
+    pub volume: String,
+    pub created: u64,
+    pub modified: u64,
+    pub deleted: u64,
+    pub renamed: u64,
+}
+
+impl IndexUpdatedEvent {
+    #[allow(dead_code)]
+    pub fn from_notice(n: &trashradar_app::change_monitor::IndexUpdatedNotice) -> Self {
+        Self {
+            volume: n.volume_label(),
+            created: n.created,
+            modified: n.modified,
+            deleted: n.deleted,
+            renamed: n.renamed,
+        }
+    }
+}
+
+/// Емісія live-оновлення індексу (T-032).
+#[allow(dead_code)] // wired when ChangeMonitor runs in shell (T-033 lifecycle)
+pub fn emit_index_updated<R: Runtime>(
+    app: &AppHandle<R>,
+    notice: &trashradar_app::change_monitor::IndexUpdatedNotice,
+) {
+    if !notice.has_changes() {
+        return;
+    }
+    emit(
+        app,
+        topic::INDEX_UPDATED,
+        &IndexUpdatedEvent::from_notice(notice),
+    );
 }
 
 /// Payload події `scan.journal_stale` (T-031).
@@ -80,9 +123,9 @@ pub fn emit_journal_stale<R: Runtime>(
     );
 }
 
-/// Реєстр реалізованих scan-подій (для health / smoke; тримає API «живим» до T-033).
+/// Реєстр реалізованих scan/index-подій (health / smoke; wiring у T-033).
 pub fn scan_event_topics() -> &'static [&'static str] {
-    &[topic::SCAN_JOURNAL_STALE]
+    &[topic::SCAN_JOURNAL_STALE, topic::INDEX_UPDATED]
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -214,6 +257,8 @@ mod journal_stale_tests {
         assert_eq!(ev.message, "test message");
         assert_eq!(topic::SCAN_JOURNAL_STALE, "scan.journal_stale");
         assert_eq!(wire_name(topic::SCAN_JOURNAL_STALE), "scan:journal_stale");
+        assert_eq!(topic::INDEX_UPDATED, "index.updated");
+        assert!(scan_event_topics().contains(&topic::INDEX_UPDATED));
     }
 }
 
