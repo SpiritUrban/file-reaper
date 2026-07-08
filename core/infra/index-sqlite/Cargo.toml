@@ -5,5 +5,6 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+rusqlite = { version = "0.32", features = ["bundled"] }
 trashradar-domain = { path = "../../domain" }
 trashradar-app = { path = "../../app" }
