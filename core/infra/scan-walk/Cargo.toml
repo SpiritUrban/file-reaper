@@ -7,3 +7,8 @@ edition.workspace = true
 [dependencies]
 trashradar-domain = { path = "../../domain" }
 trashradar-app = { path = "../../app" }
+tracing = { workspace = true }
+
+[dev-dependencies]
+# DoD T-026: звірка популяції з MFT на реальному томі (лише тести).
+trashradar-scan-mft = { path = "../scan-mft" }
