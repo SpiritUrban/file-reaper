@@ -24,12 +24,15 @@ registry/   Декларативні дані детекторів
 
 ## Запуск (dev)
 
-Вимоги: Node 20+, Rust stable (rustup), WebView2 (Windows 10/11).
+Вимоги: Node 20+, Rust stable MSVC (rustup) + VS Build Tools (C++), WebView2 (Windows 10/11).
 
 ```
-cd ui && npm install && npm run dev      # лише UI у браузері
-cd core/shell && cargo tauri dev         # повний застосунок
+cd ui && npm install
+npm run dev                              # лише UI у браузері (localhost:5173)
+npm run tauri dev -- --config ../core/shell/tauri.conf.json   # повний застосунок
 ```
+
+Tauri CLI встановлюється разом з dev-залежностями UI (`@tauri-apps/cli`).
 
 ## Статус
 
