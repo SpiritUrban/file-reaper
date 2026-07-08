@@ -5,3 +5,5 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+trashradar-domain = { path = "../../domain" }
+trashradar-app = { path = "../../app" }

@@ -34,6 +34,32 @@ function formatNumber(value: number): string {
   return new Intl.NumberFormat("uk-UA").format(value);
 }
 
+function strategyLabel(strategy: string): string {
+  switch (strategy) {
+    case "mft":
+      return "MFT";
+    case "directory_walk":
+      return "Walk";
+    case "usn_delta":
+      return "USN";
+    default:
+      return strategy;
+  }
+}
+
+function reasonLabel(reason: string): string {
+  switch (reason) {
+    case "ntfs_elevated":
+      return "NTFS + admin";
+    case "not_ntfs":
+      return "not NTFS";
+    case "not_elevated":
+      return "no elevation";
+    default:
+      return reason;
+  }
+}
+
 export function HealthScreen() {
   const [state, setState] = useState<HealthState>({
     status: "loading",
@@ -115,7 +141,7 @@ export function HealthScreen() {
         <h2 className="text-xs font-semibold uppercase tracking-wider text-ink-dim">
           Core
         </h2>
-        <div className="mt-2 grid grid-cols-2 gap-3">
+        <div className="mt-2 grid grid-cols-3 gap-3">
           <div className="rounded border border-line bg-panel px-3 py-3">
             <div className="text-xs text-ink-faint">Status</div>
             <div className="mt-1 font-mono text-lg text-ink">
@@ -126,6 +152,55 @@ export function HealthScreen() {
             <div className="text-xs text-ink-faint">Runtime</div>
             <div className="mt-1 font-mono text-lg text-ink">Tauri</div>
           </div>
+          <div className="rounded border border-line bg-panel px-3 py-3">
+            <div className="text-xs text-ink-faint">Elevation</div>
+            <div className="mt-1 font-mono text-lg text-ink">
+              {state.data
+                ? state.data.elevated
+                  ? "admin"
+                  : "user"
+                : "—"}
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <h2 className="text-xs font-semibold uppercase tracking-wider text-ink-dim">
+          Scan strategy
+        </h2>
+        <p className="mt-1 text-xs text-ink-faint">
+          Автовибір MFT ↔ walk (T-028): NTFS+admin → MFT, інакше → walk
+        </p>
+        <div className="mt-2 flex flex-col gap-2">
+          {(state.data?.scanPlans ?? []).length === 0 ? (
+            <div className="rounded border border-line bg-panel px-3 py-2 text-sm text-ink-dim">
+              Немає томів для планування
+            </div>
+          ) : (
+            (state.data?.scanPlans ?? []).map((plan) => (
+              <div
+                key={plan.volume}
+                className="flex items-center justify-between gap-3 rounded border border-line bg-panel px-3 py-2"
+              >
+                <div className="min-w-0">
+                  <div className="font-mono text-sm text-ink">{plan.volume}</div>
+                  <div className="truncate text-xs text-ink-faint">
+                    {plan.fileSystem} · {reasonLabel(plan.reason)}
+                  </div>
+                </div>
+                <span
+                  className={`shrink-0 rounded border px-2 py-0.5 font-mono text-xs ${
+                    plan.strategy === "mft"
+                      ? "border-keep/40 bg-keep/10 text-keep"
+                      : "border-line bg-panel-2 text-ink-dim"
+                  }`}
+                >
+                  {strategyLabel(plan.strategy)}
+                </span>
+              </div>
+            ))
+          )}
         </div>
       </section>
 

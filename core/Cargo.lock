@@ -3650,6 +3650,10 @@ dependencies = [
 [[package]]
 name = "trashradar-platform-win"
 version = "0.1.0"
+dependencies = [
+ "trashradar-app",
+ "trashradar-domain",
+]
 
 [[package]]
 name = "trashradar-preview"
@@ -3708,6 +3712,7 @@ dependencies = [
  "tracing-subscriber",
  "trashradar-app",
  "trashradar-domain",
+ "trashradar-platform-win",
 ]
 
 [[package]]

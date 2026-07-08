@@ -47,7 +47,22 @@ pub struct IpcMetrics {
     pub event_errors: u64,
 }
 
-/// Відповідь `app.health` — використовується діагностикою (T-009).
+/// План стратегії скану для одного тому (T-028) — видно у health.
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct VolumeScanPlan {
+    /// Літера тому з двокрапкою, напр. `"C:"`.
+    pub volume: String,
+    /// `mft` | `directory_walk` | `usn_delta`.
+    pub strategy: String,
+    /// `ntfs_elevated` | `not_ntfs` | `not_elevated`.
+    pub reason: String,
+    /// Ім'я FS або `"unknown"`.
+    pub file_system: String,
+    pub elevated: bool,
+}
+
+/// Відповідь `app.health` — використовується діагностикою (T-009, T-028).
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HealthInfo {
@@ -55,6 +70,44 @@ pub struct HealthInfo {
     pub core_status: &'static str,
     pub modules: Vec<ModuleHealth>,
     pub ipc: IpcMetrics,
+    /// Процес запущено з адмін-правами (T-028).
+    pub elevated: bool,
+    /// Автовибір MFT ↔ walk по томах (T-028 DoD: видно у health).
+    pub scan_plans: Vec<VolumeScanPlan>,
+}
+
+/// Будує плани скану для всіх видимих томів (T-028).
+pub fn build_scan_plans() -> (bool, Vec<VolumeScanPlan>) {
+    use trashradar_app::ports::ScanEnvironment;
+    use trashradar_app::scan_strategy::{choose_scan_strategy, VolumeCapabilities};
+    use trashradar_platform_win::WinScanEnvironment;
+
+    let env = WinScanEnvironment;
+    let elevated = env.is_elevated();
+    let mut plans = Vec::new();
+
+    for volume in env.list_scan_volumes() {
+        let file_system = env
+            .file_system_name(volume)
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "unknown".to_string());
+        let is_ntfs = file_system.eq_ignore_ascii_case("NTFS");
+        // Недоступний том (unknown + not ntfs) → walk / not_ntfs — чесно.
+        let choice = choose_scan_strategy(&VolumeCapabilities {
+            is_ntfs,
+            is_elevated: elevated,
+        });
+        plans.push(VolumeScanPlan {
+            volume: format!("{}:", volume.to_ascii_uppercase()),
+            strategy: choice.strategy.as_str().to_string(),
+            reason: choice.reason.as_str().to_string(),
+            file_system,
+            elevated,
+        });
+    }
+
+    (elevated, plans)
 }
 
 #[tauri::command]
@@ -62,6 +115,8 @@ pub fn app_health() -> HealthInfo {
     record_command();
     tracing::debug!("запит app.health");
     let event_metrics = events::metrics();
+    let (elevated, scan_plans) = build_scan_plans();
+    // T-028: автовибір готовий; деталі стратегії — у scan_plans, не в status.
     HealthInfo {
         app_version: env!("CARGO_PKG_VERSION"),
         core_status: "skeleton",
@@ -80,7 +135,7 @@ pub fn app_health() -> HealthInfo {
             },
             ModuleHealth {
                 name: "scanner",
-                status: "planned",
+                status: "online",
             },
             ModuleHealth {
                 name: "index",
@@ -97,6 +152,8 @@ pub fn app_health() -> HealthInfo {
             events_emitted: event_metrics.emitted,
             event_errors: event_metrics.failed,
         },
+        elevated,
+        scan_plans,
     }
 }
 
@@ -256,6 +313,52 @@ mod tests {
         match body {
             InvokeResponseBody::Json(raw) => serde_json::from_str(&raw).expect("json"),
             other => panic!("очікували JSON-відповідь, отримали {other:?}"),
+        }
+    }
+
+    #[test]
+    fn health_includes_scan_strategy_plans() {
+        let (elevated, plans) = build_scan_plans();
+        // На Windows є хоча б один том; elevated — bool без паніки.
+        let _ = elevated;
+        assert!(
+            !plans.is_empty(),
+            "очікували плани для томів, отримали порожньо"
+        );
+        for plan in &plans {
+            assert!(
+                plan.volume.ends_with(':') && plan.volume.len() == 2,
+                "volume format: {}",
+                plan.volume
+            );
+            assert!(
+                matches!(
+                    plan.strategy.as_str(),
+                    "mft" | "directory_walk" | "usn_delta"
+                ),
+                "strategy: {}",
+                plan.strategy
+            );
+            assert!(
+                matches!(
+                    plan.reason.as_str(),
+                    "ntfs_elevated" | "not_ntfs" | "not_elevated"
+                ),
+                "reason: {}",
+                plan.reason
+            );
+            // Інваріант T-028: MFT лише при NTFS+elevated.
+            if plan.strategy == "mft" {
+                assert_eq!(plan.reason, "ntfs_elevated");
+                assert!(plan.elevated);
+                assert!(plan.file_system.eq_ignore_ascii_case("NTFS"));
+            }
+            if plan.reason == "ntfs_elevated" {
+                assert_eq!(plan.strategy, "mft");
+            }
+            if !plan.elevated {
+                assert_ne!(plan.strategy, "mft");
+            }
         }
     }
 

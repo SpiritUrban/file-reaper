@@ -17,6 +17,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 trashradar-domain = { path = "../domain" }
 trashradar-app = { path = "../app" }
+trashradar-platform-win = { path = "../infra/platform-win" }
 
 [dev-dependencies]
 # Mock-рантайм Tauri: наскрізні тести диспетчеризації команд без вікна.

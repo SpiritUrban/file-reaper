@@ -6,7 +6,8 @@
 //! до проєктування відповідного use case.
 
 /// Джерело повного скану тому. Реалізації: `scan-mft`, `scan-walk`.
-/// Контракт визначає T-021 / T-026; автовибір реалізації — T-028.
+/// Контракт визначає T-021 / T-026; автовибір реалізації — T-028
+/// ([`crate::scan_strategy::choose_scan_strategy`]).
 ///
 /// Перший зріз контракту (T-021): перелічити всі записи тому як сирі
 /// [`ScanEntry`] (метадані без повного шляху). Побудова шляхів — T-022,
@@ -14,6 +15,22 @@
 pub trait ScanSource {
     /// Перелічити всі файли та теки тому за його літерою.
     fn scan_volume(&self, volume: char) -> Result<Vec<ScanEntry>, CoreError>;
+}
+
+/// Проби середовища для автовибору стратегії скану (T-028).
+/// Реалізація: `platform-win` (FS type, elevation).
+pub trait ScanEnvironment {
+    /// Чи том має файлову систему NTFS.
+    fn is_ntfs(&self, volume: char) -> Result<bool, CoreError>;
+
+    /// Чи процес запущено з правами адміністратора.
+    fn is_elevated(&self) -> bool;
+
+    /// Ім'я FS («NTFS», «FAT32», …) для health; `None` якщо невідомо.
+    fn file_system_name(&self, volume: char) -> Result<Option<String>, CoreError>;
+
+    /// Літери фіксованих/знімних томів, доступних для скану.
+    fn list_scan_volumes(&self) -> Vec<char>;
 }
 
 /// Джерело інкрементальних змін тому. Реалізація: `scan-usn` (T-029/T-030).

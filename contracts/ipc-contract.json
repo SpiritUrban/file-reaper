@@ -10,7 +10,7 @@
     "app.health": {
       "status": "implemented",
       "task": "T-009",
-      "$comment": "Diagnostics: versions, module states and live IPC counters for the health screen"
+      "$comment": "Diagnostics: versions, module states, IPC counters (T-009); elevated + scanPlans per volume strategy MFT|walk (T-028)"
     },
     "app.ping": {
       "status": "implemented",

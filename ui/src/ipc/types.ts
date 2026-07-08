@@ -106,6 +106,10 @@ export interface HealthInfo {
   coreStatus: string;
   modules: ModuleHealth[];
   ipc: IpcMetrics;
+  /** Процес з адмін-правами (T-028). */
+  elevated: boolean;
+  /** Автовибір MFT ↔ walk по томах (T-028). */
+  scanPlans: VolumeScanPlan[];
 }
 
 export interface ModuleHealth {
@@ -118,6 +122,15 @@ export interface IpcMetrics {
   commandErrors: number;
   eventsEmitted: number;
   eventErrors: number;
+}
+
+/** План стратегії скану тому (T-028). */
+export interface VolumeScanPlan {
+  volume: string;
+  strategy: "mft" | "directory_walk" | "usn_delta" | string;
+  reason: "ntfs_elevated" | "not_ntfs" | "not_elevated" | string;
+  fileSystem: string;
+  elevated: boolean;
 }
 
 /** Параметри app.ping (усе опційне: {} — миттєвий успіх). */

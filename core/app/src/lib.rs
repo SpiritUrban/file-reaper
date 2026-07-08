@@ -10,4 +10,5 @@
 //! T-033, T-037, T-054, T-061, T-079 (docs/tasks.md).
 
 pub mod ports;
+pub mod scan_strategy;
 pub mod workers;

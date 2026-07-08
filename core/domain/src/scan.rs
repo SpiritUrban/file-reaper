@@ -45,3 +45,36 @@ pub enum ScanStrategy {
     DirectoryWalk,
     UsnDelta,
 }
+
+impl ScanStrategy {
+    /// Стабільний рядок для health/IPC (збігається з serde).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ScanStrategy::Mft => "mft",
+            ScanStrategy::DirectoryWalk => "directory_walk",
+            ScanStrategy::UsnDelta => "usn_delta",
+        }
+    }
+}
+
+/// Чому обрано стратегію (T-028). Видно у health-екрані.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScanStrategyReason {
+    /// NTFS + процес з правами адміністратора → швидкий MFT-шлях.
+    NtfsElevated,
+    /// Том не NTFS (FAT/exFAT/ReFS/мережа…) → лише обхід каталогів.
+    NotNtfs,
+    /// NTFS, але без elevation → обхід (запит elevation — T-034).
+    NotElevated,
+}
+
+impl ScanStrategyReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ScanStrategyReason::NtfsElevated => "ntfs_elevated",
+            ScanStrategyReason::NotNtfs => "not_ntfs",
+            ScanStrategyReason::NotElevated => "not_elevated",
+        }
+    }
+}
