@@ -37,8 +37,25 @@ jobs:
         with:
           workspaces: core
       - run: cargo fmt --all --check
-      # shell тягне повний Tauri — перевіряється окремим повільним джобом
-      # після T-002; на етапі каркаса перевіряємо шари domain/app/infra.
+      # shell тягне повний Tauri — він у власному джобі нижче,
+      # щоб швидкі перевірки шарів не чекали на нього.
       - run: cargo check --workspace --exclude trashradar-shell
       - run: cargo clippy --workspace --exclude trashradar-shell -- -D warnings
       - run: cargo test --workspace --exclude trashradar-shell
+
+  shell:
+    name: Core shell (tauri check)
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: core
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+      - run: cargo check -p trashradar-shell
+      - run: cargo clippy -p trashradar-shell -- -D warnings

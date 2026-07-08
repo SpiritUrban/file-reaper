@@ -5,8 +5,8 @@
   "identifier": "app.trashradar.desktop",
   "build": {
     "devUrl": "http://localhost:5173",
-    "beforeDevCommand": "npm run dev --prefix ../../ui",
-    "beforeBuildCommand": "npm run build --prefix ../../ui",
+    "beforeDevCommand": "npm --prefix ../../ui run dev",
+    "beforeBuildCommand": "npm --prefix ../../ui run build",
     "frontendDist": "../../ui/dist"
   },
   "app": {
@@ -26,7 +26,7 @@
     }
   },
   "bundle": {
-    "active": false,
+    "active": true,
     "targets": ["nsis"],
     "icon": ["icons/icon.ico"]
   }
