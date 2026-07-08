@@ -81,6 +81,25 @@ export interface QuarantineEntry {
   status: "in_flight" | "quarantined" | "restored" | "purged";
 }
 
+/**
+ * Стабільні коди помилок Core (дзеркало domain::ErrorCode, T-007).
+ * UI розгалужується ЛИШЕ за кодом — текст показується як є.
+ * Коди додаються, але ніколи не змінюються і не видаляються.
+ */
+export type CoreErrorCode =
+  | "internal"
+  | "invalid_argument"
+  | "not_implemented"
+  | "io"
+  | "cancelled";
+
+/** Конверт помилки Core → UI: {"code", "message"}. */
+export interface CoreErrorPayload {
+  code: CoreErrorCode;
+  /** Людський текст — повне речення, готове до показу користувачу. */
+  message: string;
+}
+
 /** Відповідь команди app.health — єдиної команди каркаса. */
 export interface HealthInfo {
   appVersion: string;

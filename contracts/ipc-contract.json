@@ -1,6 +1,11 @@
 {
   "$comment": "Каркас контракту (T-001). Схеми payload-ів додаються разом з реалізацією команд (T-004/T-005 і далі).",
   "version": 1,
+  "error_envelope": {
+    "$comment": "T-007: кожна помилка команди — цей конверт. Коди стабільні: додавати можна, змінювати/видаляти — ні. Rust: domain::error::CoreError; TS: ui/src/ipc/types.ts CoreErrorPayload.",
+    "shape": { "code": "snake_case ErrorCode", "message": "людський текст, готовий до показу" },
+    "codes": ["internal", "invalid_argument", "not_implemented", "io", "cancelled"]
+  },
   "commands": {
     "app.health": { "status": "implemented", "task": "T-001" },
     "scan.start": { "status": "planned", "task": "T-033" },
