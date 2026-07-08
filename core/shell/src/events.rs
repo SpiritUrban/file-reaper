@@ -26,6 +26,63 @@ pub mod topic {
     /// Діагностичний потік (команда `app.test_stream`).
     pub const APP_TEST: &str = "app.test";
     pub const APP_TEST_COUNTER: &str = "app.test_counter";
+    /// USN journal застарів → авто-фолбек на повний скан (T-031).
+    /// Використовується оркестратором скану (T-033) через [`emit_journal_stale`].
+    pub const SCAN_JOURNAL_STALE: &str = "scan.journal_stale";
+}
+
+/// Payload події `scan.journal_stale` (T-031).
+///
+/// Оркестратор T-033 викликає [`emit_journal_stale`]; до того API
+/// тримається публічним для тестів і майбутнього wiring.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)] // emit path: T-033 scan orchestrator
+pub struct JournalStaleEvent {
+    /// Напр. `"C:"`.
+    pub volume: String,
+    /// Machine code: `journal_id_changed`, `usn_below_lowest_valid`, …
+    pub reason: String,
+    /// Людське пояснення (українською).
+    pub message: String,
+    /// Завжди true для цієї події — UI може показати «повне сканування…».
+    pub full_rescan: bool,
+}
+
+impl JournalStaleEvent {
+    #[allow(dead_code)] // emit path: T-033
+    pub fn from_request(req: &trashradar_app::usn_fallback::FullRescanRequest) -> Self {
+        Self {
+            volume: req.event_volume_label(),
+            reason: req.reason_code.to_string(),
+            message: req.message.clone(),
+            full_rescan: true,
+        }
+    }
+}
+
+/// Емісія пояснення про фолбек на повний скан (T-031 DoD: подія-пояснення).
+///
+/// Викликається оркестратором після [`trashradar_app::usn_fallback::process_usn_sync`]
+/// → `FullRescanRequired` (підключення в T-033).
+#[allow(dead_code)] // wired by T-033 scan orchestrator
+pub fn emit_journal_stale<R: Runtime>(
+    app: &AppHandle<R>,
+    req: &trashradar_app::usn_fallback::FullRescanRequest,
+) {
+    let payload = JournalStaleEvent::from_request(req);
+    emit(app, topic::SCAN_JOURNAL_STALE, &payload);
+    tracing::warn!(
+        volume = %payload.volume,
+        reason = %payload.reason,
+        message = %payload.message,
+        "USN journal stale — full rescan required"
+    );
+}
+
+/// Реєстр реалізованих scan-подій (для health / smoke; тримає API «живим» до T-033).
+pub fn scan_event_topics() -> &'static [&'static str] {
+    &[topic::SCAN_JOURNAL_STALE]
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -127,6 +184,36 @@ pub fn emit<R: Runtime, T: Serialize + Clone>(app: &AppHandle<R>, topic: &str, p
             EVENT_ERRORS.fetch_add(1, Ordering::Relaxed);
             tracing::warn!(topic, %error, "не вдалося надіслати подію")
         }
+    }
+}
+
+#[cfg(test)]
+mod journal_stale_tests {
+    use super::*;
+    use trashradar_app::usn_fallback::FullRescanRequest;
+    use trashradar_domain::scan::{FullRescanReason, UsnJournalInfo};
+
+    #[test]
+    fn journal_stale_event_from_request() {
+        let req = FullRescanRequest {
+            volume: 'D',
+            reason: FullRescanReason::JournalIdChanged,
+            reason_code: "journal_id_changed",
+            message: "test message".into(),
+            journal: UsnJournalInfo {
+                journal_id: 1,
+                lowest_valid_usn: 0,
+                next_usn: 10,
+                first_usn: 0,
+            },
+        };
+        let ev = JournalStaleEvent::from_request(&req);
+        assert_eq!(ev.volume, "D:");
+        assert_eq!(ev.reason, "journal_id_changed");
+        assert!(ev.full_rescan);
+        assert_eq!(ev.message, "test message");
+        assert_eq!(topic::SCAN_JOURNAL_STALE, "scan.journal_stale");
+        assert_eq!(wire_name(topic::SCAN_JOURNAL_STALE), "scan:journal_stale");
     }
 }
 

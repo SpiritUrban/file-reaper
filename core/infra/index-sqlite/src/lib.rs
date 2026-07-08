@@ -606,6 +606,16 @@ impl IndexDatabase {
         Ok(changed as u64)
     }
 
+    /// Скинути USN-курсор тому (T-031).
+    pub fn clear_usn_cursor(&self, volume: char) -> Result<()> {
+        let key = volume_key(volume)?;
+        self.connection.execute(
+            "DELETE FROM volume_usn_state WHERE volume = ?1",
+            params![key],
+        )?;
+        Ok(())
+    }
+
     pub fn read_all_file_records(&self) -> Result<Vec<FileRecord>> {
         let sql = "SELECT
             candidate_id,
@@ -704,6 +714,14 @@ impl trashradar_app::ports::IndexStore for IndexDatabase {
         path: &str,
     ) -> std::result::Result<u64, trashradar_domain::error::CoreError> {
         self.delete_file_records_by_path(path)
+            .map_err(|err| trashradar_domain::error::CoreError::internal(err.to_string()))
+    }
+
+    fn clear_usn_cursor(
+        &self,
+        volume: char,
+    ) -> std::result::Result<(), trashradar_domain::error::CoreError> {
+        self.clear_usn_cursor(volume)
             .map_err(|err| trashradar_domain::error::CoreError::internal(err.to_string()))
     }
 }
@@ -1295,6 +1313,10 @@ mod tests {
 
         // Інший том — незалежний.
         assert_eq!(database.get_usn_cursor('D').expect("other"), None);
+
+        // T-031: clear перед full rescan.
+        database.clear_usn_cursor('C').expect("clear");
+        assert_eq!(database.get_usn_cursor('C').expect("after clear"), None);
 
         cleanup(profile_dir);
     }

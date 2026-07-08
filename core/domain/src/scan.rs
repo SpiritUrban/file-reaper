@@ -132,6 +132,64 @@ pub struct UsnChange {
     pub timestamp: Option<FsTimestamp>,
 }
 
+/// Чому потрібен повний рескан замість USN-дельти (T-031).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FullRescanReason {
+    /// Journal ID змінився (журнал перестворено / перезаписано).
+    JournalIdChanged,
+    /// Збережений USN нижче LowestValidUsn (старі записи витіснені).
+    UsnBelowLowestValid,
+    /// OS повернув ERROR_JOURNAL_ENTRY_DELETED.
+    JournalEntryDeleted,
+    /// Journal ID змінився під час читання дельти.
+    JournalIdChangedDuringRead,
+    /// Невідома / інша причина stale (стабільний фолбек).
+    Other,
+}
+
+impl FullRescanReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FullRescanReason::JournalIdChanged => "journal_id_changed",
+            FullRescanReason::UsnBelowLowestValid => "usn_below_lowest_valid",
+            FullRescanReason::JournalEntryDeleted => "journal_entry_deleted",
+            FullRescanReason::JournalIdChangedDuringRead => "journal_id_changed_during_read",
+            FullRescanReason::Other => "other",
+        }
+    }
+
+    /// Розпізнати reason-рядок з `UsnReadOutcome::JournalStale`.
+    pub fn from_stale_reason(reason: &str) -> Self {
+        match reason {
+            "journal_id_changed" => FullRescanReason::JournalIdChanged,
+            "usn_below_lowest_valid" => FullRescanReason::UsnBelowLowestValid,
+            "journal_entry_deleted" => FullRescanReason::JournalEntryDeleted,
+            "journal_id_changed_during_read" => FullRescanReason::JournalIdChangedDuringRead,
+            _ => FullRescanReason::Other,
+        }
+    }
+
+    /// Людське пояснення для UI (українською).
+    pub fn user_message(self, volume: char) -> String {
+        let v = volume.to_ascii_uppercase();
+        match self {
+            FullRescanReason::JournalIdChanged
+            | FullRescanReason::JournalIdChangedDuringRead => format!(
+                "Журнал змін тома {v}: перестворено. Запускається повне сканування."
+            ),
+            FullRescanReason::UsnBelowLowestValid | FullRescanReason::JournalEntryDeleted => {
+                format!(
+                    "Журнал змін тома {v}: застаріла позиція (записів більше немає). Запускається повне сканування."
+                )
+            }
+            FullRescanReason::Other => format!(
+                "Журнал змін тома {v}: недоступний для інкрементального оновлення. Запускається повне сканування."
+            ),
+        }
+    }
+}
+
 /// Типові біти Reason з USN_RECORD (підмножина, потрібна дельті).
 pub mod usn_reason {
     pub const DATA_OVERWRITE: u32 = 0x0000_0001;

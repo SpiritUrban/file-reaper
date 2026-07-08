@@ -134,8 +134,13 @@ pub fn app_health() -> HealthInfo {
                 status: "online",
             },
             ModuleHealth {
+                // T-031: scan.journal_stale зареєстровано; повний оркестратор — T-033.
                 name: "scanner",
-                status: "online",
+                status: if crate::events::scan_event_topics().is_empty() {
+                    "planned"
+                } else {
+                    "online"
+                },
             },
             ModuleHealth {
                 name: "index",

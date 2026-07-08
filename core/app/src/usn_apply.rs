@@ -377,7 +377,9 @@ pub fn apply_mutations_to_hot_index(
     Ok(())
 }
 
-/// Повний цикл T-030: дельта → hot index → (опц.) persistent deletes → курсор.
+/// Повний цикл T-030: дельта → hot index → persistent deletes → курсор.
+///
+/// Для `JournalStale` див. [`crate::usn_fallback::process_usn_sync`] (T-031).
 pub fn apply_usn_read_outcome(
     outcome: UsnReadOutcome,
     volume: char,
@@ -387,16 +389,18 @@ pub fn apply_usn_read_outcome(
     probe: impl FnMut(&str) -> Option<FileProbe>,
 ) -> Result<UsnApplyStats, CoreError> {
     match outcome {
-        UsnReadOutcome::JournalStale { reason, .. } => {
-            // T-031 зробить повний рескан; тут лише не чіпаємо курсор.
-            tracing_stub_stale(volume, reason);
-            Ok(UsnApplyStats::default())
+        UsnReadOutcome::JournalStale { .. } => {
+            // Не мовчки ковтати stale: оркестратор має викликати process_usn_sync.
+            Err(CoreError::internal(
+                "USN journal stale: use process_usn_sync (T-031) for full-rescan fallback."
+                    .to_string(),
+            ))
         }
         UsnReadOutcome::Changes {
             changes,
             next_cursor,
         } => {
-            let mut next_id = next_candidate_id(index)?;
+            let mut next_id = next_candidate_id_from_index(index)?;
             let (mutations, stats) = plan_usn_mutations(&changes, cache, probe, &mut next_id);
             apply_mutations_to_hot_index(index, &mutations)?;
 
@@ -414,7 +418,8 @@ pub fn apply_usn_read_outcome(
     }
 }
 
-fn next_candidate_id(index: &impl HotIndex) -> Result<u64, CoreError> {
+/// Наступний вільний candidate_id у гарячому індексі.
+pub fn next_candidate_id_from_index(index: &impl HotIndex) -> Result<u64, CoreError> {
     let max = index
         .get_all()?
         .into_iter()
@@ -422,11 +427,6 @@ fn next_candidate_id(index: &impl HotIndex) -> Result<u64, CoreError> {
         .max()
         .unwrap_or(0);
     Ok(max.saturating_add(1))
-}
-
-fn tracing_stub_stale(volume: char, reason: &str) {
-    let _ = (volume, reason);
-    // tracing optional in app — shell/оркестратор залогує; app без tracing dep.
 }
 
 /// Зручність: просунути курсор без змін (порожня дельта).

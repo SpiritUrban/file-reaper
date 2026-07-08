@@ -90,6 +90,10 @@ pub trait IndexStore {
     /// Зафіксувати позицію USN після повного скану або обробки дельти (T-029).
     fn set_usn_cursor(&self, volume: char, cursor: UsnCursor) -> Result<(), CoreError>;
 
+    /// Скинути збережений USN-курсор тому (T-031: перед повним ресканом
+    /// після JournalStale, щоб не повторювати інкремент на застарілій позиції).
+    fn clear_usn_cursor(&self, volume: char) -> Result<(), CoreError>;
+
     /// Видалити всі persistent-записи з даним шляхом (T-030 delete/rename).
     /// Повертає кількість видалених рядків.
     fn delete_file_records_by_path(&self, path: &str) -> Result<u64, CoreError>;

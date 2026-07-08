@@ -57,6 +57,8 @@
 
 | T-030 Інкрементальне оновлення індексу за USN-дельтою | ✅ | 2026-07-09 | local | **App `usn_apply`:** `classify_usn_reason`, `FrnPathCache` (parent_ref+name→path), `plan_usn_mutations` → create/modify/delete/rename, `apply_mutations_to_hot_index`, `apply_usn_read_outcome` (дельта→hot index + SQLite delete + advance cursor; JournalStale без змін — T-031). **HotIndex:** `remove_paths`, `upsert_batch`. **IndexStore:** `delete_file_records_by_path`. **DoD unit:** create→modify size→delete; rename old→new; unresolved skip. Перевірено: `cargo test -p trashradar-app usn_apply` + index-memory/sqlite; clippy `-D warnings`. |
 
+| T-031 Фолбек на повний скан при перезаписаному журналі | ✅ | 2026-07-09 | local | **Domain:** `FullRescanReason` + `user_message`. **App `usn_fallback`:** `process_usn_sync` → `UsnSyncResult::{Applied, FullRescanRequired}`; stale → `clear_usn_cursor` + reset `FrnPathCache` + `FullRescanRequest` (volume/reason/message). **IndexStore:** `clear_usn_cursor`. **Shell:** подія `scan.journal_stale` + `emit_journal_stale` / `JournalStaleEvent` (wiring старту скану — T-033). **UI types:** EventName + payload. **DoD unit:** journal_id_changed clears cursor + message; usn_below_lowest message; applied ≠ full rescan. Перевірено: usn_fallback + shell journal_stale tests; clippy `-D warnings`. |
+
 ## Легенда
 
 ✅ виконано й верифіковано · 🔄 в роботі · ⛔ заблоковано (причина в нотатках)

@@ -12,4 +12,5 @@
 pub mod ports;
 pub mod scan_strategy;
 pub mod usn_apply;
+pub mod usn_fallback;
 pub mod workers;

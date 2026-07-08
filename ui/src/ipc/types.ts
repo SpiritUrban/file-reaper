@@ -195,6 +195,7 @@ export type CommandName =
 export type EventName =
   | "app.test"
   | "app.test_counter"
+  | "scan.journal_stale"
   | "scan.progress"
   | "cleanup.total_updated"
   | "category.updated"
@@ -202,3 +203,11 @@ export type EventName =
   | "quarantine.changed"
   | "quarantine.entry_expired"
   | "settings.changed";
+
+/** Подія scan.journal_stale (T-031): USN застарів → повний рескан. */
+export interface JournalStaleEvent {
+  volume: string;
+  reason: string;
+  message: string;
+  fullRescan: boolean;
+}
