@@ -3,11 +3,13 @@
 //! Реалізація: T-010 (підключення), T-011 (схема v1), T-012 (міграції),
 //! T-013 (батчевий запис), T-014 (віконні запити), T-078 (журнал Quarantine).
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::{
     error::Error,
     fmt, fs,
     path::{Path, PathBuf},
+    sync::mpsc,
+    thread::{self, JoinHandle},
     time::Duration,
 };
 use trashradar_domain::{
@@ -21,6 +23,7 @@ const DATABASE_FILE_NAME: &str = "index.sqlite3";
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const SCHEMA_VERSION_V1: i64 = 1;
 const LATEST_SCHEMA_VERSION: i64 = SCHEMA_VERSION_V1;
+const WRITER_QUEUE_CHANNEL_CLOSED: &str = "sqlite index writer queue is closed";
 
 /// Migration v1 creates the persistent file-record layer used by scanner output and
 /// MVP detectors. The migration runner executes this script for databases created
@@ -82,6 +85,45 @@ const MIGRATIONS: &[Migration] = &[Migration {
     sql: SCHEMA_V1_SQL,
 }];
 
+const UPSERT_FILE_RECORD_SQL: &str = "INSERT INTO file_records (
+        candidate_id,
+        path,
+        size_bytes,
+        created_at_filetime,
+        modified_at_filetime,
+        accessed_at_filetime,
+        file_kind,
+        candidate_unit,
+        category,
+        safety,
+        decision,
+        detector_id,
+        explanation,
+        attributes,
+        is_readonly,
+        is_hidden,
+        is_system,
+        is_temporary
+    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+    ON CONFLICT(candidate_id) DO UPDATE SET
+        path = excluded.path,
+        size_bytes = excluded.size_bytes,
+        created_at_filetime = excluded.created_at_filetime,
+        modified_at_filetime = excluded.modified_at_filetime,
+        accessed_at_filetime = excluded.accessed_at_filetime,
+        file_kind = excluded.file_kind,
+        candidate_unit = excluded.candidate_unit,
+        category = excluded.category,
+        safety = excluded.safety,
+        decision = excluded.decision,
+        detector_id = excluded.detector_id,
+        explanation = excluded.explanation,
+        attributes = excluded.attributes,
+        is_readonly = excluded.is_readonly,
+        is_hidden = excluded.is_hidden,
+        is_system = excluded.is_system,
+        is_temporary = excluded.is_temporary";
+
 pub type Result<T> = std::result::Result<T, IndexSqliteError>;
 
 #[derive(Debug)]
@@ -89,6 +131,8 @@ pub enum IndexSqliteError {
     Io(std::io::Error),
     Sqlite(rusqlite::Error),
     UnsupportedSchemaVersion(i64),
+    WriterQueueClosed,
+    WriterThreadPanicked,
     SchemaMigrationFailed {
         from: i64,
         to: i64,
@@ -112,6 +156,8 @@ impl fmt::Display for IndexSqliteError {
             Self::UnsupportedSchemaVersion(version) => {
                 write!(f, "unsupported sqlite index schema version: {version}")
             }
+            Self::WriterQueueClosed => write!(f, "{WRITER_QUEUE_CHANNEL_CLOSED}"),
+            Self::WriterThreadPanicked => write!(f, "sqlite index writer thread panicked"),
             Self::SchemaMigrationFailed { from, to, source } => {
                 write!(
                     f,
@@ -138,6 +184,8 @@ impl Error for IndexSqliteError {
             Self::Sqlite(error) => Some(error),
             Self::SchemaMigrationFailed { source, .. } => Some(source),
             Self::UnsupportedSchemaVersion(_)
+            | Self::WriterQueueClosed
+            | Self::WriterThreadPanicked
             | Self::InvalidUnsignedInteger { .. }
             | Self::InvalidEnumValue { .. } => None,
         }
@@ -193,6 +241,31 @@ pub struct FileRecord {
     pub detector_id: String,
     pub explanation: String,
     pub attributes: FileAttributes,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BatchWriteReport {
+    pub records_written: usize,
+}
+
+#[derive(Debug)]
+pub struct IndexWriterQueue {
+    sender: mpsc::Sender<WriterCommand>,
+    thread: Option<JoinHandle<()>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct IndexWriter {
+    sender: mpsc::Sender<WriterCommand>,
+}
+
+#[derive(Debug)]
+enum WriterCommand {
+    UpsertFileRecords {
+        records: Vec<FileRecord>,
+        respond_to: mpsc::Sender<Result<BatchWriteReport>>,
+    },
+    Shutdown,
 }
 
 impl IndexDatabase {
@@ -269,74 +342,34 @@ impl IndexDatabase {
     }
 
     pub fn upsert_file_record(&mut self, record: &FileRecord) -> Result<()> {
-        let candidate_id = sqlite_integer("candidate_id", record.candidate_id.0)?;
-        let size_bytes = sqlite_integer("size_bytes", record.size.0)?;
-        let attributes = sqlite_integer("attributes", u64::from(record.attributes.raw_bits))?;
         let transaction = self.connection.transaction()?;
-
-        transaction.execute(
-            "INSERT INTO file_records (
-                candidate_id,
-                path,
-                size_bytes,
-                created_at_filetime,
-                modified_at_filetime,
-                accessed_at_filetime,
-                file_kind,
-                candidate_unit,
-                category,
-                safety,
-                decision,
-                detector_id,
-                explanation,
-                attributes,
-                is_readonly,
-                is_hidden,
-                is_system,
-                is_temporary
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
-            ON CONFLICT(candidate_id) DO UPDATE SET
-                path = excluded.path,
-                size_bytes = excluded.size_bytes,
-                created_at_filetime = excluded.created_at_filetime,
-                modified_at_filetime = excluded.modified_at_filetime,
-                accessed_at_filetime = excluded.accessed_at_filetime,
-                file_kind = excluded.file_kind,
-                candidate_unit = excluded.candidate_unit,
-                category = excluded.category,
-                safety = excluded.safety,
-                decision = excluded.decision,
-                detector_id = excluded.detector_id,
-                explanation = excluded.explanation,
-                attributes = excluded.attributes,
-                is_readonly = excluded.is_readonly,
-                is_hidden = excluded.is_hidden,
-                is_system = excluded.is_system,
-                is_temporary = excluded.is_temporary",
-            params![
-                candidate_id,
-                record.path.as_str(),
-                size_bytes,
-                record.created_at.map(|timestamp| timestamp.0),
-                record.modified_at.map(|timestamp| timestamp.0),
-                record.accessed_at.map(|timestamp| timestamp.0),
-                file_kind_name(record.kind),
-                candidate_unit_name(record.unit),
-                category_name(record.category),
-                safety_level_name(record.safety),
-                decision_name(record.decision),
-                record.detector_id.as_str(),
-                record.explanation.as_str(),
-                attributes,
-                bool_integer(record.attributes.is_readonly),
-                bool_integer(record.attributes.is_hidden),
-                bool_integer(record.attributes.is_system),
-                bool_integer(record.attributes.is_temporary),
-            ],
-        )?;
+        {
+            let mut statement = transaction.prepare_cached(UPSERT_FILE_RECORD_SQL)?;
+            execute_upsert_file_record(&mut statement, record)?;
+        }
         transaction.commit()?;
 
         Ok(())
+    }
+
+    pub fn upsert_file_records_batch(
+        &mut self,
+        records: &[FileRecord],
+    ) -> Result<BatchWriteReport> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        {
+            let mut statement = transaction.prepare_cached(UPSERT_FILE_RECORD_SQL)?;
+            for record in records {
+                execute_upsert_file_record(&mut statement, record)?;
+            }
+        }
+        transaction.commit()?;
+
+        Ok(BatchWriteReport {
+            records_written: records.len(),
+        })
     }
 
     pub fn read_file_record(&self, candidate_id: CandidateId) -> Result<Option<FileRecord>> {
@@ -395,6 +428,137 @@ impl IndexDatabase {
     }
 }
 
+impl IndexWriterQueue {
+    pub fn open_profile(profile_dir: impl AsRef<Path>) -> Result<Self> {
+        Self::open(profile_dir.as_ref().join(DATABASE_FILE_NAME))
+    }
+
+    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref().to_path_buf();
+        let (sender, receiver) = mpsc::channel();
+        let (startup_sender, startup_receiver) = mpsc::channel();
+
+        let thread = thread::spawn(move || {
+            let mut database = match IndexDatabase::open(path) {
+                Ok(database) => {
+                    let _ = startup_sender.send(Ok(()));
+                    database
+                }
+                Err(error) => {
+                    let _ = startup_sender.send(Err(error));
+                    return;
+                }
+            };
+
+            writer_loop(&mut database, receiver);
+        });
+
+        match startup_receiver
+            .recv()
+            .map_err(|_| IndexSqliteError::WriterQueueClosed)?
+        {
+            Ok(()) => Ok(Self {
+                sender,
+                thread: Some(thread),
+            }),
+            Err(error) => {
+                let _ = thread.join();
+                Err(error)
+            }
+        }
+    }
+
+    pub fn handle(&self) -> IndexWriter {
+        IndexWriter {
+            sender: self.sender.clone(),
+        }
+    }
+
+    pub fn shutdown(mut self) -> Result<()> {
+        self.shutdown_inner()
+    }
+
+    fn shutdown_inner(&mut self) -> Result<()> {
+        if let Some(thread) = self.thread.take() {
+            let _ = self.sender.send(WriterCommand::Shutdown);
+            thread
+                .join()
+                .map_err(|_| IndexSqliteError::WriterThreadPanicked)?;
+        }
+
+        Ok(())
+    }
+}
+
+impl Drop for IndexWriterQueue {
+    fn drop(&mut self) {
+        let _ = self.shutdown_inner();
+    }
+}
+
+impl IndexWriter {
+    pub fn upsert_file_records(&self, records: Vec<FileRecord>) -> Result<BatchWriteReport> {
+        let (respond_to, response) = mpsc::channel();
+        self.sender
+            .send(WriterCommand::UpsertFileRecords {
+                records,
+                respond_to,
+            })
+            .map_err(|_| IndexSqliteError::WriterQueueClosed)?;
+
+        response
+            .recv()
+            .map_err(|_| IndexSqliteError::WriterQueueClosed)?
+    }
+}
+
+fn writer_loop(database: &mut IndexDatabase, receiver: mpsc::Receiver<WriterCommand>) {
+    while let Ok(command) = receiver.recv() {
+        match command {
+            WriterCommand::UpsertFileRecords {
+                records,
+                respond_to,
+            } => {
+                let result = database.upsert_file_records_batch(&records);
+                let _ = respond_to.send(result);
+            }
+            WriterCommand::Shutdown => break,
+        }
+    }
+}
+
+fn execute_upsert_file_record(
+    statement: &mut rusqlite::CachedStatement<'_>,
+    record: &FileRecord,
+) -> Result<()> {
+    let candidate_id = sqlite_integer("candidate_id", record.candidate_id.0)?;
+    let size_bytes = sqlite_integer("size_bytes", record.size.0)?;
+    let attributes = sqlite_integer("attributes", u64::from(record.attributes.raw_bits))?;
+
+    statement.execute(params![
+        candidate_id,
+        record.path.as_str(),
+        size_bytes,
+        record.created_at.map(|timestamp| timestamp.0),
+        record.modified_at.map(|timestamp| timestamp.0),
+        record.accessed_at.map(|timestamp| timestamp.0),
+        file_kind_name(record.kind),
+        candidate_unit_name(record.unit),
+        category_name(record.category),
+        safety_level_name(record.safety),
+        decision_name(record.decision),
+        record.detector_id.as_str(),
+        record.explanation.as_str(),
+        attributes,
+        bool_integer(record.attributes.is_readonly),
+        bool_integer(record.attributes.is_hidden),
+        bool_integer(record.attributes.is_system),
+        bool_integer(record.attributes.is_temporary),
+    ])?;
+
+    Ok(())
+}
+
 fn open_configured_connection(path: &Path) -> Result<Connection> {
     let connection = Connection::open(path)?;
     configure_connection(&connection)?;
@@ -405,6 +569,8 @@ fn configure_connection(connection: &Connection) -> Result<()> {
     connection.pragma_update(None, "journal_mode", "WAL")?;
     connection.pragma_update(None, "synchronous", "NORMAL")?;
     connection.pragma_update(None, "foreign_keys", "ON")?;
+    connection.pragma_update(None, "cache_size", -65_536)?;
+    connection.pragma_update(None, "wal_autocheckpoint", 10_000)?;
     connection.busy_timeout(BUSY_TIMEOUT)?;
 
     Ok(())
@@ -673,6 +839,7 @@ mod tests {
     use super::*;
     use rusqlite::TransactionBehavior;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Instant;
 
     static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -862,13 +1029,126 @@ mod tests {
         let profile_dir = temp_profile_dir("file-record");
         let mut database =
             IndexDatabase::open_profile(&profile_dir).expect("open profile database");
-        let record = FileRecord {
-            candidate_id: CandidateId(42),
-            path: r"C:\Users\Ada\Videos\raw.mov".to_string(),
-            size: ByteSize(4_294_967_296),
-            created_at: Some(FsTimestamp(132_537_600_000_000_000)),
-            modified_at: Some(FsTimestamp(132_624_000_000_000_000)),
-            accessed_at: Some(FsTimestamp(132_710_400_000_000_000)),
+        let record = sample_file_record(42);
+
+        database
+            .upsert_file_record(&record)
+            .expect("upsert file record");
+
+        let stored = database
+            .read_file_record(CandidateId(42))
+            .expect("read file record")
+            .expect("stored record");
+
+        assert_eq!(stored, record);
+
+        cleanup(profile_dir);
+    }
+
+    #[test]
+    fn upserts_file_records_in_single_batch_transaction() {
+        let profile_dir = temp_profile_dir("file-record-batch");
+        let mut database =
+            IndexDatabase::open_profile(&profile_dir).expect("open profile database");
+        let records: Vec<_> = (0..512).map(sample_file_record).collect();
+
+        let report = database
+            .upsert_file_records_batch(&records)
+            .expect("upsert file record batch");
+
+        assert_eq!(report.records_written, records.len());
+        assert_eq!(
+            database
+                .read_file_record(CandidateId(0))
+                .expect("read first record"),
+            Some(records[0].clone())
+        );
+        assert_eq!(
+            database
+                .read_file_record(CandidateId(511))
+                .expect("read last record"),
+            Some(records[511].clone())
+        );
+
+        cleanup(profile_dir);
+    }
+
+    #[test]
+    fn writer_queue_serializes_concurrent_batches_without_database_locks() {
+        let profile_dir = temp_profile_dir("writer-queue");
+        let database_path = profile_dir.join(DATABASE_FILE_NAME);
+        let queue = IndexWriterQueue::open(&database_path).expect("open writer queue");
+        let mut joins = Vec::new();
+
+        for worker in 0..8_u64 {
+            let writer = queue.handle();
+            joins.push(std::thread::spawn(move || {
+                let base = worker * 1_000;
+                let records: Vec<_> = (base..base + 250).map(sample_file_record).collect();
+                writer
+                    .upsert_file_records(records)
+                    .expect("upsert queued batch")
+            }));
+        }
+
+        let mut written = 0;
+        for join in joins {
+            written += join.join().expect("join producer").records_written;
+        }
+
+        queue.shutdown().expect("shutdown writer queue");
+
+        let database = IndexDatabase::open(&database_path).expect("open reader database");
+        assert_eq!(count_file_records(&database), written as i64);
+
+        cleanup(profile_dir);
+    }
+
+    #[test]
+    #[ignore = "local T-013 perf gate; writes 1M rows and is intentionally not part of default unit tests"]
+    fn writer_queue_inserts_one_million_records_in_batches() {
+        const TOTAL_RECORDS: u64 = 1_000_000;
+        const BATCH_SIZE: u64 = 100_000;
+        const TARGET: Duration = Duration::from_secs(70);
+
+        let profile_dir = temp_profile_dir("writer-queue-1m");
+        let database_path = profile_dir.join(DATABASE_FILE_NAME);
+        let queue = IndexWriterQueue::open(&database_path).expect("open writer queue");
+        let writer = queue.handle();
+        let mut elapsed = Duration::ZERO;
+        let mut written = 0;
+
+        for base in (0..TOTAL_RECORDS).step_by(BATCH_SIZE as usize) {
+            let records: Vec<_> = (base..base + BATCH_SIZE).map(sample_file_record).collect();
+            let started_at = Instant::now();
+            written += writer
+                .upsert_file_records(records)
+                .expect("upsert queued perf batch")
+                .records_written;
+            elapsed += started_at.elapsed();
+        }
+
+        queue.shutdown().expect("shutdown writer queue");
+
+        let database = IndexDatabase::open(&database_path).expect("open reader database");
+        assert_eq!(written as u64, TOTAL_RECORDS);
+        assert_eq!(count_file_records(&database), TOTAL_RECORDS as i64);
+        assert!(
+            elapsed <= TARGET,
+            "1M batched inserts took {elapsed:?}, expected <= {TARGET:?}"
+        );
+
+        cleanup(profile_dir);
+    }
+
+    fn sample_file_record(id: u64) -> FileRecord {
+        FileRecord {
+            candidate_id: CandidateId(id),
+            path: format!(r"C:\Users\Ada\Videos\raw-{id}.mov"),
+            size: ByteSize(4_294_967_296 + id),
+            created_at: Some(FsTimestamp(132_537_600_000_000_000 + id as i64)),
+            modified_at: Some(FsTimestamp(132_624_000_000_000_000 + id as i64)),
+            accessed_at: Some(FsTimestamp(132_710_400_000_000_000 + id as i64)),
             kind: FileKind::Video,
             unit: CandidateUnit::File,
             category: CategoryId::ForgottenVideos,
@@ -883,20 +1163,14 @@ mod tests {
                 is_system: false,
                 is_temporary: false,
             },
-        };
+        }
+    }
 
+    fn count_file_records(database: &IndexDatabase) -> i64 {
         database
-            .upsert_file_record(&record)
-            .expect("upsert file record");
-
-        let stored = database
-            .read_file_record(CandidateId(42))
-            .expect("read file record")
-            .expect("stored record");
-
-        assert_eq!(stored, record);
-
-        cleanup(profile_dir);
+            .connection
+            .query_row("SELECT COUNT(*) FROM file_records", [], |row| row.get(0))
+            .expect("count file records")
     }
 
     fn temp_profile_dir(name: &str) -> PathBuf {
