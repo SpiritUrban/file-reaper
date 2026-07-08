@@ -29,6 +29,9 @@ pub trait IndexStore {
         offset: u64,
         limit: u64,
     ) -> Result<Vec<FileRecord>, CoreError>;
+
+    /// Отримати всі збережені записи кандидатів.
+    fn read_all_file_records(&self) -> Result<Vec<FileRecord>, CoreError>;
 }
 
 /// Гарячий in-memory індекс. Реалізація: `index-memory` (T-015…T-018).
@@ -47,6 +50,9 @@ pub trait HotIndex {
 
     /// Очистити індекс.
     fn clear(&self) -> Result<(), CoreError>;
+
+    /// Отримати всі записи з індексу.
+    fn get_all(&self) -> Result<Vec<FileRecord>, CoreError>;
 }
 
 /// Сховище і генерація превью. Реалізація: `preview` (E6).

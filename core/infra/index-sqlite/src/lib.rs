@@ -539,6 +539,62 @@ impl IndexDatabase {
 
         Ok(records)
     }
+
+    pub fn read_all_file_records(&self) -> Result<Vec<FileRecord>> {
+        let sql = "SELECT
+            candidate_id,
+            path,
+            size_bytes,
+            created_at_filetime,
+            modified_at_filetime,
+            accessed_at_filetime,
+            file_kind,
+            candidate_unit,
+            category,
+            safety,
+            decision,
+            detector_id,
+            explanation,
+            attributes,
+            is_readonly,
+            is_hidden,
+            is_system,
+            is_temporary
+        FROM file_records
+        ORDER BY candidate_id ASC";
+
+        let mut statement = self.connection.prepare_cached(sql)?;
+        let rows = statement.query_map([], |row| {
+            Ok(StoredFileRecord {
+                candidate_id: row.get(0)?,
+                path: row.get(1)?,
+                size_bytes: row.get(2)?,
+                created_at: row.get(3)?,
+                modified_at: row.get(4)?,
+                accessed_at: row.get(5)?,
+                file_kind: row.get(6)?,
+                unit: row.get(7)?,
+                category: row.get(8)?,
+                safety: row.get(9)?,
+                decision: row.get(10)?,
+                detector_id: row.get(11)?,
+                explanation: row.get(12)?,
+                attributes: row.get(13)?,
+                is_readonly: row.get(14)?,
+                is_hidden: row.get(15)?,
+                is_system: row.get(16)?,
+                is_temporary: row.get(17)?,
+            })
+        })?;
+
+        let mut records = Vec::new();
+        for row in rows {
+            let stored = row?;
+            records.push(FileRecord::try_from(stored)?);
+        }
+
+        Ok(records)
+    }
 }
 
 impl trashradar_app::ports::IndexStore for IndexDatabase {
@@ -550,6 +606,13 @@ impl trashradar_app::ports::IndexStore for IndexDatabase {
         limit: u64,
     ) -> std::result::Result<Vec<FileRecord>, trashradar_domain::error::CoreError> {
         self.read_file_records_window(category, sort, offset, limit)
+            .map_err(|err| trashradar_domain::error::CoreError::internal(err.to_string()))
+    }
+
+    fn read_all_file_records(
+        &self,
+    ) -> std::result::Result<Vec<FileRecord>, trashradar_domain::error::CoreError> {
+        self.read_all_file_records()
             .map_err(|err| trashradar_domain::error::CoreError::internal(err.to_string()))
     }
 }

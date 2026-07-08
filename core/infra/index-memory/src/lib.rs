@@ -348,6 +348,29 @@ impl InMemoryIndex {
         inner.filename_interner.shrink_to_fit();
     }
 
+    pub fn get_all(&self) -> Vec<FileRecord> {
+        let inner = self.inner.read().unwrap();
+        let mut records = Vec::with_capacity(inner.records.len());
+        for compact in &inner.records {
+            let parent = inner.dir_interner.resolve(compact.dir_id).unwrap_or("");
+            let file_name = inner
+                .filename_interner
+                .resolve(compact.filename_id)
+                .unwrap_or("");
+
+            let path = if parent.is_empty() {
+                file_name.to_string()
+            } else {
+                let mut p = std::path::PathBuf::from(parent);
+                p.push(file_name);
+                p.to_string_lossy().into_owned()
+            };
+
+            records.push(compact.unpack(path));
+        }
+        records
+    }
+
     /// Розраховує загальний обсяг пам'яті в купі (heap).
     pub fn memory_usage(&self) -> usize {
         let inner = self.inner.read().unwrap();
@@ -396,6 +419,10 @@ impl trashradar_app::ports::HotIndex for InMemoryIndex {
     fn clear(&self) -> Result<(), CoreError> {
         self.clear();
         Ok(())
+    }
+
+    fn get_all(&self) -> Result<Vec<FileRecord>, CoreError> {
+        Ok(self.get_all())
     }
 }
 
@@ -588,5 +615,100 @@ mod tests {
         reader_thread.join().unwrap();
 
         assert_eq!(index.len(), 80_000);
+    }
+
+    fn temp_profile_dir(name: &str) -> std::path::PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "trashradar-test-{}-{}",
+            name,
+            std::time::Instant::now().elapsed().as_nanos()
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn test_sqlite_to_in_memory_sync_and_checksum_verification() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        use trashradar_index_sqlite::IndexDatabase;
+
+        let temp_dir = temp_profile_dir("sync-test");
+        let db_path = temp_dir.join("index.sqlite3");
+
+        // 1. Open SQLite database and insert 1,000 file records
+        let mut sqlite_db = IndexDatabase::open(&db_path).expect("open sqlite db");
+
+        let mut records = Vec::new();
+        for i in 0..1000 {
+            records.push(sample_record(
+                i,
+                &format!("C:\\Users\\Ada\\dir_{}\\file_{}.txt", i / 10, i),
+            ));
+        }
+        sqlite_db
+            .upsert_file_records_batch(&records)
+            .expect("upsert records to sqlite");
+
+        // 2. Read all records from SQLite (simulating startup recovery)
+        let loaded_records = sqlite_db
+            .read_all_file_records()
+            .expect("read all from sqlite");
+
+        // 3. Load them into HotIndex in-memory index
+        let in_memory_index = InMemoryIndex::new();
+        use trashradar_app::ports::HotIndex;
+        in_memory_index
+            .insert_batch(loaded_records)
+            .expect("insert batch to memory");
+        in_memory_index.finish_indexing();
+
+        // 4. Retrieve all records from both and verify they match by length and checksum
+        let sqlite_all = sqlite_db
+            .read_all_file_records()
+            .expect("read all sqlite");
+        let memory_all = in_memory_index.get_all();
+
+        assert_eq!(sqlite_all.len(), 1000);
+        assert_eq!(memory_all.len(), 1000);
+
+        // Helper to calculate checksum
+        let calculate_checksum = |recs: &[FileRecord]| -> u64 {
+            let mut sorted = recs.to_vec();
+            sorted.sort_by_key(|r| r.candidate_id.0);
+            let mut hasher = DefaultHasher::new();
+            for r in sorted {
+                r.candidate_id.0.hash(&mut hasher);
+                r.path.hash(&mut hasher);
+                r.size.0.hash(&mut hasher);
+                r.created_at.map(|t| t.0).hash(&mut hasher);
+                r.modified_at.map(|t| t.0).hash(&mut hasher);
+                r.accessed_at.map(|t| t.0).hash(&mut hasher);
+                (r.kind as u8).hash(&mut hasher);
+                (r.unit as u8).hash(&mut hasher);
+                (r.category as u8).hash(&mut hasher);
+                (r.safety as u8).hash(&mut hasher);
+                (r.decision as u8).hash(&mut hasher);
+                r.attributes.raw_bits.hash(&mut hasher);
+                r.attributes.is_readonly.hash(&mut hasher);
+                r.attributes.is_hidden.hash(&mut hasher);
+                r.attributes.is_system.hash(&mut hasher);
+                r.attributes.is_temporary.hash(&mut hasher);
+            }
+            hasher.finish()
+        };
+
+        let checksum_sqlite = calculate_checksum(&sqlite_all);
+        let checksum_memory = calculate_checksum(&memory_all);
+
+        println!(
+            "Checksum SQLite: {}, Checksum Memory: {}",
+            checksum_sqlite, checksum_memory
+        );
+        assert_eq!(checksum_sqlite, checksum_memory, "Checksums do not match!");
+
+        // Clean up
+        std::fs::remove_dir_all(temp_dir).unwrap_or(());
     }
 }
