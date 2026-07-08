@@ -1,0 +1,9 @@
+[package]
+name = "trashradar-scan-usn"
+description = "Адаптер ChangeSource: USN Journal — інкрементальні дельти та Change Monitor."
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+trashradar-domain = { path = "../../domain" }
+trashradar-app = { path = "../../app" }

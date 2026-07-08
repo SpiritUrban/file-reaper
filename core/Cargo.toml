@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = [
+    "domain",
+    "app",
+    "infra/scan-mft",
+    "infra/scan-walk",
+    "infra/scan-usn",
+    "infra/index-sqlite",
+    "infra/index-memory",
+    "infra/preview",
+    "infra/quarantine-fs",
+    "infra/hash",
+    "infra/platform-win",
+    "shell",
+    "testkit",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "UNLICENSED"
+repository = "https://github.com/spiritenator/file-reaper"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

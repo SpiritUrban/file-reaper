@@ -1,0 +1,8 @@
+[package]
+name = "trashradar-domain"
+description = "Domain Layer: словник продукту в типах. Нуль I/O, нуль залежностей на ОС."
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde = { workspace = true }

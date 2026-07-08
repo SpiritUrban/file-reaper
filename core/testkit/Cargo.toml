@@ -1,0 +1,8 @@
+[package]
+name = "trashradar-testkit"
+description = "Тестові утиліти: віртуальна FS, генератори корпусів. Лише для dev-dependencies."
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+trashradar-domain = { path = "../domain" }

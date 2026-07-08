@@ -1,0 +1,9 @@
+[package]
+name = "trashradar-quarantine-fs"
+description = "Адаптер QuarantineFs: ЄДИНИЙ шлюз деструктивних операцій з FS (move/restore/purge)."
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+trashradar-domain = { path = "../../domain" }
+trashradar-app = { path = "../../app" }

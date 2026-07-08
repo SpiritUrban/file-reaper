@@ -1,0 +1,9 @@
+[package]
+name = "trashradar-scan-mft"
+description = "Адаптер ScanSource: читання MFT напряму (NTFS, швидкий шлях)."
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+trashradar-domain = { path = "../../domain" }
+trashradar-app = { path = "../../app" }
