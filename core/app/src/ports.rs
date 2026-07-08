@@ -53,6 +53,11 @@ pub trait HotIndex {
 
     /// Отримати всі записи з індексу.
     fn get_all(&self) -> Result<Vec<FileRecord>, CoreError>;
+
+    /// Підрядковий пошук за іменем файла та шляхом серед кандидатів (T-018).
+    /// Регістронезалежний; записи з рішенням Keep не повертаються
+    /// (вони приховані з кандидатів). Результат обмежений `limit` записами.
+    fn search_file_records(&self, query: &str, limit: usize) -> Result<Vec<FileRecord>, CoreError>;
 }
 
 /// Сховище і генерація превью. Реалізація: `preview` (E6).

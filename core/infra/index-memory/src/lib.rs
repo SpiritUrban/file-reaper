@@ -102,6 +102,16 @@ impl PathInterner {
         }
     }
 
+    /// Кількість інтернованих рядків.
+    pub fn len(&self) -> usize {
+        self.offsets.len() - 1
+    }
+
+    /// Чи порожній інтернер.
+    pub fn is_empty(&self) -> bool {
+        self.offsets.len() == 1
+    }
+
     /// Оцінює обсяг пам'яті, що займає інтернер у купі (heap).
     pub fn memory_usage(&self) -> usize {
         let mut total = 0;
@@ -276,6 +286,114 @@ struct InMemoryIndexInner {
     filename_interner: PathInterner,
 }
 
+impl InMemoryIndexInner {
+    /// Відновлює повний шлях запису з інтернованих директорії та імені файла.
+    fn resolve_path(&self, compact: &CompactFileRecord) -> String {
+        let parent = self.dir_interner.resolve(compact.dir_id).unwrap_or("");
+        let file_name = self
+            .filename_interner
+            .resolve(compact.filename_id)
+            .unwrap_or("");
+
+        if parent.is_empty() {
+            file_name.to_string()
+        } else {
+            let mut p = std::path::PathBuf::from(parent);
+            p.push(file_name);
+            p.to_string_lossy().into_owned()
+        }
+    }
+}
+
+/// Регістронезалежний пошук підрядка. Для ASCII-рядків (переважна більшість
+/// шляхів) — побайтове порівняння без алокацій; для не-ASCII — Unicode-фолбек
+/// через lowercase у багаторазовий буфер.
+fn contains_ignore_case(haystack: &str, needle_lower: &str, buf: &mut String) -> bool {
+    if needle_lower.is_empty() {
+        return true;
+    }
+    if haystack.is_ascii() {
+        let h = haystack.as_bytes();
+        let n = needle_lower.as_bytes();
+        if h.len() < n.len() {
+            return false;
+        }
+        let first = n[0];
+        'outer: for start in 0..=(h.len() - n.len()) {
+            if h[start].to_ascii_lowercase() != first {
+                continue;
+            }
+            for j in 1..n.len() {
+                if h[start + j].to_ascii_lowercase() != n[j] {
+                    continue 'outer;
+                }
+            }
+            return true;
+        }
+        false
+    } else {
+        buf.clear();
+        buf.extend(haystack.chars().flat_map(|c| c.to_lowercase()));
+        buf.contains(needle_lower)
+    }
+}
+
+/// Позначає, які рядки інтернера містять `needle` (порівняння без регістру).
+/// Пошук іде по унікальних рядках, а не по кожному з мільйонів записів.
+fn match_interned_entries(interner: &PathInterner, needle: &str) -> Vec<bool> {
+    let count = interner.len();
+    let mut matches = vec![false; count];
+    let mut buf = String::new();
+    for (id, hit) in matches.iter_mut().enumerate() {
+        if let Some(entry) = interner.resolve(id as u32) {
+            *hit = contains_ignore_case(entry, needle, &mut buf);
+        }
+    }
+    matches
+}
+
+/// Останні щонайбільше `max_bytes` байтів рядка, вирівняні на межу символа.
+fn tail_at_char_boundary(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut start = s.len() - max_bytes;
+    while !s.is_char_boundary(start) {
+        start += 1;
+    }
+    &s[start..]
+}
+
+/// Перші щонайбільше `max_bytes` байтів рядка, вирівняні на межу символа.
+fn head_at_char_boundary(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+/// Перевіряє збіг `needle` через межу «директорія\ім'я файла»: збіги всередині
+/// директорії чи імені вже покриті бітовими масками, тож вікно будується лише
+/// з хвоста директорії, роздільника та голови імені файла.
+fn boundary_window_contains(
+    dir: &str,
+    file_name: &str,
+    needle: &str,
+    window_buf: &mut String,
+    lower_buf: &mut String,
+) -> bool {
+    let margin = needle.len();
+    window_buf.clear();
+    window_buf.push_str(tail_at_char_boundary(dir, margin));
+    window_buf.push(std::path::MAIN_SEPARATOR);
+    window_buf.push_str(head_at_char_boundary(file_name, margin));
+    contains_ignore_case(window_buf, needle, lower_buf)
+}
+
 /// Гарячий in-memory індекс.
 #[derive(Debug, Default)]
 pub struct InMemoryIndex {
@@ -310,21 +428,7 @@ impl InMemoryIndex {
     pub fn get(&self, idx: usize) -> Option<FileRecord> {
         let inner = self.inner.read().unwrap();
         let compact = inner.records.get(idx)?;
-        let parent = inner.dir_interner.resolve(compact.dir_id).unwrap_or("");
-        let file_name = inner
-            .filename_interner
-            .resolve(compact.filename_id)
-            .unwrap_or("");
-
-        let path = if parent.is_empty() {
-            file_name.to_string()
-        } else {
-            let mut p = std::path::PathBuf::from(parent);
-            p.push(file_name);
-            p.to_string_lossy().into_owned()
-        };
-
-        Some(compact.unpack(path))
+        Some(compact.unpack(inner.resolve_path(compact)))
     }
 
     pub fn len(&self) -> usize {
@@ -352,23 +456,71 @@ impl InMemoryIndex {
         let inner = self.inner.read().unwrap();
         let mut records = Vec::with_capacity(inner.records.len());
         for compact in &inner.records {
-            let parent = inner.dir_interner.resolve(compact.dir_id).unwrap_or("");
-            let file_name = inner
-                .filename_interner
-                .resolve(compact.filename_id)
-                .unwrap_or("");
-
-            let path = if parent.is_empty() {
-                file_name.to_string()
-            } else {
-                let mut p = std::path::PathBuf::from(parent);
-                p.push(file_name);
-                p.to_string_lossy().into_owned()
-            };
-
-            records.push(compact.unpack(path));
+            records.push(compact.unpack(inner.resolve_path(compact)));
         }
         records
+    }
+
+    /// Підрядковий регістронезалежний пошук за іменем файла та шляхом (T-018).
+    ///
+    /// Підрядок шукається один раз по унікальних інтернованих директоріях та
+    /// іменах файлів (їх на порядки менше, ніж записів), далі записи
+    /// відбираються за бітовими масками збігів. Збіг через межу
+    /// «директорія\ім'я» перевіряється лише коли запит містить роздільник
+    /// шляху — інакше такий збіг неможливий без збігу в директорії чи імені.
+    /// Записи з рішенням Keep приховані з кандидатів і не повертаються.
+    pub fn search(&self, query: &str, limit: usize) -> Vec<FileRecord> {
+        if query.is_empty() || limit == 0 {
+            return Vec::new();
+        }
+        let needle: String = query.chars().flat_map(|c| c.to_lowercase()).collect();
+        let needs_boundary_check = needle.contains(std::path::MAIN_SEPARATOR);
+
+        let inner = self.inner.read().unwrap();
+        let dir_matches = match_interned_entries(&inner.dir_interner, &needle);
+        let name_matches = match_interned_entries(&inner.filename_interner, &needle);
+
+        let mut results = Vec::new();
+        let mut window_buf = String::new();
+        let mut lower_buf = String::new();
+        for compact in &inner.records {
+            if results.len() >= limit {
+                break;
+            }
+            if parse_decision_val((compact.packed_meta >> 9) & 0x3) == Decision::Keep {
+                continue;
+            }
+
+            let mut hit = dir_matches
+                .get(compact.dir_id as usize)
+                .copied()
+                .unwrap_or(false)
+                || name_matches
+                    .get(compact.filename_id as usize)
+                    .copied()
+                    .unwrap_or(false);
+
+            if !hit && needs_boundary_check {
+                let dir = inner.dir_interner.resolve(compact.dir_id).unwrap_or("");
+                let file_name = inner
+                    .filename_interner
+                    .resolve(compact.filename_id)
+                    .unwrap_or("");
+                hit = !dir.is_empty()
+                    && boundary_window_contains(
+                        dir,
+                        file_name,
+                        &needle,
+                        &mut window_buf,
+                        &mut lower_buf,
+                    );
+            }
+
+            if hit {
+                results.push(compact.unpack(inner.resolve_path(compact)));
+            }
+        }
+        results
     }
 
     /// Розраховує загальний обсяг пам'яті в купі (heap).
@@ -423,6 +575,10 @@ impl trashradar_app::ports::HotIndex for InMemoryIndex {
 
     fn get_all(&self) -> Result<Vec<FileRecord>, CoreError> {
         Ok(self.get_all())
+    }
+
+    fn search_file_records(&self, query: &str, limit: usize) -> Result<Vec<FileRecord>, CoreError> {
+        Ok(self.search(query, limit))
     }
 }
 
@@ -617,6 +773,144 @@ mod tests {
         assert_eq!(index.len(), 80_000);
     }
 
+    #[test]
+    fn test_search_by_filename_substring_case_insensitive() {
+        let index = InMemoryIndex::new();
+        index.insert(&sample_record(
+            1,
+            "C:\\Users\\Ada\\Videos\\Holiday_Trip.mp4",
+        ));
+        index.insert(&sample_record(
+            2,
+            "C:\\Users\\Ada\\Videos\\work_recording.mp4",
+        ));
+        index.insert(&sample_record(3, "C:\\Users\\Ada\\Documents\\notes.txt"));
+
+        let results = index.search("holiday", 100);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].candidate_id, CandidateId(1));
+
+        // Регістр запиту не має значення
+        let results = index.search("HOLIDAY_trip", 100);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].path, "C:\\Users\\Ada\\Videos\\Holiday_Trip.mp4");
+    }
+
+    #[test]
+    fn test_search_by_directory_substring() {
+        let index = InMemoryIndex::new();
+        index.insert(&sample_record(1, "C:\\Users\\Ada\\Videos\\clip.mp4"));
+        index.insert(&sample_record(2, "C:\\Users\\Ada\\Documents\\notes.txt"));
+        index.insert(&sample_record(3, "D:\\Projects\\demo\\report.pdf"));
+
+        let results = index.search("users\\ada", 100);
+        assert_eq!(results.len(), 2);
+
+        let results = index.search("projects", 100);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].candidate_id, CandidateId(3));
+    }
+
+    #[test]
+    fn test_search_spanning_directory_filename_boundary() {
+        let index = InMemoryIndex::new();
+        index.insert(&sample_record(1, "C:\\Users\\Ada\\Videos\\holiday.mp4"));
+        index.insert(&sample_record(2, "C:\\Users\\Ada\\Videos\\other.mp4"));
+
+        // Підрядок перетинає межу «директорія\ім'я файла»
+        let results = index.search("videos\\holiday", 100);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].candidate_id, CandidateId(1));
+    }
+
+    #[test]
+    fn test_search_respects_limit_and_empty_query() {
+        let index = InMemoryIndex::new();
+        for i in 0..50 {
+            index.insert(&sample_record(
+                i,
+                &format!("C:\\Users\\Ada\\Videos\\clip_{}.mp4", i),
+            ));
+        }
+
+        assert_eq!(index.search("clip", 10).len(), 10);
+        assert_eq!(index.search("clip", 100).len(), 50);
+        assert!(index.search("", 100).is_empty());
+        assert!(index.search("clip", 0).is_empty());
+    }
+
+    #[test]
+    fn test_search_excludes_keep_decisions() {
+        let index = InMemoryIndex::new();
+        let mut kept = sample_record(1, "C:\\Users\\Ada\\Videos\\keep_me.mp4");
+        kept.decision = Decision::Keep;
+        index.insert(&kept);
+        index.insert(&sample_record(2, "C:\\Users\\Ada\\Videos\\reap_me.mp4"));
+
+        let results = index.search("me.mp4", 100);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].candidate_id, CandidateId(2));
+    }
+
+    #[test]
+    #[ignore = "перф-гейт T-018: запускається окремо у release-збірці"]
+    fn search_one_million_records_under_100ms() {
+        use std::time::Instant;
+        use trashradar_app::ports::HotIndex;
+
+        let index = InMemoryIndex::new();
+        let mut batch = Vec::with_capacity(100_000);
+        for i in 0u64..1_000_000 {
+            batch.push(sample_record(
+                i,
+                &format!(
+                    "C:\\Users\\User\\Folder_{}\\file_name_{}.dat",
+                    i % 200_000,
+                    i
+                ),
+            ));
+            if batch.len() == 100_000 {
+                index.insert_batch(std::mem::take(&mut batch)).unwrap();
+                batch = Vec::with_capacity(100_000);
+            }
+        }
+        index.finish_indexing();
+        assert_eq!(InMemoryIndex::len(&index), 1_000_000);
+
+        // Рідкісний підрядок: пошук мусить пройти всі записи, а не зупинитись на limit
+        let started = Instant::now();
+        let results = index.search("name_999999", 200);
+        let elapsed = started.elapsed();
+        println!(
+            "Substring search over 1M records took {:?}, found {}",
+            elapsed,
+            results.len()
+        );
+        assert_eq!(results.len(), 1);
+        assert!(
+            elapsed.as_millis() < 100,
+            "Search took {:?}, DoD target is < 100 ms",
+            elapsed
+        );
+
+        // Частий підрядок з лімітом — так само в межах цілі
+        let started = Instant::now();
+        let results = index.search("folder_1999", 200);
+        let elapsed = started.elapsed();
+        println!(
+            "Frequent-substring search took {:?}, found {}",
+            elapsed,
+            results.len()
+        );
+        assert!(!results.is_empty());
+        assert!(results.len() <= 200);
+        assert!(
+            elapsed.as_millis() < 100,
+            "Search took {:?}, DoD target is < 100 ms",
+            elapsed
+        );
+    }
+
     fn temp_profile_dir(name: &str) -> std::path::PathBuf {
         let mut path = std::env::temp_dir();
         path.push(format!(
@@ -665,9 +959,7 @@ mod tests {
         in_memory_index.finish_indexing();
 
         // 4. Retrieve all records from both and verify they match by length and checksum
-        let sqlite_all = sqlite_db
-            .read_all_file_records()
-            .expect("read all sqlite");
+        let sqlite_all = sqlite_db.read_all_file_records().expect("read all sqlite");
         let memory_all = in_memory_index.get_all();
 
         assert_eq!(sqlite_all.len(), 1000);
