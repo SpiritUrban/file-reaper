@@ -40,11 +40,17 @@ pub fn unix_secs_to_filetime(unix_secs: u32) -> i64 {
 
 /// Інтернер рядків з послідовним пакуванням у спільний буфер (string arena).
 /// Це уникає накладних витрат 24 байт String-заголовка на кожен елемент.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct PathInterner {
     buffer: String,
     offsets: Vec<u32>,
     lookup: HashMap<String, u32>,
+}
+
+impl Default for PathInterner {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PathInterner {
@@ -259,41 +265,53 @@ fn parse_decision_val(val: u16) -> Decision {
     }
 }
 
-/// Гарячий in-memory індекс.
+use std::sync::RwLock;
+use trashradar_domain::error::CoreError;
+
+/// Внутрішній стан гарячого in-memory індексу.
 #[derive(Debug, Default, Clone)]
+struct InMemoryIndexInner {
+    records: Vec<CompactFileRecord>,
+    dir_interner: PathInterner,
+    filename_interner: PathInterner,
+}
+
+/// Гарячий in-memory індекс.
+#[derive(Debug, Default)]
 pub struct InMemoryIndex {
-    pub records: Vec<CompactFileRecord>,
-    pub dir_interner: PathInterner,
-    pub filename_interner: PathInterner,
+    inner: RwLock<InMemoryIndexInner>,
 }
 
 impl InMemoryIndex {
     pub fn new() -> Self {
         Self {
-            records: Vec::new(),
-            dir_interner: PathInterner::new(),
-            filename_interner: PathInterner::new(),
+            inner: RwLock::new(InMemoryIndexInner::default()),
         }
     }
 
     /// Додає запис файлу до індексу, розділяючи та інтернуючи шлях.
-    pub fn insert(&mut self, record: &FileRecord) {
+    pub fn insert(&self, record: &FileRecord) {
+        let mut inner = self.inner.write().unwrap();
+        inner.dir_interner.rebuild_lookup();
+        inner.filename_interner.rebuild_lookup();
+
         let path = std::path::Path::new(&record.path);
         let parent_str = path.parent().and_then(|p| p.to_str()).unwrap_or("");
         let file_name_str = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
 
-        let dir_id = self.dir_interner.intern(parent_str);
-        let filename_id = self.filename_interner.intern(file_name_str);
+        let dir_id = inner.dir_interner.intern(parent_str);
+        let filename_id = inner.filename_interner.intern(file_name_str);
 
         let compact = CompactFileRecord::pack(record, dir_id, filename_id);
-        self.records.push(compact);
+        inner.records.push(compact);
     }
 
     /// Отримує розпакований запис файлу за його індексом.
     pub fn get(&self, idx: usize) -> Option<FileRecord> {
-        let compact = self.records.get(idx)?;
-        let parent = self.dir_interner.resolve(compact.dir_id).unwrap_or("");
-        let file_name = self
+        let inner = self.inner.read().unwrap();
+        let compact = inner.records.get(idx)?;
+        let parent = inner.dir_interner.resolve(compact.dir_id).unwrap_or("");
+        let file_name = inner
             .filename_interner
             .resolve(compact.filename_id)
             .unwrap_or("");
@@ -310,35 +328,76 @@ impl InMemoryIndex {
     }
 
     pub fn len(&self) -> usize {
-        self.records.len()
+        self.inner.read().unwrap().records.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.records.is_empty()
+        self.inner.read().unwrap().records.is_empty()
     }
 
-    pub fn clear(&mut self) {
-        self.records.clear();
+    pub fn clear(&self) {
+        let mut inner = self.inner.write().unwrap();
+        inner.records.clear();
     }
 
     /// Завершує наповнення індексу, вивільняючи lookup-таблиці інтернерів для економії пам'яті.
-    pub fn finish_indexing(&mut self) {
-        self.records.shrink_to_fit();
-        self.dir_interner.shrink_to_fit();
-        self.filename_interner.shrink_to_fit();
+    pub fn finish_indexing(&self) {
+        let mut inner = self.inner.write().unwrap();
+        inner.records.shrink_to_fit();
+        inner.dir_interner.shrink_to_fit();
+        inner.filename_interner.shrink_to_fit();
     }
 
     /// Розраховує загальний обсяг пам'яті в купі (heap).
     pub fn memory_usage(&self) -> usize {
+        let inner = self.inner.read().unwrap();
         let mut total = 0;
-        total += self.records.capacity() * std::mem::size_of::<CompactFileRecord>();
-        total += self.dir_interner.memory_usage();
-        total += self.filename_interner.memory_usage();
+        total += inner.records.capacity() * std::mem::size_of::<CompactFileRecord>();
+        total += inner.dir_interner.memory_usage();
+        total += inner.filename_interner.memory_usage();
         total
     }
 }
 
-impl trashradar_app::ports::HotIndex for InMemoryIndex {}
+impl trashradar_app::ports::HotIndex for InMemoryIndex {
+    fn insert_batch(&self, records: Vec<FileRecord>) -> Result<(), CoreError> {
+        let mut inner = self.inner.write().unwrap();
+        inner.dir_interner.rebuild_lookup();
+        inner.filename_interner.rebuild_lookup();
+
+        for record in records {
+            let path = std::path::Path::new(&record.path);
+            let parent_str = path.parent().and_then(|p| p.to_str()).unwrap_or("");
+            let file_name_str = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
+
+            let dir_id = inner.dir_interner.intern(parent_str);
+            let filename_id = inner.filename_interner.intern(file_name_str);
+
+            let compact = CompactFileRecord::pack(&record, dir_id, filename_id);
+            inner.records.push(compact);
+        }
+
+        Ok(())
+    }
+
+    fn finish_indexing(&self) -> Result<(), CoreError> {
+        self.finish_indexing();
+        Ok(())
+    }
+
+    fn len(&self) -> Result<usize, CoreError> {
+        Ok(self.len())
+    }
+
+    fn is_empty(&self) -> Result<bool, CoreError> {
+        Ok(self.is_empty())
+    }
+
+    fn clear(&self) -> Result<(), CoreError> {
+        self.clear();
+        Ok(())
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -390,7 +449,7 @@ mod tests {
     #[test]
     fn test_pack_unpack_roundtrip() {
         let record = sample_record(42, "C:\\Users\\Ada\\Videos\\holiday.mp4");
-        let mut index = InMemoryIndex::new();
+        let index = InMemoryIndex::new();
         index.insert(&record);
 
         assert_eq!(index.len(), 1);
@@ -421,40 +480,43 @@ mod tests {
 
     #[test]
     fn test_five_million_records_memory_footprint() {
-        let mut index = InMemoryIndex::new();
+        let index = InMemoryIndex::new();
 
-        index.records.reserve(5_000_000);
-        index.dir_interner.offsets.reserve(500_000);
-        index.dir_interner.lookup.reserve(500_000);
-        index.filename_interner.offsets.reserve(1_000_000);
-        index.filename_interner.lookup.reserve(1_000_000);
+        {
+            let mut inner = index.inner.write().unwrap();
+            inner.records.reserve(5_000_000);
+            inner.dir_interner.offsets.reserve(500_000);
+            inner.dir_interner.lookup.reserve(500_000);
+            inner.filename_interner.offsets.reserve(1_000_000);
+            inner.filename_interner.lookup.reserve(1_000_000);
 
-        for i in 0..500_000 {
-            let dir = format!("C:\\Users\\User\\Folder_{}", i);
-            index.dir_interner.intern(&dir);
-        }
+            for i in 0..500_000 {
+                let dir = format!("C:\\Users\\User\\Folder_{}", i);
+                inner.dir_interner.intern(&dir);
+            }
 
-        for i in 0..1_000_000 {
-            let filename = format!("file_name_{}.dat", i);
-            index.filename_interner.intern(&filename);
-        }
+            for i in 0..1_000_000 {
+                let filename = format!("file_name_{}.dat", i);
+                inner.filename_interner.intern(&filename);
+            }
 
-        for i in 0..5_000_000 {
-            let dir_id = (i % 500_000) as u32;
-            let filename_id = (i % 1_000_000) as u32;
+            for i in 0..5_000_000 {
+                let dir_id = (i % 500_000) as u32;
+                let filename_id = (i % 1_000_000) as u32;
 
-            let compact = CompactFileRecord {
-                candidate_id: i as u64,
-                size: (i * 123) as u64,
-                accessed_at: (1500000000 + i) as u32,
-                created_at: (1300000000 + i) as u32,
-                modified_at: (1400000000 + i) as u32,
-                dir_id,
-                filename_id,
-                attributes: 7,
-                packed_meta: 42,
-            };
-            index.records.push(compact);
+                let compact = CompactFileRecord {
+                    candidate_id: i as u64,
+                    size: (i * 123) as u64,
+                    accessed_at: (1500000000 + i) as u32,
+                    created_at: (1300000000 + i) as u32,
+                    modified_at: (1400000000 + i) as u32,
+                    dir_id,
+                    filename_id,
+                    attributes: 7,
+                    packed_meta: 42,
+                };
+                inner.records.push(compact);
+            }
         }
 
         // Очищуємо lookup таблиці для економії пам'яті в режимі запитів
@@ -472,5 +534,59 @@ mod tests {
             "Memory usage {:.2} MB exceeds the 300 MB limit!",
             total_mb
         );
+    }
+
+    #[test]
+    fn test_concurrent_batch_insertions() {
+        use std::sync::Arc;
+        use std::thread;
+        use std::time::Duration;
+
+        let index = Arc::new(InMemoryIndex::new());
+        let mut threads = Vec::new();
+
+        // Спавнить 8 потоків для паралельного запису пакетів записів
+        for thread_idx in 0..8 {
+            let index_clone = Arc::clone(&index);
+            threads.push(thread::spawn(move || {
+                let mut records = Vec::new();
+                for i in 0..10_000 {
+                    let id = thread_idx * 100_000 + i;
+                    records.push(sample_record(
+                        id,
+                        &format!("C:\\Users\\User\\dir_{}\\file_{}.mp4", thread_idx, i),
+                    ));
+                }
+                use trashradar_app::ports::HotIndex;
+                index_clone.insert_batch(records).unwrap();
+            }));
+        }
+
+        // Потік читача, який робить запити до індексу паралельно із записом
+        let index_clone = Arc::clone(&index);
+        let reader_thread = thread::spawn(move || {
+            let mut read_attempts = 0;
+            let mut max_observed_len = 0;
+            while max_observed_len < 80_000 && read_attempts < 1000 {
+                if let Ok(current_len) = trashradar_app::ports::HotIndex::len(&*index_clone) {
+                    if current_len > max_observed_len {
+                        max_observed_len = current_len;
+                    }
+                }
+                read_attempts += 1;
+                thread::sleep(Duration::from_millis(1));
+            }
+            println!(
+                "Reader thread finished after {} attempts. Max observed len: {}",
+                read_attempts, max_observed_len
+            );
+        });
+
+        for t in threads {
+            t.join().unwrap();
+        }
+        reader_thread.join().unwrap();
+
+        assert_eq!(index.len(), 80_000);
     }
 }

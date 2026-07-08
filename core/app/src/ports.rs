@@ -32,7 +32,22 @@ pub trait IndexStore {
 }
 
 /// Гарячий in-memory індекс. Реалізація: `index-memory` (T-015…T-018).
-pub trait HotIndex {}
+pub trait HotIndex {
+    /// Додати пакет записів файлів до індексу.
+    fn insert_batch(&self, records: Vec<FileRecord>) -> Result<(), CoreError>;
+
+    /// Завершити наповнення індексу, оптимізувавши пам'ять.
+    fn finish_indexing(&self) -> Result<(), CoreError>;
+
+    /// Отримати кількість записів в індексі.
+    fn len(&self) -> Result<usize, CoreError>;
+
+    /// Чи порожній індекс.
+    fn is_empty(&self) -> Result<bool, CoreError>;
+
+    /// Очистити індекс.
+    fn clear(&self) -> Result<(), CoreError>;
+}
 
 /// Сховище і генерація превью. Реалізація: `preview` (E6).
 pub trait PreviewStore {}
