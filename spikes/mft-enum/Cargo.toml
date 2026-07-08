@@ -1,0 +1,14 @@
+[package]
+name = "trashradar-spike-mft-enum"
+description = "Спайк T-020: вимір часу/пам'яті повного переліку файлів тому через FSCTL_ENUM_USN_DATA."
+version = "0.1.0"
+edition = "2021"
+license = "UNLICENSED"
+publish = false
+
+[[bin]]
+name = "mft-enum"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
