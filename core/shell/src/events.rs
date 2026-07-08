@@ -102,6 +102,34 @@ impl CounterThrottle {
     }
 }
 
+/// Контрактне ім'я → дротове ім'я шини Tauri.
+///
+/// Tauri забороняє крапки в іменах подій (IllegalEventName), тому на
+/// дроті `app.test` стає `app:test`. Дзеркальне перетворення — в
+/// ui/src/ipc/client.ts (subscribe). Скрізь у коді й контракті
+/// фігурують лише канонічні імена з крапками.
+pub fn wire_name(topic: &str) -> String {
+    topic.replace('.', ":")
+}
+
+/// Надсилає подію всім підписникам топіка.
+///
+/// Помилка доставки логується і НЕ повертається: емісія подій —
+/// fire-and-forget за контрактом (architecture.md §1.2), відправник
+/// не має залежати від стану webview.
+pub fn emit<R: Runtime, T: Serialize + Clone>(app: &AppHandle<R>, topic: &str, payload: &T) {
+    match app.emit(&wire_name(topic), payload.clone()) {
+        Ok(()) => {
+            EVENTS_EMITTED.fetch_add(1, Ordering::Relaxed);
+            tracing::trace!(topic, "подію надіслано")
+        }
+        Err(error) => {
+            EVENT_ERRORS.fetch_add(1, Ordering::Relaxed);
+            tracing::warn!(topic, %error, "не вдалося надіслати подію")
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,33 +177,5 @@ mod tests {
             Some(CounterSnapshot { delta: 7, total: 7 })
         );
         assert_eq!(throttle.flush(started + Duration::from_millis(30)), None);
-    }
-}
-
-/// Контрактне ім'я → дротове ім'я шини Tauri.
-///
-/// Tauri забороняє крапки в іменах подій (IllegalEventName), тому на
-/// дроті `app.test` стає `app:test`. Дзеркальне перетворення — в
-/// ui/src/ipc/client.ts (subscribe). Скрізь у коді й контракті
-/// фігурують лише канонічні імена з крапками.
-pub fn wire_name(topic: &str) -> String {
-    topic.replace('.', ":")
-}
-
-/// Надсилає подію всім підписникам топіка.
-///
-/// Помилка доставки логується і НЕ повертається: емісія подій —
-/// fire-and-forget за контрактом (architecture.md §1.2), відправник
-/// не має залежати від стану webview.
-pub fn emit<R: Runtime, T: Serialize + Clone>(app: &AppHandle<R>, topic: &str, payload: &T) {
-    match app.emit(&wire_name(topic), payload.clone()) {
-        Ok(()) => {
-            EVENTS_EMITTED.fetch_add(1, Ordering::Relaxed);
-            tracing::trace!(topic, "подію надіслано")
-        }
-        Err(error) => {
-            EVENT_ERRORS.fetch_add(1, Ordering::Relaxed);
-            tracing::warn!(topic, %error, "не вдалося надіслати подію")
-        }
     }
 }

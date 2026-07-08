@@ -14,7 +14,8 @@ use std::{
 };
 use trashradar_domain::{
     candidate::{
-        ByteSize, CandidateId, CandidateUnit, Decision, FileKind, FsTimestamp, SafetyLevel,
+        ByteSize, CandidateId, CandidateUnit, Decision, FileAttributes, FileKind, FileRecord,
+        FileRecordSort, FsTimestamp, SafetyLevel,
     },
     category::CategoryId,
 };
@@ -216,32 +217,7 @@ struct Migration {
     sql: &'static str,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct FileAttributes {
-    pub raw_bits: u32,
-    pub is_readonly: bool,
-    pub is_hidden: bool,
-    pub is_system: bool,
-    pub is_temporary: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FileRecord {
-    pub candidate_id: CandidateId,
-    pub path: String,
-    pub size: ByteSize,
-    pub created_at: Option<FsTimestamp>,
-    pub modified_at: Option<FsTimestamp>,
-    pub accessed_at: Option<FsTimestamp>,
-    pub kind: FileKind,
-    pub unit: CandidateUnit,
-    pub category: CategoryId,
-    pub safety: SafetyLevel,
-    pub decision: Decision,
-    pub detector_id: String,
-    pub explanation: String,
-    pub attributes: FileAttributes,
-}
+// FileAttributes and FileRecord are imported from trashradar_domain::candidate
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BatchWriteReport {
@@ -426,6 +402,156 @@ impl IndexDatabase {
 
         row.map(FileRecord::try_from).transpose()
     }
+
+    pub fn read_file_records_window(
+        &self,
+        category: CategoryId,
+        sort: FileRecordSort,
+        offset: u64,
+        limit: u64,
+    ) -> Result<Vec<FileRecord>> {
+        let category_str = category_name(category);
+        let limit_val = sqlite_integer("limit", limit)?;
+        let offset_val = sqlite_integer("offset", offset)?;
+
+        let sql = match sort {
+            FileRecordSort::SizeDesc => {
+                "SELECT
+                    f.candidate_id,
+                    f.path,
+                    f.size_bytes,
+                    f.created_at_filetime,
+                    f.modified_at_filetime,
+                    f.accessed_at_filetime,
+                    f.file_kind,
+                    f.candidate_unit,
+                    f.category,
+                    f.safety,
+                    f.decision,
+                    f.detector_id,
+                    f.explanation,
+                    f.attributes,
+                    f.is_readonly,
+                    f.is_hidden,
+                    f.is_system,
+                    f.is_temporary
+                FROM file_records f
+                JOIN (
+                    SELECT candidate_id
+                    FROM file_records
+                    WHERE category = ?1
+                    ORDER BY size_bytes DESC, candidate_id ASC
+                    LIMIT ?2 OFFSET ?3
+                ) sub ON f.candidate_id = sub.candidate_id
+                ORDER BY f.size_bytes DESC, f.candidate_id ASC"
+            }
+            FileRecordSort::AccessedAsc => {
+                "SELECT
+                    f.candidate_id,
+                    f.path,
+                    f.size_bytes,
+                    f.created_at_filetime,
+                    f.modified_at_filetime,
+                    f.accessed_at_filetime,
+                    f.file_kind,
+                    f.candidate_unit,
+                    f.category,
+                    f.safety,
+                    f.decision,
+                    f.detector_id,
+                    f.explanation,
+                    f.attributes,
+                    f.is_readonly,
+                    f.is_hidden,
+                    f.is_system,
+                    f.is_temporary
+                FROM file_records f
+                JOIN (
+                    SELECT candidate_id
+                    FROM file_records
+                    WHERE category = ?1
+                    ORDER BY accessed_at_filetime ASC, candidate_id ASC
+                    LIMIT ?2 OFFSET ?3
+                ) sub ON f.candidate_id = sub.candidate_id
+                ORDER BY f.accessed_at_filetime ASC, f.candidate_id ASC"
+            }
+            FileRecordSort::AccessedDesc => {
+                "SELECT
+                    f.candidate_id,
+                    f.path,
+                    f.size_bytes,
+                    f.created_at_filetime,
+                    f.modified_at_filetime,
+                    f.accessed_at_filetime,
+                    f.file_kind,
+                    f.candidate_unit,
+                    f.category,
+                    f.safety,
+                    f.decision,
+                    f.detector_id,
+                    f.explanation,
+                    f.attributes,
+                    f.is_readonly,
+                    f.is_hidden,
+                    f.is_system,
+                    f.is_temporary
+                FROM file_records f
+                JOIN (
+                    SELECT candidate_id
+                    FROM file_records
+                    WHERE category = ?1
+                    ORDER BY accessed_at_filetime DESC, candidate_id DESC
+                    LIMIT ?2 OFFSET ?3
+                ) sub ON f.candidate_id = sub.candidate_id
+                ORDER BY f.accessed_at_filetime DESC, f.candidate_id DESC"
+            }
+        };
+
+        let mut statement = self.connection.prepare_cached(sql)?;
+        let rows = statement.query_map(params![category_str, limit_val, offset_val], |row| {
+            Ok(StoredFileRecord {
+                candidate_id: row.get(0)?,
+                path: row.get(1)?,
+                size_bytes: row.get(2)?,
+                created_at: row.get(3)?,
+                modified_at: row.get(4)?,
+                accessed_at: row.get(5)?,
+                file_kind: row.get(6)?,
+                unit: row.get(7)?,
+                category: row.get(8)?,
+                safety: row.get(9)?,
+                decision: row.get(10)?,
+                detector_id: row.get(11)?,
+                explanation: row.get(12)?,
+                attributes: row.get(13)?,
+                is_readonly: row.get(14)?,
+                is_hidden: row.get(15)?,
+                is_system: row.get(16)?,
+                is_temporary: row.get(17)?,
+            })
+        })?;
+
+        let mut records = Vec::new();
+        for row in rows {
+            let stored = row?;
+            records.push(FileRecord::try_from(stored)?);
+        }
+
+        Ok(records)
+    }
+}
+
+impl trashradar_app::ports::IndexStore for IndexDatabase {
+    fn read_file_records_window(
+        &self,
+        category: CategoryId,
+        sort: FileRecordSort,
+        offset: u64,
+        limit: u64,
+    ) -> std::result::Result<Vec<FileRecord>, trashradar_domain::error::CoreError> {
+        self.read_file_records_window(category, sort, offset, limit)
+            .map_err(|err| trashradar_domain::error::CoreError::internal(err.to_string()))
+    }
 }
 
 impl IndexWriterQueue {
@@ -569,7 +695,8 @@ fn configure_connection(connection: &Connection) -> Result<()> {
     connection.pragma_update(None, "journal_mode", "WAL")?;
     connection.pragma_update(None, "synchronous", "NORMAL")?;
     connection.pragma_update(None, "foreign_keys", "ON")?;
-    connection.pragma_update(None, "cache_size", -65_536)?;
+    connection.pragma_update(None, "cache_size", -262_144)?;
+    connection.pragma_update(None, "temp_store", "MEMORY")?;
     connection.pragma_update(None, "wal_autocheckpoint", 10_000)?;
     connection.busy_timeout(BUSY_TIMEOUT)?;
 
@@ -1136,6 +1263,224 @@ mod tests {
         assert!(
             elapsed <= TARGET,
             "1M batched inserts took {elapsed:?}, expected <= {TARGET:?}"
+        );
+
+        cleanup(profile_dir);
+    }
+
+    #[test]
+    fn reads_file_records_window_with_sorting_and_paging() {
+        let profile_dir = temp_profile_dir("window-queries");
+        let mut database =
+            IndexDatabase::open_profile(&profile_dir).expect("open profile database");
+
+        // Explain query plan
+        for (inner_sort, outer_sort) in [
+            (
+                "size_bytes DESC, candidate_id ASC",
+                "f.size_bytes DESC, f.candidate_id ASC",
+            ),
+            (
+                "accessed_at_filetime ASC, candidate_id ASC",
+                "f.accessed_at_filetime ASC, f.candidate_id ASC",
+            ),
+            (
+                "accessed_at_filetime DESC, candidate_id DESC",
+                "f.accessed_at_filetime DESC, f.candidate_id DESC",
+            ),
+        ] {
+            let sql = format!(
+                "SELECT f.candidate_id FROM file_records f JOIN (
+                    SELECT candidate_id FROM file_records WHERE category = 'forgotten_videos' ORDER BY {} LIMIT 200 OFFSET 500000
+                ) sub ON f.candidate_id = sub.candidate_id ORDER BY {}",
+                inner_sort, outer_sort
+            );
+            let mut stmt = database
+                .connection
+                .prepare(&format!("EXPLAIN QUERY PLAN {}", sql))
+                .unwrap();
+            let mut rows = stmt.query([]).unwrap();
+            println!("--- QUERY PLAN FOR {} ---", inner_sort);
+            while let Some(row) = rows.next().unwrap() {
+                let detail: String = row.get(3).unwrap();
+                println!("{}", detail);
+            }
+        }
+
+        // Insert 5 records into ForgottenVideos category, and 2 into LargeFiles.
+        // Vary sizes and accessed times:
+        // Record 1: size=100, accessed=10
+        // Record 2: size=200, accessed=30
+        // Record 3: size=300, accessed=20
+        // Record 4: size=400, accessed=50
+        // Record 5: size=500, accessed=40
+        let mut records = Vec::new();
+        for i in 1..=5 {
+            let mut record = sample_file_record(i);
+            record.category = CategoryId::ForgottenVideos;
+            record.size = ByteSize(i * 100);
+            // Accessed times: 10, 30, 20, 50, 40
+            let accessed_vals = [0, 10, 30, 20, 50, 40];
+            record.accessed_at = Some(FsTimestamp(accessed_vals[i as usize]));
+            records.push(record);
+        }
+
+        // Two records in LargeFiles
+        for i in 6..=7 {
+            let mut record = sample_file_record(i);
+            record.category = CategoryId::LargeFiles;
+            records.push(record);
+        }
+
+        database
+            .upsert_file_records_batch(&records)
+            .expect("upsert records");
+
+        // Query ForgottenVideos:
+        // SizeDesc sorting, limit 3, offset 1
+        // Records sorted by size desc:
+        // #5 (500), #4 (400), #3 (300), #2 (200), #1 (100)
+        // With offset 1 and limit 3, we expect: #4 (400), #3 (300), #2 (200)
+        let window = database
+            .read_file_records_window(CategoryId::ForgottenVideos, FileRecordSort::SizeDesc, 1, 3)
+            .expect("query window size desc");
+
+        assert_eq!(window.len(), 3);
+        assert_eq!(window[0].candidate_id, CandidateId(4));
+        assert_eq!(window[1].candidate_id, CandidateId(3));
+        assert_eq!(window[2].candidate_id, CandidateId(2));
+
+        // AccessedAsc sorting, limit 3, offset 1
+        // Records sorted by accessed asc:
+        // #1 (10), #3 (20), #2 (30), #5 (40), #4 (50)
+        // With offset 1 and limit 3, we expect: #3 (20), #2 (30), #5 (40)
+        let window = database
+            .read_file_records_window(
+                CategoryId::ForgottenVideos,
+                FileRecordSort::AccessedAsc,
+                1,
+                3,
+            )
+            .expect("query window accessed asc");
+
+        assert_eq!(window.len(), 3);
+        assert_eq!(window[0].candidate_id, CandidateId(3));
+        assert_eq!(window[1].candidate_id, CandidateId(2));
+        assert_eq!(window[2].candidate_id, CandidateId(5));
+
+        // AccessedDesc sorting, limit 2, offset 0
+        // Records sorted by accessed desc:
+        // #4 (50), #5 (40), #2 (30), #3 (20), #1 (10)
+        // With offset 0 and limit 2, we expect: #4 (50), #5 (40)
+        let window = database
+            .read_file_records_window(
+                CategoryId::ForgottenVideos,
+                FileRecordSort::AccessedDesc,
+                0,
+                2,
+            )
+            .expect("query window accessed desc");
+
+        assert_eq!(window.len(), 2);
+        assert_eq!(window[0].candidate_id, CandidateId(4));
+        assert_eq!(window[1].candidate_id, CandidateId(5));
+
+        // Query LargeFiles category: limit 10, offset 0 -> expect 2 records
+        let window = database
+            .read_file_records_window(CategoryId::LargeFiles, FileRecordSort::SizeDesc, 0, 10)
+            .expect("query large files");
+        assert_eq!(window.len(), 2);
+
+        cleanup(profile_dir);
+    }
+
+    #[test]
+    #[ignore = "local T-014 perf gate; queries 1M rows and is intentionally not part of default unit tests"]
+    fn window_queries_on_one_million_records_are_under_fifty_milliseconds() {
+        const TOTAL_RECORDS: u64 = 1_000_000;
+        const BATCH_SIZE: u64 = 100_000;
+        const LIMIT: u64 = 200;
+        const TARGET: Duration = Duration::from_millis(50);
+
+        let profile_dir = temp_profile_dir("window-queries-1m");
+        let database_path = profile_dir.join(DATABASE_FILE_NAME);
+        let queue = IndexWriterQueue::open(&database_path).expect("open writer queue");
+        let writer = queue.handle();
+
+        for base in (0..TOTAL_RECORDS).step_by(BATCH_SIZE as usize) {
+            let records: Vec<_> = (base..base + BATCH_SIZE)
+                .map(|id| {
+                    let mut record = sample_file_record(id);
+                    // Make size vary so index is fully populated
+                    record.size = ByteSize(id * 73 % 999983);
+                    record.accessed_at = Some(FsTimestamp((id * 31 % 999983) as i64));
+                    record
+                })
+                .collect();
+            writer
+                .upsert_file_records(records)
+                .expect("upsert queued perf batch");
+        }
+
+        queue.shutdown().expect("shutdown writer queue");
+
+        let database = IndexDatabase::open(&database_path).expect("open reader database");
+        assert_eq!(count_file_records(&database), TOTAL_RECORDS as i64);
+
+        // Warm up cache for SizeDesc
+        let _ = database
+            .read_file_records_window(
+                CategoryId::ForgottenVideos,
+                FileRecordSort::SizeDesc,
+                500_000,
+                LIMIT,
+            )
+            .expect("query window size desc warm");
+
+        // Perform paged query and measure time
+        let start = Instant::now();
+        let records = database
+            .read_file_records_window(
+                CategoryId::ForgottenVideos,
+                FileRecordSort::SizeDesc,
+                500_000,
+                LIMIT,
+            )
+            .expect("query window size desc");
+        let elapsed = start.elapsed();
+
+        assert_eq!(records.len(), LIMIT as usize);
+        assert!(
+            elapsed <= TARGET,
+            "Querying 200/1M records took {elapsed:?}, expected <= {TARGET:?}"
+        );
+
+        // Warm up cache for AccessedAsc
+        let _ = database
+            .read_file_records_window(
+                CategoryId::ForgottenVideos,
+                FileRecordSort::AccessedAsc,
+                500_000,
+                LIMIT,
+            )
+            .expect("query window accessed asc warm");
+
+        // Try accessed sort
+        let start = Instant::now();
+        let records = database
+            .read_file_records_window(
+                CategoryId::ForgottenVideos,
+                FileRecordSort::AccessedAsc,
+                500_000,
+                LIMIT,
+            )
+            .expect("query window accessed asc");
+        let elapsed = start.elapsed();
+
+        assert_eq!(records.len(), LIMIT as usize);
+        assert!(
+            elapsed <= TARGET,
+            "Querying 200/1M records by accessed asc took {elapsed:?}, expected <= {TARGET:?}"
         );
 
         cleanup(profile_dir);

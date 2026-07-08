@@ -68,3 +68,44 @@ pub enum SafetyLevel {
     /// Рекомендований перегляд людиною (маркер «?» у REAP-флоу).
     ReviewRecommended,
 }
+
+/// Атрибути файлової системи (Windows-прапорці та додаткові біти).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileAttributes {
+    pub raw_bits: u32,
+    pub is_readonly: bool,
+    pub is_hidden: bool,
+    pub is_system: bool,
+    pub is_temporary: bool,
+}
+
+/// Запис кандидата на видалення, збережений у persistent-індексі.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileRecord {
+    pub candidate_id: CandidateId,
+    pub path: String,
+    pub size: ByteSize,
+    pub created_at: Option<FsTimestamp>,
+    pub modified_at: Option<FsTimestamp>,
+    pub accessed_at: Option<FsTimestamp>,
+    pub kind: FileKind,
+    pub unit: CandidateUnit,
+    pub category: CategoryId,
+    pub safety: SafetyLevel,
+    pub decision: Decision,
+    pub detector_id: String,
+    pub explanation: String,
+    pub attributes: FileAttributes,
+}
+
+/// Варіанти сортування віконних запитів.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileRecordSort {
+    /// За розміром (від більших до менших).
+    SizeDesc,
+    /// За часом останнього доступу (від давніших до новіших).
+    AccessedAsc,
+    /// За часом останнього доступу (від новіших до давніших).
+    AccessedDesc,
+}

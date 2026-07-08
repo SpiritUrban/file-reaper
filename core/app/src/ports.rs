@@ -12,9 +12,24 @@ pub trait ScanSource {}
 /// Джерело інкрементальних змін тому. Реалізація: `scan-usn` (T-029/T-030).
 pub trait ChangeSource {}
 
+use trashradar_domain::{
+    candidate::{FileRecord, FileRecordSort},
+    category::CategoryId,
+    error::CoreError,
+};
+
 /// Persistent-індекс кандидатів і журнал Quarantine.
 /// Реалізація: `index-sqlite` (T-011…T-014, T-078).
-pub trait IndexStore {}
+pub trait IndexStore {
+    /// Отримати вікно записів кандидатів для конкретної категорії з сортуванням.
+    fn read_file_records_window(
+        &self,
+        category: CategoryId,
+        sort: FileRecordSort,
+        offset: u64,
+        limit: u64,
+    ) -> Result<Vec<FileRecord>, CoreError>;
+}
 
 /// Гарячий in-memory індекс. Реалізація: `index-memory` (T-015…T-018).
 pub trait HotIndex {}
