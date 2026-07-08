@@ -967,6 +967,10 @@ fn category_name(category: CategoryId) -> &'static str {
         CategoryId::TempFiles => "temp_files",
         CategoryId::AppCaches => "app_caches",
         CategoryId::DevArtifacts => "dev_artifacts",
+        // Не входить у схему CHECK: uncategorized-записи живуть лише в гарячому
+        // in-memory індексі. Спроба записати такий у SQLite впаде на CHECK —
+        // це навмисний інваріант «persistent = лише категоризоване».
+        CategoryId::Uncategorized => "uncategorized",
     }
 }
 
@@ -981,6 +985,7 @@ fn parse_category(value: &str) -> Result<CategoryId> {
         "temp_files" => Ok(CategoryId::TempFiles),
         "app_caches" => Ok(CategoryId::AppCaches),
         "dev_artifacts" => Ok(CategoryId::DevArtifacts),
+        "uncategorized" => Ok(CategoryId::Uncategorized),
         value => invalid_enum("category", value),
     }
 }

@@ -256,7 +256,8 @@ fn parse_category_val(val: u16) -> CategoryId {
         5 => CategoryId::Installers,
         6 => CategoryId::TempFiles,
         7 => CategoryId::AppCaches,
-        _ => CategoryId::DevArtifacts,
+        8 => CategoryId::DevArtifacts,
+        _ => CategoryId::Uncategorized,
     }
 }
 

@@ -16,6 +16,12 @@ pub enum CategoryId {
     TempFiles,
     AppCaches,
     DevArtifacts,
+    /// Скановано, але ще не заявлено жодним детектором (architecture.md §3.4:
+    /// «знайдений сканером → у пам'яті → категоризований»). Такий запис живе
+    /// лише в гарячому in-memory індексі й не показується користувачу; у
+    /// persistent-SQLite потрапляють лише категоризовані записи. Свідомо НЕ
+    /// входить до [`CategoryId::ALL`] — це не детекторна категорія.
+    Uncategorized,
 }
 
 impl CategoryId {

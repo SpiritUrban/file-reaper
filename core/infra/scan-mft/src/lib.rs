@@ -4,12 +4,14 @@
 //! - [`record`] — чистий парсер байтів запису MFT (T-021), тестований у CI
 //!   без доступу до тому;
 //! - [`paths`] — побудова повних шляхів із `parent_ref`-ланцюжка (T-022);
+//! - [`pipeline`] — батчева видача `FileRecord` у індекс зі зворотним тиском (T-024);
 //! - [`volume`] — читач `$MFT` через WinAPI (T-021), потребує адмін-прав;
 //!   перевіряється ігнорованим інтеграційним тестом на реальному томі.
 //!
-//! Батчі — T-024, обробка помилок — T-025.
+//! Обробка помилок — T-025.
 
 pub mod paths;
+pub mod pipeline;
 pub mod record;
 
 #[cfg(windows)]
@@ -344,5 +346,59 @@ mod integration {
         for (ext, n) in others.iter().take(15) {
             println!("  .{ext:<10} {n:>10}");
         }
+    }
+
+    // DoD T-024: сканер віддає батчі по N тис. записів у справжній HotIndex;
+    // зворотний тиск не роздуває пам'ять (у льоті — не більше одного батча).
+    // Том має бути тихим; запуск як вище.
+    #[test]
+    #[ignore = "DoD T-024: потребує адмін-прав і реального тому; TR_MFT_TEST_DRIVE"]
+    fn scan_fills_index_in_bounded_batches() {
+        use std::cell::Cell;
+        use trashradar_app::ports::HotIndex;
+        use trashradar_index_memory::InMemoryIndex;
+
+        let drive = std::env::var("TR_MFT_TEST_DRIVE")
+            .ok()
+            .and_then(|s| s.chars().next())
+            .unwrap_or('F');
+
+        const BATCH: usize = 10_000;
+        let index = InMemoryIndex::new();
+        let max_batch = Cell::new(0usize);
+        let batch_count = Cell::new(0u64);
+
+        let stats = crate::pipeline::scan_volume_to_index(drive, BATCH, |batch| {
+            max_batch.set(max_batch.get().max(batch.len()));
+            batch_count.set(batch_count.get() + 1);
+            index.insert_batch(batch)
+        })
+        .expect("скан у індекс");
+
+        index.finish_indexing();
+
+        println!(
+            "Том {drive}: у індекс {} файлів, {} батчів, макс. батч {}; пропущено без шляху {}",
+            stats.files_indexed,
+            stats.batches,
+            max_batch.get(),
+            stats.skipped_no_path
+        );
+
+        // Індекс наповнено рівно стількома записами, скільки віддано.
+        assert_eq!(index.len() as u64, stats.files_indexed);
+        assert!(stats.files_indexed > 0, "нічого не проіндексовано");
+        // Зворотний тиск: у пам'яті жодного разу не більше одного батча.
+        assert!(
+            max_batch.get() <= BATCH,
+            "батч {} перевищив ліміт {BATCH}",
+            max_batch.get()
+        );
+        // Батчів приблизно files/BATCH (остача — останній неповний батч).
+        assert_eq!(
+            stats.batches,
+            stats.files_indexed.div_ceil(BATCH as u64),
+            "кількість батчів не відповідає розміру батча"
+        );
     }
 }
