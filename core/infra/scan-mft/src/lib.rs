@@ -290,4 +290,59 @@ mod integration {
             exist_rate
         );
     }
+
+    // T-023 (інфо): розподіл FileKind по реальному тому та топ нерозпізнаних
+    // розширень — доказова база для критерію покриття і виявлення прогалин
+    // таблиці. Не асертить відсоток (частка «інше» на диску легально велика
+    // через код/систему); друкує зведення. Запуск як вище.
+    #[test]
+    #[ignore = "T-023 інфо-вимір: потребує адмін-прав і реального тому"]
+    fn classifier_coverage_on_real_volume() {
+        use std::collections::HashMap;
+        use trashradar_domain::candidate::FileKind;
+
+        let drive = std::env::var("TR_MFT_TEST_DRIVE")
+            .ok()
+            .and_then(|s| s.chars().next())
+            .unwrap_or('F');
+
+        let mut per_kind: HashMap<String, u64> = HashMap::new();
+        let mut other_ext: HashMap<String, u64> = HashMap::new();
+        let mut files = 0u64;
+        super::enumerate_with(drive, |e| {
+            if e.is_directory {
+                return;
+            }
+            files += 1;
+            let kind = FileKind::from_path(&e.name);
+            *per_kind.entry(format!("{kind:?}")).or_default() += 1;
+            if kind == FileKind::Other {
+                let ext = e
+                    .name
+                    .rsplit_once('.')
+                    .map(|(_, x)| x.to_ascii_lowercase())
+                    .filter(|x| !x.is_empty() && x.len() <= 8)
+                    .unwrap_or_else(|| "<none>".to_string());
+                *other_ext.entry(ext).or_default() += 1;
+            }
+        })
+        .expect("сирий парсинг $MFT");
+
+        let mut kinds: Vec<_> = per_kind.into_iter().collect();
+        kinds.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+        let mut others: Vec<_> = other_ext.into_iter().collect();
+        others.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+
+        println!("Том {drive}: {files} файлів");
+        for (kind, n) in &kinds {
+            println!(
+                "  {kind:<10} {n:>10} ({:.1}%)",
+                *n as f64 / files as f64 * 100.0
+            );
+        }
+        println!("Топ-15 нерозпізнаних розширень (→ Other):");
+        for (ext, n) in others.iter().take(15) {
+            println!("  .{ext:<10} {n:>10}");
+        }
+    }
 }

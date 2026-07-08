@@ -30,6 +30,70 @@ pub enum FileKind {
     Other,
 }
 
+impl FileKind {
+    /// Класифікує файл за розширенням у шляху чи імені (T-023).
+    /// Файли без розширення та dotfiles (`.gitignore`) — [`FileKind::Other`].
+    pub fn from_path(path: &str) -> FileKind {
+        match extension_of(path) {
+            Some(ext) => FileKind::from_extension(ext),
+            None => FileKind::Other,
+        }
+    }
+
+    /// Класифікує за самим розширенням (без крапки, регістр не має значення).
+    /// Невідоме розширення → [`FileKind::Other`] (docs/tasks.md T-023).
+    ///
+    /// Код і конфіги свідомо лишаються `Other`: dev-артефакти визначають
+    /// структурні детектори (T-049+), не розширення.
+    pub fn from_extension(ext: &str) -> FileKind {
+        // Розширення короткі й ASCII — порівнюємо без регістру без алокацій.
+        let lower = ext.to_ascii_lowercase();
+        match lower.as_str() {
+            "mp4" | "m4v" | "mkv" | "avi" | "mov" | "wmv" | "flv" | "webm" | "mpg" | "mpeg"
+            | "m2ts" | "mts" | "ts" | "vob" | "3gp" | "3g2" | "ogv" | "rm" | "rmvb" | "divx"
+            | "f4v" | "mxf" | "asf" | "braw" | "r3d" => FileKind::Video,
+
+            "jpg" | "jpeg" | "jpe" | "jfif" | "png" | "gif" | "bmp" | "dib" | "tif" | "tiff"
+            | "webp" | "heic" | "heif" | "avif" | "ico" | "svg" | "wmf" | "emf" | "psd" | "ai"
+            | "eps" | "cr2" | "cr3" | "nef" | "arw" | "dng" | "orf" | "rw2" | "raf" | "sr2"
+            | "pef" => FileKind::Image,
+
+            "mp3" | "wav" | "flac" | "aac" | "ogg" | "oga" | "m4a" | "wma" | "aiff" | "aif"
+            | "alac" | "opus" | "mid" | "midi" | "ape" | "wv" => FileKind::Audio,
+
+            "zip" | "rar" | "7z" | "tar" | "gz" | "tgz" | "bz2" | "tbz2" | "xz" | "txz" | "zst"
+            | "cab" | "arj" | "lzh" | "lha" | "z" | "lz4" => FileKind::Archive,
+
+            "exe" | "msi" | "msix" | "appx" | "appxbundle" | "msu" | "apk" | "aab" | "deb"
+            | "rpm" | "dmg" | "pkg" => FileKind::Installer,
+
+            "iso" | "img" | "vhd" | "vhdx" | "vmdk" | "nrg" | "mdf" | "cue" => FileKind::DiskImage,
+
+            "pdf" | "doc" | "docx" | "dot" | "dotx" | "xls" | "xlsx" | "xlsm" | "ppt" | "pptx"
+            | "txt" | "rtf" | "odt" | "ods" | "odp" | "csv" | "tsv" | "md" | "markdown"
+            | "epub" | "mobi" | "azw3" | "djvu" => FileKind::Document,
+
+            _ => FileKind::Other,
+        }
+    }
+}
+
+/// Витягує розширення (без крапки) з імені файла в кінці шляху.
+/// `None` для файлів без розширення та dotfiles (`.gitignore`).
+fn extension_of(path: &str) -> Option<&str> {
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    let dot = name.rfind('.')?;
+    if dot == 0 {
+        return None; // dotfile без розширення
+    }
+    let ext = &name[dot + 1..];
+    if ext.is_empty() {
+        None
+    } else {
+        Some(ext)
+    }
+}
+
 /// Що показує сітка: окремий файл або папка-одиниця (node_modules тощо, T-053).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -108,4 +172,72 @@ pub enum FileRecordSort {
     AccessedAsc,
     /// За часом останнього доступу (від новіших до давніших).
     AccessedDesc,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classifies_representative_extensions_per_kind() {
+        for ext in ["mp4", "mkv", "mov", "webm"] {
+            assert_eq!(FileKind::from_extension(ext), FileKind::Video, "{ext}");
+        }
+        for ext in ["jpg", "png", "heic", "cr3", "psd", "wmf", "emf"] {
+            assert_eq!(FileKind::from_extension(ext), FileKind::Image, "{ext}");
+        }
+        for ext in ["mp3", "flac", "wav", "opus"] {
+            assert_eq!(FileKind::from_extension(ext), FileKind::Audio, "{ext}");
+        }
+        for ext in ["zip", "rar", "7z", "gz", "zst"] {
+            assert_eq!(FileKind::from_extension(ext), FileKind::Archive, "{ext}");
+        }
+        for ext in ["exe", "msi", "msix", "apk"] {
+            assert_eq!(FileKind::from_extension(ext), FileKind::Installer, "{ext}");
+        }
+        for ext in ["iso", "img", "vhdx", "vmdk"] {
+            assert_eq!(FileKind::from_extension(ext), FileKind::DiskImage, "{ext}");
+        }
+        for ext in ["pdf", "docx", "xlsx", "txt", "epub"] {
+            assert_eq!(FileKind::from_extension(ext), FileKind::Document, "{ext}");
+        }
+    }
+
+    #[test]
+    fn classification_is_case_insensitive() {
+        assert_eq!(FileKind::from_extension("MP4"), FileKind::Video);
+        assert_eq!(FileKind::from_extension("Jpg"), FileKind::Image);
+        assert_eq!(FileKind::from_path("C:\\Movies\\CLIP.MKV"), FileKind::Video);
+    }
+
+    #[test]
+    fn unknown_and_code_extensions_are_other() {
+        for ext in ["rs", "js", "py", "dll", "log", "dat", "unknownext"] {
+            assert_eq!(FileKind::from_extension(ext), FileKind::Other, "{ext}");
+        }
+    }
+
+    #[test]
+    fn from_path_extracts_extension_from_full_path() {
+        assert_eq!(
+            FileKind::from_path("C:\\Users\\Ada\\holiday.mp4"),
+            FileKind::Video
+        );
+        assert_eq!(FileKind::from_path("/mnt/d/photo.JPG"), FileKind::Image);
+    }
+
+    #[test]
+    fn multi_dot_uses_last_extension() {
+        assert_eq!(FileKind::from_path("backup.tar.gz"), FileKind::Archive);
+        assert_eq!(FileKind::from_path("archive.7z"), FileKind::Archive);
+    }
+
+    #[test]
+    fn files_without_extension_and_dotfiles_are_other() {
+        assert_eq!(FileKind::from_path("C:\\bin\\Makefile"), FileKind::Other);
+        assert_eq!(FileKind::from_path(".gitignore"), FileKind::Other);
+        assert_eq!(FileKind::from_path("C:\\repo\\.env"), FileKind::Other);
+        assert_eq!(FileKind::from_path("noext"), FileKind::Other);
+        assert_eq!(FileKind::from_path("trailingdot."), FileKind::Other);
+    }
 }
