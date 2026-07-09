@@ -83,6 +83,8 @@
 
 | T-043 Детектор «Інсталятори та ISO» | ✅ | 2026-07-09 | local | **`detectors/installers`:** `InstallersDetector` — DiskImage **будь-де**; Installer **лише** у Downloads/Download/Завантаження (`is_downloads_like_path`, сегментне порівняння); explanation «інсталятор…» / «образ диска…». DoD: 7 unit + path helper. clippy `-D warnings`. |
 
+| T-044 Формат реєстру відомих локацій | ✅ | 2026-07-09 | local | **Схема v1** `registry/known-locations.json` + README. **App `location_registry`:** parse/validate (`LocationEntry`, `kind`, `safety`, `paths` з `%VAR%`), runtime `load_from_file`/`load_default` (TRASHRADAR_REGISTRY_DIR), `expand_path_template`, `path_matches_prefix`. DoD: новий JSON-запис без змін Rust; 10 unit. clippy `-D warnings`. |
+
 ## Легенда
 
 ✅ виконано й верифіковано · 🔄 в роботі · ⛔ заблоковано (причина в нотатках)

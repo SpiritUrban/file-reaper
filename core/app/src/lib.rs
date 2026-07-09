@@ -12,6 +12,7 @@
 pub mod change_monitor;
 pub mod detectors;
 pub mod elevation;
+pub mod location_registry;
 pub mod ports;
 pub mod scan_control;
 pub mod scan_strategy;
