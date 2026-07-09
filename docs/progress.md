@@ -75,6 +75,8 @@
 
 | T-039 Детектор «Великі файли» | ✅ | 2026-07-09 | local | **`detectors/large_files`:** `LargeFilesDetector` (id `large_files`, CategoryId::LargeFiles); дефолт поріг **100 МіБ**; `evaluate` size≥порогу → Verdict explanation «розмір N ГБ» (`format_size_gb`), safety ReviewRecommended; лише `CandidateUnit::File`; `min_size_bytes` live (T-038). DoD: 7 unit. clippy `-D warnings`. |
 
+| T-040 Детектор «Старі файли» | ✅ | 2026-07-09 | local | **`detectors/old_files`:** `OldFilesDetector` (id `old_files`); вік = accessed_at else modified_at ≥ `min_age_days` (дефолт **365**); пояснення «останній доступ/зміна N … тому»; `with_now_filetime` для тестів; live `min_age_days` (T-038). DoD: 9 unit + format age helpers. clippy `-D warnings`. |
+
 ## Легенда
 
 ✅ виконано й верифіковано · 🔄 в роботі · ⛔ заблоковано (причина в нотатках)
