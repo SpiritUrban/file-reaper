@@ -139,6 +139,55 @@ pub trait HotIndex {
 /// Сховище і генерація превью. Реалізація: `preview` (E6).
 pub trait PreviewStore {}
 
+/// Види прев'ю (T-068).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PreviewKind {
+    /// Статична мініатюра (зображення або ключовий кадр відео).
+    Thumbnail,
+    /// Скраб-смуга кадрів відео.
+    Scrub,
+}
+
+/// Запис кешу прев'ю (T-068).
+#[derive(Debug, Clone)]
+pub struct PreviewCacheEntry {
+    pub source_path: String,
+    pub preview_kind: PreviewKind,
+    pub size: ByteSize,
+    pub modified_at: Option<FsTimestamp>,
+    pub preview_path: String,
+}
+
+impl PreviewCacheEntry {
+    /// Чи є запис кешу валідним для поточного файлу за розміром та датою зміни.
+    pub fn is_valid_for(
+        &self,
+        current_size: ByteSize,
+        current_modified: Option<FsTimestamp>,
+    ) -> bool {
+        self.size == current_size && self.modified_at == current_modified
+    }
+}
+
+/// Порт для збереження посилань на прев'ю в індексі (T-068).
+pub trait PreviewCache: Send + Sync {
+    /// Отримати запис кешу прев'ю.
+    fn get_preview_entry(
+        &self,
+        source_path: &str,
+        kind: PreviewKind,
+    ) -> Result<Option<PreviewCacheEntry>, CoreError>;
+
+    /// Зберегти або оновити запис кешу прев'ю.
+    fn put_preview_entry(&self, entry: &PreviewCacheEntry) -> Result<(), CoreError>;
+
+    /// Видалити конкретне прев'ю для шляху.
+    fn delete_preview_entry(&self, source_path: &str, kind: PreviewKind) -> Result<(), CoreError>;
+
+    /// Видалити всі прев'ю для шляху.
+    fn delete_all_previews_for_path(&self, source_path: &str) -> Result<(), CoreError>;
+}
+
 /// Єдиний шлюз деструктивних операцій з FS (move/restore/purge).
 /// Реалізація: `quarantine-fs` (T-077, T-079…T-084). Інваріант D4:
 /// жоден інший порт не має права змінювати файлову систему.

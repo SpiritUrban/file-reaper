@@ -1,8 +1,12 @@
-use crate::workers::CancellationToken;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
+
+use crate::ports::{PreviewCache, PreviewCacheEntry, PreviewKind};
+use crate::workers::CancellationToken;
+use trashradar_domain::candidate::{ByteSize, FsTimestamp};
 
 /// Пріоритети для запитів генерації превью (docs/architecture.md §5.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -226,6 +230,105 @@ fn worker_loop(state_lock: Arc<Mutex<SchedulerState>>, changed: Arc<Condvar>) {
     }
 }
 
+/// Дисковий кеш прев'ю інтегрований з базою даних (T-068).
+pub struct PreviewCacheManager {
+    cache_dir: PathBuf,
+    db: Arc<dyn PreviewCache>,
+}
+
+impl PreviewCacheManager {
+    /// Створити новий менеджер кешу прев'ю.
+    pub fn new(cache_dir: PathBuf, db: Arc<dyn PreviewCache>) -> Self {
+        let _ = std::fs::create_dir_all(&cache_dir);
+        Self { cache_dir, db }
+    }
+
+    /// Отримати шлях до кешованого прев'ю, якщо воно є валідним за розміром та mtime джерела,
+    /// і відповідний файл дійсно існує на диску.
+    pub fn get_valid_preview_path(
+        &self,
+        source_path: &str,
+        kind: PreviewKind,
+        current_size: ByteSize,
+        current_modified: Option<FsTimestamp>,
+    ) -> Option<String> {
+        let entry = self.db.get_preview_entry(source_path, kind).ok()??;
+        if entry.is_valid_for(current_size, current_modified) {
+            if Path::new(&entry.preview_path).exists() {
+                Some(entry.preview_path)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
+    /// Зберегти прев'ю на диск та зафіксувати посилання на нього в індексі.
+    /// Ім'я файлу генерується детерміновано за допомогою хэшування шляху джерела.
+    pub fn save_preview(
+        &self,
+        source_path: &str,
+        kind: PreviewKind,
+        current_size: ByteSize,
+        current_modified: Option<FsTimestamp>,
+        preview_data: &[u8],
+    ) -> Result<String, trashradar_domain::error::CoreError> {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = DefaultHasher::new();
+        source_path.hash(&mut hasher);
+        let hash_val = hasher.finish();
+
+        let ext = match kind {
+            PreviewKind::Thumbnail => "thumb.jpg",
+            PreviewKind::Scrub => "scrub.bin",
+        };
+        let filename = format!("{:x}_{}", hash_val, ext);
+        let preview_path_buf = self.cache_dir.join(filename);
+        let preview_path = preview_path_buf
+            .to_str()
+            .ok_or_else(|| {
+                trashradar_domain::error::CoreError::invalid_argument("invalid cache path encoding")
+            })?
+            .to_string();
+
+        std::fs::write(&preview_path_buf, preview_data)
+            .map_err(|err| trashradar_domain::error::CoreError::io(err.to_string()))?;
+
+        let entry = PreviewCacheEntry {
+            source_path: source_path.to_string(),
+            preview_kind: kind,
+            size: current_size,
+            modified_at: current_modified,
+            preview_path: preview_path.clone(),
+        };
+        self.db.put_preview_entry(&entry)?;
+
+        Ok(preview_path)
+    }
+
+    /// Видалити всі кешовані файли прев'ю та записи в індексі для заданого шляху джерела.
+    pub fn delete_previews(
+        &self,
+        source_path: &str,
+    ) -> Result<(), trashradar_domain::error::CoreError> {
+        if let Some(entry) = self
+            .db
+            .get_preview_entry(source_path, PreviewKind::Thumbnail)?
+        {
+            let _ = std::fs::remove_file(Path::new(&entry.preview_path));
+        }
+        if let Some(entry) = self.db.get_preview_entry(source_path, PreviewKind::Scrub)? {
+            let _ = std::fs::remove_file(Path::new(&entry.preview_path));
+        }
+
+        self.db.delete_all_previews_for_path(source_path)?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -400,5 +503,144 @@ mod tests {
 
         // Verify P0 task ran immediately after
         p0_rx.recv_timeout(Duration::from_millis(500)).unwrap();
+    }
+
+    struct MockPreviewCache {
+        entries: Mutex<HashMap<(String, PreviewKind), PreviewCacheEntry>>,
+    }
+
+    impl MockPreviewCache {
+        fn new() -> Self {
+            Self {
+                entries: Mutex::new(HashMap::new()),
+            }
+        }
+    }
+
+    impl PreviewCache for MockPreviewCache {
+        fn get_preview_entry(
+            &self,
+            source_path: &str,
+            kind: PreviewKind,
+        ) -> std::result::Result<Option<PreviewCacheEntry>, trashradar_domain::error::CoreError>
+        {
+            let map = self.entries.lock().unwrap();
+            Ok(map.get(&(source_path.to_string(), kind)).cloned())
+        }
+
+        fn put_preview_entry(
+            &self,
+            entry: &PreviewCacheEntry,
+        ) -> std::result::Result<(), trashradar_domain::error::CoreError> {
+            let mut map = self.entries.lock().unwrap();
+            map.insert(
+                (entry.source_path.clone(), entry.preview_kind),
+                entry.clone(),
+            );
+            Ok(())
+        }
+
+        fn delete_preview_entry(
+            &self,
+            source_path: &str,
+            kind: PreviewKind,
+        ) -> std::result::Result<(), trashradar_domain::error::CoreError> {
+            let mut map = self.entries.lock().unwrap();
+            map.remove(&(source_path.to_string(), kind));
+            Ok(())
+        }
+
+        fn delete_all_previews_for_path(
+            &self,
+            source_path: &str,
+        ) -> std::result::Result<(), trashradar_domain::error::CoreError> {
+            let mut map = self.entries.lock().unwrap();
+            map.retain(|(path, _), _| path != source_path);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_preview_cache_manager_flow() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "tr_test_cache_{}",
+            Instant::now().elapsed().as_micros()
+        ));
+        let db = Arc::new(MockPreviewCache::new());
+        let manager =
+            PreviewCacheManager::new(temp_dir.clone(), Arc::clone(&db) as Arc<dyn PreviewCache>);
+
+        let source = r"C:\T\source_file.jpg";
+        let size = ByteSize(500);
+        let mtime = Some(FsTimestamp(999));
+        let preview_data = b"fake jpeg content";
+
+        // Query missing
+        assert!(manager
+            .get_valid_preview_path(source, PreviewKind::Thumbnail, size, mtime)
+            .is_none());
+
+        // Save
+        let ppath = manager
+            .save_preview(source, PreviewKind::Thumbnail, size, mtime, preview_data)
+            .unwrap();
+        assert!(Path::new(&ppath).exists());
+
+        // Query valid hit
+        let hit = manager
+            .get_valid_preview_path(source, PreviewKind::Thumbnail, size, mtime)
+            .unwrap();
+        assert_eq!(hit, ppath);
+
+        // Query invalid size
+        assert!(manager
+            .get_valid_preview_path(source, PreviewKind::Thumbnail, ByteSize(501), mtime)
+            .is_none());
+
+        // Query invalid mtime
+        assert!(manager
+            .get_valid_preview_path(
+                source,
+                PreviewKind::Thumbnail,
+                size,
+                Some(FsTimestamp(1000))
+            )
+            .is_none());
+
+        // Save new version
+        let ppath2 = manager
+            .save_preview(
+                source,
+                PreviewKind::Thumbnail,
+                ByteSize(501),
+                Some(FsTimestamp(1000)),
+                b"updated data",
+            )
+            .unwrap();
+        assert!(Path::new(&ppath2).exists());
+
+        let hit2 = manager
+            .get_valid_preview_path(
+                source,
+                PreviewKind::Thumbnail,
+                ByteSize(501),
+                Some(FsTimestamp(1000)),
+            )
+            .unwrap();
+        assert_eq!(hit2, ppath2);
+
+        // Delete
+        manager.delete_previews(source).unwrap();
+        assert!(!Path::new(&ppath2).exists());
+        assert!(manager
+            .get_valid_preview_path(
+                source,
+                PreviewKind::Thumbnail,
+                ByteSize(501),
+                Some(FsTimestamp(1000))
+            )
+            .is_none());
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

@@ -28,7 +28,8 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const SCHEMA_VERSION_V1: i64 = 1;
 const SCHEMA_VERSION_V2: i64 = 2;
 const SCHEMA_VERSION_V3: i64 = 3;
-const LATEST_SCHEMA_VERSION: i64 = SCHEMA_VERSION_V3;
+const SCHEMA_VERSION_V4: i64 = 4;
+const LATEST_SCHEMA_VERSION: i64 = SCHEMA_VERSION_V4;
 const WRITER_QUEUE_CHANNEL_CLOSED: &str = "sqlite index writer queue is closed";
 
 /// Migration v1 creates the persistent file-record layer used by scanner output and
@@ -113,6 +114,20 @@ CREATE TABLE IF NOT EXISTS file_hash_cache (
 PRAGMA user_version = 3;
 "#;
 
+/// T-068: кеш preview_cache (посилання на прев'ю, валідність size + mtime).
+const SCHEMA_V4_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS preview_cache (
+    source_path TEXT NOT NULL,
+    preview_kind TEXT NOT NULL CHECK (preview_kind IN ('thumbnail', 'scrub')),
+    size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+    modified_at_filetime INTEGER NOT NULL DEFAULT 0,
+    preview_path TEXT NOT NULL,
+    PRIMARY KEY (source_path, preview_kind)
+);
+
+PRAGMA user_version = 4;
+"#;
+
 const MIGRATIONS: &[Migration] = &[
     Migration {
         version: SCHEMA_VERSION_V1,
@@ -125,6 +140,10 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         version: SCHEMA_VERSION_V3,
         sql: SCHEMA_V3_SQL,
+    },
+    Migration {
+        version: SCHEMA_VERSION_V4,
+        sql: SCHEMA_V4_SQL,
     },
 ];
 
@@ -692,6 +711,90 @@ impl IndexDatabase {
         Ok(())
     }
 
+    // --- T-068: preview_cache ------------------------------------------------
+
+    pub fn get_preview_cache_entry(
+        &self,
+        source_path: &str,
+        kind: trashradar_app::ports::PreviewKind,
+    ) -> Result<Option<trashradar_app::ports::PreviewCacheEntry>> {
+        let kind_str = preview_kind_name(kind);
+        type PreviewCacheRow = (i64, i64, String);
+        let row: Option<PreviewCacheRow> = self
+            .connection
+            .query_row(
+                "SELECT size_bytes, modified_at_filetime, preview_path
+                 FROM preview_cache
+                 WHERE source_path = ?1 AND preview_kind = ?2",
+                params![source_path, kind_str],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+
+        match row {
+            Some((size, mtime, preview_path)) => {
+                let modified_at = if mtime == 0 {
+                    None
+                } else {
+                    Some(FsTimestamp(mtime))
+                };
+                Ok(Some(trashradar_app::ports::PreviewCacheEntry {
+                    source_path: source_path.to_string(),
+                    preview_kind: kind,
+                    size: ByteSize(size as u64),
+                    modified_at,
+                    preview_path,
+                }))
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub fn put_preview_cache_entry(
+        &self,
+        entry: &trashradar_app::ports::PreviewCacheEntry,
+    ) -> Result<()> {
+        let kind_str = preview_kind_name(entry.preview_kind);
+        let mtime = entry.modified_at.map(|t| t.0).unwrap_or(0);
+        self.connection.execute(
+            "INSERT INTO preview_cache (source_path, preview_kind, size_bytes, modified_at_filetime, preview_path)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(source_path, preview_kind) DO UPDATE SET
+                size_bytes = excluded.size_bytes,
+                modified_at_filetime = excluded.modified_at_filetime,
+                preview_path = excluded.preview_path",
+            params![
+                entry.source_path,
+                kind_str,
+                entry.size.0 as i64,
+                mtime,
+                entry.preview_path
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_preview_cache_entry(
+        &self,
+        source_path: &str,
+        kind: trashradar_app::ports::PreviewKind,
+    ) -> Result<()> {
+        let kind_str = preview_kind_name(kind);
+        self.connection.execute(
+            "DELETE FROM preview_cache WHERE source_path = ?1 AND preview_kind = ?2",
+            params![source_path, kind_str],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_all_preview_cache_entries_for_path(&self, source_path: &str) -> Result<()> {
+        self.connection.execute(
+            "DELETE FROM preview_cache WHERE source_path = ?1",
+            params![source_path],
+        )?;
+        Ok(())
+    }
+
     pub fn read_all_file_records(&self) -> Result<Vec<FileRecord>> {
         let sql = "SELECT
             candidate_id,
@@ -846,6 +949,89 @@ impl trashradar_app::ports::HashCache for ThreadSafeHashCache {
             })?
             .put_hash_cache_entry(entry)
             .map_err(|err| trashradar_domain::error::CoreError::internal(err.to_string()))
+    }
+}
+
+/// Thread-safe обгортка `IndexDatabase` для [`PreviewCache`] (rusqlite Connection !Sync).
+pub struct ThreadSafePreviewCache {
+    db: std::sync::Mutex<IndexDatabase>,
+}
+
+impl ThreadSafePreviewCache {
+    pub fn new(db: IndexDatabase) -> Self {
+        Self {
+            db: std::sync::Mutex::new(db),
+        }
+    }
+
+    pub fn open_profile(profile_dir: impl AsRef<std::path::Path>) -> Result<Self> {
+        Ok(Self::new(IndexDatabase::open_profile(profile_dir)?))
+    }
+}
+
+impl trashradar_app::ports::PreviewCache for ThreadSafePreviewCache {
+    fn get_preview_entry(
+        &self,
+        source_path: &str,
+        kind: trashradar_app::ports::PreviewKind,
+    ) -> std::result::Result<
+        Option<trashradar_app::ports::PreviewCacheEntry>,
+        trashradar_domain::error::CoreError,
+    > {
+        self.db
+            .lock()
+            .map_err(|_| {
+                trashradar_domain::error::CoreError::internal("preview cache mutex poisoned")
+            })?
+            .get_preview_cache_entry(source_path, kind)
+            .map_err(|err| trashradar_domain::error::CoreError::internal(err.to_string()))
+    }
+
+    fn put_preview_entry(
+        &self,
+        entry: &trashradar_app::ports::PreviewCacheEntry,
+    ) -> std::result::Result<(), trashradar_domain::error::CoreError> {
+        self.db
+            .lock()
+            .map_err(|_| {
+                trashradar_domain::error::CoreError::internal("preview cache mutex poisoned")
+            })?
+            .put_preview_cache_entry(entry)
+            .map_err(|err| trashradar_domain::error::CoreError::internal(err.to_string()))
+    }
+
+    fn delete_preview_entry(
+        &self,
+        source_path: &str,
+        kind: trashradar_app::ports::PreviewKind,
+    ) -> std::result::Result<(), trashradar_domain::error::CoreError> {
+        self.db
+            .lock()
+            .map_err(|_| {
+                trashradar_domain::error::CoreError::internal("preview cache mutex poisoned")
+            })?
+            .delete_preview_cache_entry(source_path, kind)
+            .map_err(|err| trashradar_domain::error::CoreError::internal(err.to_string()))
+    }
+
+    fn delete_all_previews_for_path(
+        &self,
+        source_path: &str,
+    ) -> std::result::Result<(), trashradar_domain::error::CoreError> {
+        self.db
+            .lock()
+            .map_err(|_| {
+                trashradar_domain::error::CoreError::internal("preview cache mutex poisoned")
+            })?
+            .delete_all_preview_cache_entries_for_path(source_path)
+            .map_err(|err| trashradar_domain::error::CoreError::internal(err.to_string()))
+    }
+}
+
+fn preview_kind_name(kind: trashradar_app::ports::PreviewKind) -> &'static str {
+    match kind {
+        trashradar_app::ports::PreviewKind::Thumbnail => "thumbnail",
+        trashradar_app::ports::PreviewKind::Scrub => "scrub",
     }
 }
 
@@ -1383,6 +1569,100 @@ mod tests {
         let got2 = db.get_entry(r"C:\T\x.bin").unwrap().unwrap();
         assert_eq!(got2.partial.unwrap().0[0], 0xAA); // merge kept partial
         assert_eq!(got2.content.unwrap().0[0], 0xBB);
+
+        cleanup(profile_dir);
+    }
+
+    #[test]
+    fn preview_cache_roundtrip_t068() {
+        use trashradar_app::ports::{PreviewCache, PreviewCacheEntry, PreviewKind};
+
+        let profile_dir = temp_profile_dir("preview-cache-v4");
+        let raw = IndexDatabase::open_profile(&profile_dir).expect("open");
+        assert_eq!(raw.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let db = ThreadSafePreviewCache::new(raw);
+
+        let entry1 = PreviewCacheEntry {
+            source_path: r"C:\T\video.mp4".to_string(),
+            preview_kind: PreviewKind::Thumbnail,
+            size: ByteSize(1024),
+            modified_at: Some(FsTimestamp(12345)),
+            preview_path: r"C:\cache\123_thumb.jpg".to_string(),
+        };
+
+        db.put_preview_entry(&entry1).unwrap();
+
+        let got = db
+            .get_preview_entry(r"C:\T\video.mp4", PreviewKind::Thumbnail)
+            .unwrap()
+            .unwrap();
+        assert_eq!(got.source_path, r"C:\T\video.mp4");
+        assert_eq!(got.preview_kind, PreviewKind::Thumbnail);
+        assert_eq!(got.size.0, 1024);
+        assert_eq!(got.modified_at, Some(FsTimestamp(12345)));
+        assert_eq!(got.preview_path, r"C:\cache\123_thumb.jpg");
+
+        // Verify other kind is None
+        assert!(db
+            .get_preview_entry(r"C:\T\video.mp4", PreviewKind::Scrub)
+            .unwrap()
+            .is_none());
+
+        // Update
+        let entry2 = PreviewCacheEntry {
+            source_path: r"C:\T\video.mp4".to_string(),
+            preview_kind: PreviewKind::Thumbnail,
+            size: ByteSize(2048),
+            modified_at: Some(FsTimestamp(67890)),
+            preview_path: r"C:\cache\123_thumb_updated.jpg".to_string(),
+        };
+        db.put_preview_entry(&entry2).unwrap();
+
+        let got_updated = db
+            .get_preview_entry(r"C:\T\video.mp4", PreviewKind::Thumbnail)
+            .unwrap()
+            .unwrap();
+        assert_eq!(got_updated.size.0, 2048);
+        assert_eq!(got_updated.modified_at, Some(FsTimestamp(67890)));
+        assert_eq!(got_updated.preview_path, r"C:\cache\123_thumb_updated.jpg");
+
+        // Delete specific
+        db.delete_preview_entry(r"C:\T\video.mp4", PreviewKind::Thumbnail)
+            .unwrap();
+        assert!(db
+            .get_preview_entry(r"C:\T\video.mp4", PreviewKind::Thumbnail)
+            .unwrap()
+            .is_none());
+
+        // Test delete all for path
+        db.put_preview_entry(&entry1).unwrap();
+        let entry_scrub = PreviewCacheEntry {
+            source_path: r"C:\T\video.mp4".to_string(),
+            preview_kind: PreviewKind::Scrub,
+            size: ByteSize(1024),
+            modified_at: Some(FsTimestamp(12345)),
+            preview_path: r"C:\cache\123_scrub.png".to_string(),
+        };
+        db.put_preview_entry(&entry_scrub).unwrap();
+
+        assert!(db
+            .get_preview_entry(r"C:\T\video.mp4", PreviewKind::Thumbnail)
+            .unwrap()
+            .is_some());
+        assert!(db
+            .get_preview_entry(r"C:\T\video.mp4", PreviewKind::Scrub)
+            .unwrap()
+            .is_some());
+
+        db.delete_all_previews_for_path(r"C:\T\video.mp4").unwrap();
+        assert!(db
+            .get_preview_entry(r"C:\T\video.mp4", PreviewKind::Thumbnail)
+            .unwrap()
+            .is_none());
+        assert!(db
+            .get_preview_entry(r"C:\T\video.mp4", PreviewKind::Scrub)
+            .unwrap()
+            .is_none());
 
         cleanup(profile_dir);
     }
