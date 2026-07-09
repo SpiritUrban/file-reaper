@@ -81,6 +81,8 @@
 
 | T-042 Детектор «Архіви» | ✅ | 2026-07-09 | local | **`detectors/archives`:** `ArchivesDetector` — FileKind::Archive ∧ size≥`min_size_bytes` (дефолт **50 МіБ**); explanation «архів N ГБ»; zip/rar/7z/tar/gz + live поріг. DoD: 6 unit. clippy `-D warnings`. |
 
+| T-043 Детектор «Інсталятори та ISO» | ✅ | 2026-07-09 | local | **`detectors/installers`:** `InstallersDetector` — DiskImage **будь-де**; Installer **лише** у Downloads/Download/Завантаження (`is_downloads_like_path`, сегментне порівняння); explanation «інсталятор…» / «образ диска…». DoD: 7 unit + path helper. clippy `-D warnings`. |
+
 ## Легенда
 
 ✅ виконано й верифіковано · 🔄 в роботі · ⛔ заблоковано (причина в нотатках)

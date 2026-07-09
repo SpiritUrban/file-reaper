@@ -55,6 +55,35 @@ pub fn archive_explanation(bytes: u64) -> String {
     format!("архів {}", format_bytes_as_gb(bytes))
 }
 
+/// Пояснення T-043: інсталятор у Downloads-подібній теці.
+pub fn installer_explanation(bytes: u64) -> String {
+    format!(
+        "інсталятор {}, типова тека завантажень",
+        format_bytes_as_gb(bytes)
+    )
+}
+
+/// Пояснення T-043: образ диска (ISO/IMG/…) будь-де.
+pub fn disk_image_explanation(bytes: u64) -> String {
+    format!("образ диска {}", format_bytes_as_gb(bytes))
+}
+
+/// Чи шлях містить Downloads-подібний сегмент (T-043).
+///
+/// Сегменти (без регістру): `Downloads`, `Download`, `Завантаження`
+/// (локалізована Windows-тека). Порівняння по компонентах шляху, не
+/// підрядку — щоб `WindowsBackup` не матчив `Download`.
+pub fn is_downloads_like_path(path: &str) -> bool {
+    path.split(['\\', '/'])
+        .filter(|s| !s.is_empty())
+        .any(is_downloads_component)
+}
+
+fn is_downloads_component(component: &str) -> bool {
+    let lower: String = component.chars().flat_map(|c| c.to_lowercase()).collect();
+    matches!(lower.as_str(), "downloads" | "download" | "завантаження")
+}
+
 /// Стислий вік українською: «14 дн.», «3 міс.», «2 р.».
 pub fn format_age_uk(days: u64) -> String {
     if days >= 365 {
@@ -144,5 +173,16 @@ mod tests {
         assert!(s.contains("ГБ"), "{s}");
         assert!(s.contains("доступ"), "{s}");
         assert!(s.contains("тому"), "{s}");
+    }
+
+    #[test]
+    fn downloads_like_path_segments() {
+        assert!(is_downloads_like_path(r"C:\Users\Ada\Downloads\setup.exe"));
+        assert!(is_downloads_like_path(r"C:\Users\Ada\Download\a.msi"));
+        assert!(is_downloads_like_path(r"D:\Завантаження\app.exe"));
+        assert!(is_downloads_like_path(r"C:\Users\Ada\DOWNLOADS\x.exe"));
+        // не підрядок: WindowsBackup ≠ Download
+        assert!(!is_downloads_like_path(r"C:\WindowsBackup\setup.exe"));
+        assert!(!is_downloads_like_path(r"C:\Program Files\App\setup.exe"));
     }
 }
