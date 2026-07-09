@@ -8,8 +8,11 @@
 //! Каркас T-001: типи оголошені, доменні правила (політики, інваріанти
 //! переходів) додаються задачами E4/E5/E7 з docs/tasks.md.
 
+pub mod aggregate;
 pub mod candidate;
 pub mod category;
 pub mod error;
 pub mod quarantine;
 pub mod scan;
+
+pub use aggregate::{summarize_unique, CandidateContribution, CategoryRollup, FreeableSummary};

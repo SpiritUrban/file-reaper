@@ -9,6 +9,7 @@
 //! Каркас T-001: оголошені порти. Use cases додаються задачами
 //! T-033, T-037, T-054, T-061, T-079 (docs/tasks.md).
 
+pub mod aggregator;
 pub mod change_monitor;
 pub mod detectors;
 pub mod elevation;
@@ -19,3 +20,6 @@ pub mod scan_strategy;
 pub mod usn_apply;
 pub mod usn_fallback;
 pub mod workers;
+
+pub use aggregator::Aggregator;
+pub use trashradar_domain::aggregate::{CandidateContribution, CategoryRollup, FreeableSummary};

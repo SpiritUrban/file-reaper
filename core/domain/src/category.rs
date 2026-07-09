@@ -26,6 +26,9 @@ pub enum CategoryId {
 
 impl CategoryId {
     /// Повний перелік — для реєстрації детекторів і UI.
+    ///
+    /// Порядок збігається з [`crate::aggregate::FreeableSummary::by_category`]
+    /// / [`CategoryId::mvp_index`].
     pub const ALL: [CategoryId; 9] = [
         CategoryId::LargeFiles,
         CategoryId::OldFiles,
@@ -37,4 +40,20 @@ impl CategoryId {
         CategoryId::AppCaches,
         CategoryId::DevArtifacts,
     ];
+
+    /// Індекс у [`CategoryId::ALL`] / `FreeableSummary::by_category` (T-054).
+    pub fn mvp_index(self) -> Option<usize> {
+        match self {
+            CategoryId::LargeFiles => Some(0),
+            CategoryId::OldFiles => Some(1),
+            CategoryId::ForgottenVideos => Some(2),
+            CategoryId::Duplicates => Some(3),
+            CategoryId::Archives => Some(4),
+            CategoryId::Installers => Some(5),
+            CategoryId::TempFiles => Some(6),
+            CategoryId::AppCaches => Some(7),
+            CategoryId::DevArtifacts => Some(8),
+            CategoryId::Uncategorized => None,
+        }
+    }
 }

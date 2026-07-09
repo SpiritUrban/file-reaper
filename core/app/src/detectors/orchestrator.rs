@@ -11,7 +11,7 @@
 //!
 //! Перетин категорій (файл у кількох): збираємо всі hits; у `FileRecord`
 //! (одне поле category) пишеться **перший** hit у порядку реєстру.
-//! Чесна цифра / multi-category — T-054.
+//! Чесна цифра «можна звільнити» — [`crate::Aggregator`] / T-054.
 
 use super::contract::{DetectorHit, DetectorId};
 use super::registry::DetectorRegistry;
@@ -48,7 +48,7 @@ pub struct CategorizationStats {
 pub struct CategorizeBatchResult {
     /// Записи з застосованим первинним вердиктом (для upsert у індекс).
     pub updated: Vec<FileRecord>,
-    /// Усі hits (включно з перетинами) — для майбутнього Aggregator (T-054).
+    /// Усі hits (включно з перетинами) — вхід для [`crate::Aggregator`] (T-054).
     pub hits: Vec<DetectorHit>,
     pub stats: CategorizationStats,
 }
