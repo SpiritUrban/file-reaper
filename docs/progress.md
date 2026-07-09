@@ -89,6 +89,8 @@
 
 | T-046 Кеші топ-програм ЦА | ✅ | 2026-07-09 | local | **25 app_caches** у known-locations: Chrome/Edge/Firefox/Brave/Opera, VS Code/Cursor/JetBrains/VS, npm/yarn/pnpm/pip/cargo/NuGet, Discord/Telegram/Slack/Teams, Adobe Media/AE, Resolve, Blender, Steam, Spotify. `app_cache_locations()`. Live probe: 13 present / 12 absent на dev-машині. DoD catalog ≥20 + probe. |
 
+| T-047 Детектор «Тимчасові файли» | ✅ | 2026-07-09 | local | **`detectors/temp_files`:** `TempFilesDetector::from_registry` — prefix-match на expanded `temp_files` roots; завжди `SafeToBulk` + `CategoryId::TempFiles`; rebuild_from_registry; app_caches ігноруються. DoD: 8 unit. clippy `-D warnings`. |
+
 ## Легенда
 
 ✅ виконано й верифіковано · 🔄 в роботі · ⛔ заблоковано (причина в нотатках)

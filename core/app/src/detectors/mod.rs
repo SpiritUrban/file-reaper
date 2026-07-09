@@ -15,6 +15,7 @@ pub mod large_files;
 pub mod old_files;
 mod orchestrator;
 mod registry;
+pub mod temp_files;
 pub mod thresholds;
 
 pub use archives::{ArchivesDetector, DETECTOR_ID as ARCHIVES_ID};
@@ -28,6 +29,7 @@ pub use orchestrator::{
     CategorizationStats, CategorizeBatchResult, DetectorOrchestrator,
 };
 pub use registry::DetectorRegistry;
+pub use temp_files::{TempFilesDetector, DETECTOR_ID as TEMP_FILES_ID};
 pub use thresholds::ThresholdValue;
 
 #[cfg(test)]
