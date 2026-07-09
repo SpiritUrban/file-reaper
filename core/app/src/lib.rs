@@ -11,6 +11,7 @@
 
 pub mod aggregator;
 pub mod change_monitor;
+pub mod decisions;
 pub mod detectors;
 pub mod disk_forecast;
 pub mod elevation;
@@ -24,6 +25,10 @@ pub mod usn_fallback;
 pub mod workers;
 
 pub use aggregator::{Aggregator, LiveTotals};
+pub use decisions::{
+    apply_decision_hot, apply_decision_hot_and_persist, apply_decision_to_records, keep_hot,
+    mark_hot, unkeep_hot, ApplyDecisionResult, DecisionSelector,
+};
 pub use disk_forecast::{marked_unique_bytes, DiskForecast, QuarantineHeld};
 pub use mvp_farm::mvp_predicate_registry;
 pub use trashradar_domain::aggregate::{CandidateContribution, CategoryRollup, FreeableSummary};

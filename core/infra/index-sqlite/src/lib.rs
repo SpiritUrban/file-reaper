@@ -1444,6 +1444,26 @@ mod tests {
     }
 
     #[test]
+    fn keep_decision_survives_reopen() {
+        // DoD T-057: рішення Keep переживає перезапуск (persistent SQLite).
+        let profile_dir = temp_profile_dir("decision-keep-restart");
+        {
+            let mut database = IndexDatabase::open_profile(&profile_dir).expect("open");
+            let mut record = sample_file_record(7);
+            record.decision = Decision::Keep;
+            database.upsert_file_record(&record).expect("upsert keep");
+        }
+        // reopen profile
+        let database = IndexDatabase::open_profile(&profile_dir).expect("reopen");
+        let stored = database
+            .read_file_record(CandidateId(7))
+            .expect("read")
+            .expect("row");
+        assert_eq!(stored.decision, Decision::Keep);
+        cleanup(profile_dir);
+    }
+
+    #[test]
     fn upserts_file_records_in_single_batch_transaction() {
         let profile_dir = temp_profile_dir("file-record-batch");
         let mut database =

@@ -103,6 +103,9 @@ pub enum CandidateUnit {
 }
 
 /// Рішення користувача щодо кандидата.
+///
+/// Живе на **файлі** (шлях / candidate_id), не на окремій категорії:
+/// Keep/Mark в одній категорії одразу діє у всіх (architecture.md §6.3, T-057).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Decision {
@@ -112,6 +115,23 @@ pub enum Decision {
     Keep,
     /// Позначено до видалення (Reap Bar).
     Marked,
+}
+
+impl Decision {
+    /// Keep — не показуємо в сітці / агрегатах жодної категорії.
+    pub fn hides_from_candidates(self) -> bool {
+        matches!(self, Decision::Keep)
+    }
+
+    /// У Reap Bar (позначено до reap).
+    pub fn is_marked_for_reap(self) -> bool {
+        matches!(self, Decision::Marked)
+    }
+
+    /// У «можна звільнити» (не Keep).
+    pub fn is_reclaimable(self) -> bool {
+        !self.hides_from_candidates()
+    }
 }
 
 /// Вердикт детектора: чому файл є кандидатом (docs/architecture.md §6.2, T-036).
@@ -263,6 +283,16 @@ mod tests {
         assert_eq!(FileKind::from_path("C:\\repo\\.env"), FileKind::Other);
         assert_eq!(FileKind::from_path("noext"), FileKind::Other);
         assert_eq!(FileKind::from_path("trailingdot."), FileKind::Other);
+    }
+
+    #[test]
+    fn decision_keep_hides_mark_is_reap() {
+        // T-057: Keep ховає; Marked — reap bar.
+        assert!(Decision::Keep.hides_from_candidates());
+        assert!(!Decision::Keep.is_reclaimable());
+        assert!(Decision::Marked.is_marked_for_reap());
+        assert!(Decision::Marked.is_reclaimable());
+        assert!(Decision::Undecided.is_reclaimable());
     }
 
     #[test]

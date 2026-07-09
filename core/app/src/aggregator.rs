@@ -132,6 +132,13 @@ impl LiveTotals {
         from_live.unique_bytes == from_index.unique_bytes
             && from_live.unique_files == from_index.unique_files
     }
+
+    /// Оновити decision файла (T-057 keep/mark) — впливає на всі категорії.
+    pub fn set_decision(&mut self, candidate_id: CandidateId, decision: Decision) {
+        if let Some(c) = self.by_candidate.get_mut(&candidate_id.0) {
+            c.decision = decision;
+        }
+    }
 }
 
 fn index_records(records: &[FileRecord]) -> HashMap<CandidateId, &FileRecord> {

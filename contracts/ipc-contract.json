@@ -44,8 +44,16 @@
     },
     "category.window": { "status": "planned", "task": "T-014" },
     "category.set_threshold": { "status": "planned", "task": "T-038" },
-    "candidate.mark": { "status": "planned", "task": "T-057" },
-    "candidate.keep": { "status": "planned", "task": "T-057" },
+    "candidate.mark": {
+      "status": "implemented",
+      "task": "T-057",
+      "$comment": "payload {candidateId?, path?, marked?:bool} → {updated, decision}; Marked/Undecided on file → all categories; emits cleanup.total_updated"
+    },
+    "candidate.keep": {
+      "status": "implemented",
+      "task": "T-057",
+      "$comment": "payload {candidateId?, path?, unkeep?:bool} → {updated, decision}; Keep hides file in every category; persists via index upsert"
+    },
     "reap.execute": { "status": "planned", "task": "T-079" },
     "reap.undo_batch": { "status": "planned", "task": "T-081" },
     "quarantine.restore_batch": { "status": "planned", "task": "T-080" },

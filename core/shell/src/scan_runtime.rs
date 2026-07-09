@@ -16,7 +16,7 @@ use trashradar_app::scan_control::{
 };
 use trashradar_app::scan_strategy::{choose_scan_strategy, VolumeCapabilities};
 use trashradar_app::workers::CancellationToken;
-use trashradar_app::{mvp_predicate_registry, LiveTotals};
+use trashradar_app::{mvp_predicate_registry, DecisionSelector, LiveTotals};
 use trashradar_domain::candidate::{
     CandidateId, CandidateUnit, Decision, FileKind, FileRecord, SafetyLevel,
 };
@@ -430,6 +430,144 @@ pub async fn scan_stop(state: State<'_, ScanRuntime>) -> Result<ScanStopAck, Cor
     let stopping = state.controller.request_cancel();
     tracing::debug!(stopping, "scan.stop");
     Ok(ScanStopAck { stopping })
+}
+
+// --- T-057: candidate.keep / candidate.mark ----------------------------------
+
+/// Payload `candidate.keep` / `candidate.mark`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CandidateDecisionPayload {
+    pub candidate_id: Option<u64>,
+    pub path: Option<String>,
+    /// Лише для mark: `false` = unmark → Undecided.
+    #[serde(default)]
+    pub marked: Option<bool>,
+    /// `candidate.keep` з `unkeep: true` → знову Undecided.
+    #[serde(default)]
+    pub unkeep: Option<bool>,
+}
+
+/// Ack keep/mark.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CandidateDecisionAck {
+    pub updated: u32,
+    pub decision: String,
+}
+
+fn selector_from_payload(
+    payload: &CandidateDecisionPayload,
+) -> Result<DecisionSelector, CoreError> {
+    let mut sel = DecisionSelector::default();
+    if let Some(id) = payload.candidate_id {
+        sel.candidate_ids.push(CandidateId(id));
+    }
+    if let Some(path) = &payload.path {
+        if !path.trim().is_empty() {
+            sel.paths.push(path.clone());
+        }
+    }
+    if sel.is_empty() {
+        return Err(CoreError::invalid_argument("Вкажіть candidateId або path."));
+    }
+    Ok(sel)
+}
+
+fn decision_wire(d: Decision) -> &'static str {
+    match d {
+        Decision::Undecided => "undecided",
+        Decision::Keep => "keep",
+        Decision::Marked => "marked",
+    }
+}
+
+fn apply_and_emit_totals<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &ScanRuntime,
+    result: &trashradar_app::ApplyDecisionResult,
+) {
+    if let Ok(mut live) = state.last_totals.lock() {
+        for r in &result.updated {
+            live.set_decision(r.candidate_id, result.decision);
+        }
+        events::emit_cleanup_totals(app, &live.summary());
+    }
+}
+
+/// `candidate.keep` — Keep (або unkeep) на файлі → усі категорії (T-057).
+#[tauri::command]
+pub async fn candidate_keep<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, ScanRuntime>,
+    payload: CandidateDecisionPayload,
+) -> Result<CandidateDecisionAck, CoreError> {
+    record_command();
+    let selector = match selector_from_payload(&payload) {
+        Ok(s) => s,
+        Err(e) => {
+            record_command_error();
+            return Err(e);
+        }
+    };
+    let decision = if payload.unkeep == Some(true) {
+        Decision::Undecided
+    } else {
+        Decision::Keep
+    };
+    let result = match trashradar_app::apply_decision_hot(state.index.as_ref(), &selector, decision)
+    {
+        Ok(r) => r,
+        Err(e) => {
+            record_command_error();
+            return Err(e);
+        }
+    };
+    apply_and_emit_totals(&app, &state, &result);
+    tracing::debug!(
+        updated = result.count(),
+        decision = decision_wire(decision),
+        "candidate.keep"
+    );
+    Ok(CandidateDecisionAck {
+        updated: result.count() as u32,
+        decision: decision_wire(decision).into(),
+    })
+}
+
+/// `candidate.mark` — Marked / Undecided на файлі (T-057).
+#[tauri::command]
+pub async fn candidate_mark<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, ScanRuntime>,
+    payload: CandidateDecisionPayload,
+) -> Result<CandidateDecisionAck, CoreError> {
+    record_command();
+    let selector = match selector_from_payload(&payload) {
+        Ok(s) => s,
+        Err(e) => {
+            record_command_error();
+            return Err(e);
+        }
+    };
+    let marked = payload.marked.unwrap_or(true);
+    let result = match trashradar_app::mark_hot(state.index.as_ref(), &selector, marked) {
+        Ok(r) => r,
+        Err(e) => {
+            record_command_error();
+            return Err(e);
+        }
+    };
+    apply_and_emit_totals(&app, &state, &result);
+    tracing::debug!(
+        updated = result.count(),
+        decision = decision_wire(result.decision),
+        "candidate.mark"
+    );
+    Ok(CandidateDecisionAck {
+        updated: result.count() as u32,
+        decision: decision_wire(result.decision).into(),
+    })
 }
 
 #[cfg(test)]
