@@ -11,12 +11,14 @@
 pub mod aggregate;
 pub mod candidate;
 pub mod category;
+pub mod duplicates;
 pub mod error;
 pub mod forecast;
 pub mod quarantine;
 pub mod scan;
 
 pub use aggregate::{summarize_unique, CandidateContribution, CategoryRollup, FreeableSummary};
+pub use duplicates::{group_by_exact_size, ExactSizeGroup, SizeKey, SizeStageStats};
 pub use forecast::{
     compute_cleanup_forecast, percent_of, CleanupForecast, ForecastInputs, VolumeUsage,
 };

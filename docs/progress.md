@@ -104,6 +104,7 @@
 | T-055 Живі агрегати + події UI | ✅ | 2026-07-09 | local | **`LiveTotals`** (ingest hits по батчах); **`mvp_predicate_registry`**; shell: `cleanup.total_updated` + `category.updated`, `AggregateThrottle` ≤10/с; scan pipeline: insert→categorize→upsert→live emit; final flush; unique==index. Contracts/UI types. DoD unit live growth + throttle. clippy `-D warnings`. |
 | T-056 Прогноз диска після очищення | ✅ | 2026-07-09 | local | **Domain `forecast`:** `free_after = free + quarantine_held + marked` (cap capacity); % used now/after (UI 91%→86%). **App `DiskForecast`:** mark з індексу; reap→held (free без змін); purge→held↓ free↑; fact==forecast. 5+3 unit. clippy clean. |
 | T-057 Keep/Mark на всі категорії | ✅ | 2026-07-09 | local | **`decisions`:** `DecisionSelector` path/id; `keep_hot`/`mark_hot` → HotIndex upsert; Keep → 0 у всіх category totals (multi-hit). **LiveTotals::set_decision**. IPC `candidate.keep`/`candidate.mark` + cleanup emit. SQLite keep survives reopen. DoD unit. clippy. |
+| T-058 Щабель 1: групування за точним розміром | ✅ | 2026-07-09 | local | **Domain `duplicates`:** `SizeKey`/`ExactSizeGroup`/`SizeStageStats` + `group_by_exact_size` (0 I/O; size==0 і унікальні відкинуті; sort by potential reclaim). **App `duplicates/stage1`:** `run_size_stage` (File only, skip Keep) + `run_size_stage_from_index` (HotIndex). DoD: unique discarded (unit); **1M release ~546–659 мс < 1 с** (`#[ignore]` perf gate, як T-038). 5 domain + 3 app unit + 2 ignored. clippy `-D warnings`; fmt. |
 
 ## Легенда
 

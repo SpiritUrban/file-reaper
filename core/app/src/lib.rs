@@ -14,6 +14,7 @@ pub mod change_monitor;
 pub mod decisions;
 pub mod detectors;
 pub mod disk_forecast;
+pub mod duplicates;
 pub mod elevation;
 pub mod location_registry;
 pub mod mvp_farm;
@@ -30,6 +31,7 @@ pub use decisions::{
     mark_hot, unkeep_hot, ApplyDecisionResult, DecisionSelector,
 };
 pub use disk_forecast::{marked_unique_bytes, DiskForecast, QuarantineHeld};
+pub use duplicates::{run_size_stage, run_size_stage_from_index, SizeStageResult};
 pub use mvp_farm::mvp_predicate_registry;
 pub use trashradar_domain::aggregate::{CandidateContribution, CategoryRollup, FreeableSummary};
 pub use trashradar_domain::forecast::{CleanupForecast, ForecastInputs, VolumeUsage};
