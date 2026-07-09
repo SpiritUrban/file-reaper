@@ -1,15 +1,19 @@
-//! Ферма детекторів: контракт, реєстр, склад (T-036+).
+//! Ферма детекторів: контракт, реєстр, оркестратор (T-036 / T-037).
 //!
 //! architecture.md §6: кожна категорія — окремий детектор з єдиним контрактом
 //! (потік записів індексу → вердикти). repository.md §4: нова категорія =
-//! **новий модуль + `register`**, без правок оркестратора (T-037).
+//! **новий модуль + `register`**, без правок оркестратора.
 //!
-//! Конкретні детектори MVP: T-039…T-053; оркестратор прогону — T-037.
+//! Конкретні детектори MVP: T-039…T-053.
 
 mod contract;
+mod orchestrator;
 mod registry;
 
 pub use contract::{Detector, DetectorHit, DetectorId};
+pub use orchestrator::{
+    apply_primary_hit, CategorizationStats, CategorizeBatchResult, DetectorOrchestrator,
+};
 pub use registry::DetectorRegistry;
 
 #[cfg(test)]

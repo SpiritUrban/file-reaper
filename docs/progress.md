@@ -69,6 +69,8 @@
 
 | T-036 Контракт детектора | ✅ | 2026-07-09 | local | **Domain:** `Verdict::new` / `is_complete` (category+explanation+safety, §6.2). **App `detectors`:** trait `Detector` (id/category/is_enabled/evaluate), `DetectorId`, `DetectorHit`, `DetectorRegistry` (register/try_register, evaluate_record, evaluate_stream; disabled skip). DoD: тестові SizeProbe/PathProbe реєструються лише через `register` без змін «оркестратора»; вердикт з 3 полями. 5 unit + 1 domain. Перевірено: `cargo test -p trashradar-app detectors`; domain verdict; clippy `-D warnings`. |
 
+| T-037 Оркестратор детекторів | ✅ | 2026-07-09 | local | **App `detectors/orchestrator`:** `DetectorOrchestrator` — `categorize_batch` (шлях під час скану → updated+hits), `categorize_index` (HotIndex get_all→батчі→upsert, cancel між батчами), `spawn_categorize_index` (WorkerPool T-008). Перший hit → FileRecord.category/safety/explanation/detector_id; усі hits для T-054; Keep skip; disabled = 0 evaluate. DoD: 7 unit (batch/disabled/index/keep/cancel/pool/multi-hit) + 5 T-036 = 12. clippy `-D warnings`. |
+
 ## Легенда
 
 ✅ виконано й верифіковано · 🔄 в роботі · ⛔ заблоковано (причина в нотатках)
