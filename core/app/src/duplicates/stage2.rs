@@ -6,8 +6,8 @@ use std::collections::HashMap;
 
 use trashradar_domain::candidate::{ByteSize, CandidateId, FileRecord, FsTimestamp};
 use trashradar_domain::duplicates::{
-    group_by_partial_hash, ContentHash, ExactSizeGroup, PartialHash, PartialHashGroup,
-    PartialHashKey, PartialHashStageStats,
+    group_by_partial_hash, prioritize_exact_size_groups, ContentHash, ExactSizeGroup, PartialHash,
+    PartialHashGroup, PartialHashKey, PartialHashStageStats,
 };
 use trashradar_domain::error::CoreError;
 
@@ -73,6 +73,8 @@ pub fn run_partial_hash_stage_gated(
     volume_gate: Option<Arc<VolumeIoGate>>,
 ) -> PartialHashStageResult {
     let gate = volume_gate.unwrap_or_else(VolumeIoGate::with_default_limit);
+    // T-064: більший potential reclaim — першим у черзі partial-хешу.
+    let size_groups = prioritize_exact_size_groups(size_groups.to_vec());
     let mut keys: Vec<PartialHashKey> = Vec::new();
     let mut files_hashed = 0u64;
     let mut files_failed = 0u64;
@@ -81,7 +83,7 @@ pub fn run_partial_hash_stage_gated(
     let mut cache_hits = 0u64;
     let mut cancelled = false;
 
-    'outer: for group in size_groups {
+    'outer: for group in &size_groups {
         for &id in &group.members {
             if cancel.is_cancelled() {
                 cancelled = true;

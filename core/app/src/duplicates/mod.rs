@@ -6,6 +6,7 @@
 //! - Оркестрація — preliminary / confirmed + refining (T-061).
 //! - Кеш хешів size+mtime (T-062).
 //! - Ліміт I/O на том (T-063).
+//! - Пріоритет груп за potential reclaim (T-064).
 
 mod cascade;
 mod hash_cache;
@@ -31,6 +32,7 @@ pub use stage3::{
 };
 pub use trashradar_domain::duplicates::{
     group_by_content_hash, group_by_exact_size, group_by_partial_hash, normalize_hash_cache_path,
+    prioritize_exact_size_groups, prioritize_partial_groups, reclaim_order_of_partial_groups,
     CascadePhase, ContentHash, ContentHashGroup, ContentHashKey, ContentHashStageStats,
     DuplicateConfidence, DuplicatesCategoryState, ExactSizeGroup, FileHashCacheEntry, PartialHash,
     PartialHashGroup, PartialHashKey, PartialHashStageStats, SizeKey, SizeStageStats,

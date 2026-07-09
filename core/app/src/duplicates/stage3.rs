@@ -10,8 +10,8 @@ use std::thread;
 
 use trashradar_domain::candidate::CandidateId;
 use trashradar_domain::duplicates::{
-    group_by_content_hash, ContentHashGroup, ContentHashKey, ContentHashStageStats,
-    PartialHashGroup,
+    group_by_content_hash, prioritize_partial_groups, reclaim_order_of_partial_groups,
+    ContentHashGroup, ContentHashKey, ContentHashStageStats, PartialHashGroup,
 };
 
 use crate::duplicates::hash_cache::cache_store_content;
@@ -29,6 +29,10 @@ pub struct FullHashStageResult {
     pub disk_reads: u64,
     /// Влучання content hash у кеш (T-062).
     pub cache_hits: u64,
+    /// Порядок partial-груп у черзі підтвердження: potential_reclaim desc (T-064).
+    ///
+    /// Відповідає «логам» / черзі: найбільші reclaim — першими.
+    pub group_queue_order: Vec<u64>,
 }
 
 /// Скільки потоків файлів за замовчуванням (диск-bound: ≤ CPU count).
@@ -88,8 +92,12 @@ pub fn run_full_hash_stage_gated(
     let workers = file_workers.max(1);
     let gate = volume_gate.unwrap_or_else(VolumeIoGate::with_default_limit);
 
+    // T-064: найбільший potential reclaim — першим у черзі підтвердження.
+    let ordered = prioritize_partial_groups(partial_groups.to_vec());
+    let group_queue_order = reclaim_order_of_partial_groups(&ordered);
+
     let mut jobs: Vec<(CandidateId, trashradar_domain::candidate::ByteSize)> = Vec::new();
-    for g in partial_groups {
+    for g in &ordered {
         for &id in &g.members {
             jobs.push((id, g.size));
         }
@@ -108,22 +116,20 @@ pub fn run_full_hash_stage_gated(
             ),
             disk_reads: 0,
             cache_hits: 0,
+            group_queue_order,
         };
     }
 
     if workers == 1 || jobs.len() == 1 {
-        return run_full_hash_sequential(
-            &jobs,
-            targets,
-            hasher,
-            cancel,
-            workers as u32,
-            cache,
-            &gate,
-        );
+        let mut out =
+            run_full_hash_sequential(&jobs, targets, hasher, cancel, workers as u32, cache, &gate);
+        out.group_queue_order = group_queue_order;
+        return out;
     }
 
-    run_full_hash_parallel(&jobs, targets, hasher, cancel, workers, cache, &gate)
+    let mut out = run_full_hash_parallel(&jobs, targets, hasher, cancel, workers, cache, &gate);
+    out.group_queue_order = group_queue_order;
+    out
 }
 
 fn run_full_hash_sequential(
@@ -228,6 +234,7 @@ fn run_full_hash_sequential(
         stats,
         disk_reads,
         cache_hits,
+        group_queue_order: vec![],
     }
 }
 
@@ -344,6 +351,7 @@ fn run_full_hash_parallel(
         stats,
         disk_reads: disk_reads.load(Ordering::Relaxed),
         cache_hits: cache_hits.load(Ordering::Relaxed),
+        group_queue_order: vec![],
     }
 }
 
@@ -520,6 +528,53 @@ mod tests {
         let r = slot.lock().unwrap().take().expect("result");
         assert_eq!(r.groups.len(), 1);
         drop(pool);
+    }
+
+    /// DoD T-064: черга stage 3 — largest potential reclaim first (log order).
+    #[test]
+    fn group_queue_orders_largest_reclaim_first() {
+        // Unsorted input: small reclaim first, large last.
+        let groups = [
+            partial_group(10, &[1, 2]),      // reclaim 10
+            partial_group(1000, &[3, 4, 5]), // reclaim 2000
+            partial_group(100, &[6, 7]),     // reclaim 100
+        ];
+        let targets: HashMap<_, _> = [
+            target(1, "a", 10),
+            target(2, "b", 10),
+            target(3, "c", 1000),
+            target(4, "d", 1000),
+            target(5, "e", 1000),
+            target(6, "f", 100),
+            target(7, "g", 100),
+        ]
+        .into_iter()
+        .collect();
+        let hasher = MapHasher {
+            map: HashMap::new(),
+            full: [
+                ("a".into(), ch(1)),
+                ("b".into(), ch(1)),
+                ("c".into(), ch(2)),
+                ("d".into(), ch(2)),
+                ("e".into(), ch(2)),
+                ("f".into(), ch(3)),
+                ("g".into(), ch(3)),
+            ]
+            .into_iter()
+            .collect(),
+            fail: HashMap::new(),
+            fail_full: HashMap::new(),
+        };
+        let out = run_full_hash_stage(&groups, &targets, &hasher, &CancellationToken::new(), 1);
+        assert_eq!(
+            out.group_queue_order,
+            vec![2000, 100, 10],
+            "confirmation queue must match reclaim desc (log order)"
+        );
+        // Sequential: first disk file should be from largest group (ids 3,4,5 size 1000).
+        // Queue order is the DoD signal for "logs".
+        assert!(out.stats.files_hashed >= 6);
     }
 
     /// DoD T-063: один том ≤ ceiling; два томи — обидва peak=1 при limit=1.

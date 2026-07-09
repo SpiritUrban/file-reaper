@@ -443,6 +443,38 @@ pub struct DuplicatesCategoryState {
     pub cancelled: bool,
 }
 
+// ─── Пріоритезація груп (T-064) ──────────────────────────────────────────────
+
+/// Порядок підтвердження: більший potential reclaim першим (architecture.md §4).
+///
+/// Використовується перед stage 3 і для стабілізації черги size/partial.
+pub fn prioritize_partial_groups(mut groups: Vec<PartialHashGroup>) -> Vec<PartialHashGroup> {
+    groups.sort_unstable_by(|a, b| {
+        b.potential_reclaim_bytes()
+            .cmp(&a.potential_reclaim_bytes())
+            .then_with(|| b.size.0.cmp(&a.size.0))
+            .then_with(|| a.partial_hash.0.cmp(&b.partial_hash.0))
+            .then_with(|| a.members[0].0.cmp(&b.members[0].0))
+    });
+    groups
+}
+
+/// Те саме для size-груп (перед stage 2).
+pub fn prioritize_exact_size_groups(mut groups: Vec<ExactSizeGroup>) -> Vec<ExactSizeGroup> {
+    groups.sort_unstable_by(|a, b| {
+        b.potential_reclaim_bytes()
+            .cmp(&a.potential_reclaim_bytes())
+            .then_with(|| b.size.0.cmp(&a.size.0))
+            .then_with(|| a.members[0].0.cmp(&b.members[0].0))
+    });
+    groups
+}
+
+/// Порядок potential_reclaim_bytes у черзі (для логів / DoD T-064).
+pub fn reclaim_order_of_partial_groups(groups: &[PartialHashGroup]) -> Vec<u64> {
+    groups.iter().map(|g| g.potential_reclaim_bytes()).collect()
+}
+
 // ─── Кеш хешів: валідність size + mtime (T-062) ──────────────────────────────
 
 /// Нормалізація шляху для ключа кешу (Windows: lower + `\`).
@@ -778,5 +810,31 @@ mod tests {
         assert!(!e.is_valid_for(ByteSize(100), Some(FsTimestamp(8))));
         assert!(!e.is_valid_for(ByteSize(100), None));
         assert_eq!(normalize_hash_cache_path(r"C:/A/F.BIN"), r"c:\a\f.bin");
+    }
+
+    #[test]
+    fn prioritize_partial_groups_largest_reclaim_first() {
+        // DoD T-064: порядок = potential reclaim desc.
+        let groups = prioritize_partial_groups(vec![
+            PartialHashGroup {
+                size: ByteSize(10),
+                partial_hash: phash(1),
+                members: vec![CandidateId(1), CandidateId(2)], // reclaim 10
+            },
+            PartialHashGroup {
+                size: ByteSize(1000),
+                partial_hash: phash(2),
+                members: vec![CandidateId(3), CandidateId(4), CandidateId(5)], // reclaim 2000
+            },
+            PartialHashGroup {
+                size: ByteSize(100),
+                partial_hash: phash(3),
+                members: vec![CandidateId(6), CandidateId(7)], // reclaim 100
+            },
+        ]);
+        assert_eq!(
+            reclaim_order_of_partial_groups(&groups),
+            vec![2000, 100, 10]
+        );
     }
 }
