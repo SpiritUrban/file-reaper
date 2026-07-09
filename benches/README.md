@@ -66,3 +66,29 @@ cargo run --release --manifest-path benches/scan-bench/Cargo.toml -- --volume C
 ```
 
 Без адмін-прав — exit 3 (не використовується в CI).
+
+## `dup-bench` — гейт каскаду дублікатів (T-066)
+
+Еталонна «медіатека» — синтетичний корпус метаданих (50 000 файлів,
+2 000 dup-груп × 3; `MapHasher` емулює partial/full без реального I/O).
+Дві сесії:
+
+1. **Перша (cold)** — каскад size→partial→full з наповненням `MemoryHashCache`.
+2. **Повторна (warm)** — той самий корпус + кеш (T-062): **disk_reads = 0**.
+
+```sh
+cargo run --release --manifest-path benches/dup-bench/Cargo.toml              # CI check
+cargo run --release --manifest-path benches/dup-bench/Cargo.toml -- --strict  # hard timing
+cargo run --release --manifest-path benches/dup-bench/Cargo.toml -- --bless   # rewrite baseline
+```
+
+| Метрика | Гейт | Пояснення |
+|---|---|---|
+| `first_session_millis` | WARN + стеля **8 с** | cold cascade |
+| `second_session_millis` | WARN + стеля **2 с** | warm cache session |
+| `second_disk_reads` | **жорстко = 0** | DoD T-062: повтор без перехешу |
+| `confirmed_groups` | **жорстко = 2000** | усі dup-групи підтверджені |
+| `reclaimable_bytes` | **жорстко = expected** | Σ size×(n−1) по групах |
+
+Тайминги — як у T-019/T-035: на shared-runner WARN + absolute ceiling;
+`--strict` — жорсткий 15%-регрес локально.

@@ -112,6 +112,7 @@
 | T-063 Ліміт I/O на том | ✅ | 2026-07-09 | local | **App `volume_limit`:** `VolumeIoGate` (семафор per drive letter, дефолт 2); `volume_from_path` (C:\ / \\?\C:\); RAII permit. **stage2/3:** disk-read під gate (`*_gated`). DoD: same volume peak ≤ ceiling; C+D limit=1 → both peak=1 (parallel). 4 unit + 1 stage3. clippy; fmt. |
 | T-064 Пріоритет груп за reclaim | ✅ | 2026-07-09 | local | **Domain:** `prioritize_partial_groups` / `prioritize_exact_size_groups` / `reclaim_order_of_partial_groups`. **stage2:** size-групи сортуються перед partial. **stage3:** partial-групи сортуються перед full; `FullHashStageResult.group_queue_order` = reclaim desc (DoD «логи»). Test: unsorted input → `[2000,100,10]`. clippy; fmt. |
 | T-065 Keep policy ✓/╳ | ✅ | 2026-07-09 | local | **Domain:** `KeepPolicy` (oldest/newest/outside Downloads/shortest path), `DuplicateRole` ✓/╳, `MarkedDuplicateGroup` + `mark_duplicate_members` / `mark_content_hash_group`. **App:** `mark_confirmed_groups` з FileRecord. **UI types:** KeepPolicy/MarkedDuplicate*. DoD: рівно 1 Keep; Downloads програє поза; markup symbols. clippy; fmt. |
+| T-066 Бенчмарк дублікатів на еталонній медіатеці | ✅ | 2026-07-09 | local | Standalone `benches/dup-bench` (як T-019/T-035): синтетична «медіатека» 50k файлів / 2k dup-груп×3, `MapHasher` + `CountingHasher` + `MemoryHashCache`. **Session1 cold** cascade size→partial→full (~50 мс, 12k disk reads); **Session2 warm** (~40 мс, **0 disk reads** — DoD T-062). Інваріанти: confirmed_groups=2000, reclaimable=expected; стелі 8 с / 2 с; baseline.json + hard equality на disk_reads/groups/reclaim; timings WARN+ceiling, `--strict`/`--bless`. CI job `bench` + dup-bench. Верифіковано: clippy `-D warnings`; `--bless` + check exit 0; fmt. |
 
 ## Легенда
 
@@ -138,3 +139,8 @@
   Повний «теплий диск» — live `--volume X` (elevated, локально); проєкція на
   1.5 млн валить процес якщо >10 с. Узгоджено з політикою T-019 (CI = детерміноване
   + стеля; живий том — на машині розробника).
+- T-066: CI-гейт `dup-bench` міряє **синтетичний** каскад (MapHasher, без
+  реального диска/BLAKE3 I/O) — детерміновані інваріанти (0 warm disk reads,
+  groups/reclaim) + absolute ceilings для таймингів. Реальний I/O-бенч
+  медіатеки — поза CI (як live scan-bench); можна розширити окремим режимом
+  у T-154, якщо з’явиться еталонний корпус файлів.

@@ -1,0 +1,8 @@
+{
+  "first_session_millis": 50.3427,
+  "second_session_millis": 40.0776,
+  "second_disk_reads": 0,
+  "confirmed_groups": 2000,
+  "reclaimable_bytes": 4002000000000,
+  "first_disk_reads": 12000
+}

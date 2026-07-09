@@ -1,0 +1,20 @@
+[package]
+name = "trashradar-bench-dup"
+description = "Бенчмарк-гейт каскаду дублікатів: перша сесія vs повтор з кешем (T-066)."
+version = "0.1.0"
+edition = "2021"
+license = "UNLICENSED"
+publish = false
+
+[[bin]]
+name = "dup-bench"
+path = "src/main.rs"
+
+[dependencies]
+trashradar-domain = { path = "../../core/domain" }
+trashradar-app = { path = "../../core/app" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = 3

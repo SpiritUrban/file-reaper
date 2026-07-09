@@ -61,7 +61,7 @@ jobs:
       - run: cargo clippy -p trashradar-shell -- -D warnings
 
   bench:
-    name: Bench (index + scan regression gates)
+    name: Bench (index + scan + dup regression gates)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -73,6 +73,7 @@ jobs:
           workspaces: |
             benches/index-bench
             benches/scan-bench
+            benches/dup-bench
 
       # T-019: in-memory index — memory hard-gate >15%; timings WARN + ceiling
       - name: index-bench (T-019)
@@ -85,6 +86,14 @@ jobs:
       # T-035: scan→index fill @ 1.5M synthetic — §15 ceiling 10s; memory hard-gate
       - name: scan-bench (T-035)
         working-directory: benches/scan-bench
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
+          cargo run --release
+
+      # T-066: duplicate cascade first vs warm-cache session
+      - name: dup-bench (T-066)
+        working-directory: benches/dup-bench
         run: |
           cargo fmt --check
           cargo clippy --all-targets -- -D warnings
