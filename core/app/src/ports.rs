@@ -139,13 +139,15 @@ pub trait HotIndex {
 /// Сховище і генерація превью. Реалізація: `preview` (E6).
 pub trait PreviewStore {}
 
-/// Види прев'ю (T-068).
+/// Види прев'ю (T-068; `Large` — T-073).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PreviewKind {
     /// Статична мініатюра (зображення або ключовий кадр відео).
     Thumbnail,
     /// Скраб-смуга кадрів відео.
     Scrub,
+    /// Повнорозмірне превью для великого показу (Live Preview / панель деталей).
+    Large,
 }
 
 /// Запис кешу прев'ю (T-068).
@@ -238,6 +240,14 @@ pub struct VideoMetadata {
     pub width: u32,
     /// Висота кадру джерела в пікселях.
     pub height: u32,
+}
+
+/// Кодування сирих пікселів превью у файловий формат дискового кешу (T-073).
+/// Реалізація: `preview` (PNG без зовнішніх залежностей). Окремий порт,
+/// щоб оркестратор (app) не знав про формати файлів.
+pub trait ThumbnailEncoder: Send + Sync {
+    /// Закодувати мініатюру в байти файла, придатного для показу у webview.
+    fn encode(&self, thumbnail: &RawThumbnail) -> Result<Vec<u8>, CoreError>;
 }
 
 /// Рекомендована кількість кадрів скраб-смуги (architecture.md §5.2: 10–20).

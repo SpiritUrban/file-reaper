@@ -4,9 +4,13 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
-use crate::ports::{PreviewCache, PreviewCacheEntry, PreviewKind};
+use crate::ports::{
+    PreviewCache, PreviewCacheEntry, PreviewKind, RawThumbnail, ThumbnailEncoder, ThumbnailSource,
+    VideoFrameSource,
+};
 use crate::workers::CancellationToken;
 use trashradar_domain::candidate::{ByteSize, FsTimestamp};
+use trashradar_domain::error::CoreError;
 
 /// Пріоритети для запитів генерації превью (docs/architecture.md §5.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -282,7 +286,10 @@ impl PreviewCacheManager {
         let hash_val = hasher.finish();
 
         let ext = match kind {
-            PreviewKind::Thumbnail => "thumb.jpg",
+            // Мініатюри/великі превью кодуються PNG (T-073, PngThumbnailEncoder).
+            PreviewKind::Thumbnail => "thumb.png",
+            PreviewKind::Large => "large.png",
+            // Скраб-смуга — сирі кадри BGRA (T-072), формат зрізів у ScrubStrip.
             PreviewKind::Scrub => "scrub.bin",
         };
         let filename = format!("{:x}_{}", hash_val, ext);
@@ -314,19 +321,203 @@ impl PreviewCacheManager {
         &self,
         source_path: &str,
     ) -> Result<(), trashradar_domain::error::CoreError> {
-        if let Some(entry) = self
-            .db
-            .get_preview_entry(source_path, PreviewKind::Thumbnail)?
-        {
-            let _ = std::fs::remove_file(Path::new(&entry.preview_path));
-        }
-        if let Some(entry) = self.db.get_preview_entry(source_path, PreviewKind::Scrub)? {
-            let _ = std::fs::remove_file(Path::new(&entry.preview_path));
+        for kind in [
+            PreviewKind::Thumbnail,
+            PreviewKind::Large,
+            PreviewKind::Scrub,
+        ] {
+            if let Some(entry) = self.db.get_preview_entry(source_path, kind)? {
+                let _ = std::fs::remove_file(Path::new(&entry.preview_path));
+            }
         }
 
         self.db.delete_all_previews_for_path(source_path)?;
         Ok(())
     }
+}
+
+/// Якість доставленого превью (T-073, architecture.md §5.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreviewQuality {
+    /// Чорновий кадр з дискового кешу — мініатюра, розтягнута UI; миттєво.
+    Draft,
+    /// Повнорозмірне (в межах запитаного краю) превью — підміняє чорнове.
+    Sharp,
+}
+
+/// Доставка превью споживачу; shell перетворює на подію UI (T-124/T-140).
+#[derive(Debug, Clone)]
+pub struct PreviewDelivery {
+    /// Шлях файла-джерела (кандидата).
+    pub source_path: String,
+    /// Якість цієї доставки.
+    pub quality: PreviewQuality,
+    /// Файл у дисковому кеші превью (T-068), готовий до показу.
+    pub preview_path: String,
+}
+
+/// Колбек доставки превью (може викликатись з фонового воркера).
+pub type PreviewDeliveryFn = Arc<dyn Fn(PreviewDelivery) + Send + Sync>;
+
+/// Підсумок прийому запиту двоступеневого превью (T-073).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TwoStageOutcome {
+    /// Різке превью було в кеші — доставлено одразу, генерація не потрібна.
+    SharpFromCache,
+    /// Чорнове доставлено з кешу миттєво; різке генерується у фоні.
+    DraftThenSharpScheduled,
+    /// Кешу немає: доставки не було, генерацію різкого заплановано.
+    SharpScheduledOnly,
+}
+
+/// Міст: джерело кадрів відео (T-071) як джерело мініатюр у ланцюжку превью.
+pub struct VideoKeyFrameSource(pub Arc<dyn VideoFrameSource>);
+
+impl ThumbnailSource for VideoKeyFrameSource {
+    fn thumbnail(&self, path: &str, max_edge: u32) -> Result<Option<RawThumbnail>, CoreError> {
+        self.0.key_frame(path, max_edge)
+    }
+}
+
+/// Двоступенева якість великого превью (T-073, architecture.md §5.3):
+/// ступінь 1 — чорновий кадр **лише з дискового кешу** (жодної генерації
+/// та декодування — це шлях < 100 мс); ступінь 2 — повнорозмірна генерація
+/// P0-задачею через ланцюжок джерел, збереження в кеш (вид `Large`)
+/// і доставка-підміна (ціль < 600 мс, автозамір — T-076).
+pub struct TwoStagePreviewer {
+    cache: Arc<PreviewCacheManager>,
+    scheduler: Arc<PreviewScheduler>,
+    sources: Vec<Arc<dyn ThumbnailSource>>,
+    encoder: Arc<dyn ThumbnailEncoder>,
+}
+
+impl TwoStagePreviewer {
+    /// Створити оркестратор. `sources` — ланцюжок джерел за спаданням
+    /// швидкості (architecture.md §5.2); перше `Some` виграє.
+    pub fn new(
+        cache: Arc<PreviewCacheManager>,
+        scheduler: Arc<PreviewScheduler>,
+        sources: Vec<Arc<dyn ThumbnailSource>>,
+        encoder: Arc<dyn ThumbnailEncoder>,
+    ) -> Self {
+        Self {
+            cache,
+            scheduler,
+            sources,
+            encoder,
+        }
+    }
+
+    /// Запит великого превью для файла під курсором / у панелі деталей.
+    ///
+    /// `size`/`modified_at` — з індексу (валідність кешу за T-068);
+    /// `sharp_edge` — край повнорозмірного превью. Доставки йдуть через
+    /// `on_delivery`: спершу (за наявності кешу) `Draft`, потім `Sharp`.
+    pub fn request_large_preview(
+        &self,
+        source_path: &str,
+        size: ByteSize,
+        modified_at: Option<FsTimestamp>,
+        sharp_edge: u32,
+        on_delivery: PreviewDeliveryFn,
+    ) -> Result<TwoStageOutcome, CoreError> {
+        if source_path.is_empty() {
+            return Err(CoreError::invalid_argument(
+                "Порожній шлях до файла превью.",
+            ));
+        }
+
+        // Різке вже в кеші (валідне за size+mtime) → миттєва відповідь,
+        // без генерації: повторний показ — з кешу (DoD T-068/T-073).
+        if let Some(sharp_path) =
+            self.cache
+                .get_valid_preview_path(source_path, PreviewKind::Large, size, modified_at)
+        {
+            on_delivery(PreviewDelivery {
+                source_path: source_path.to_string(),
+                quality: PreviewQuality::Sharp,
+                preview_path: sharp_path,
+            });
+            return Ok(TwoStageOutcome::SharpFromCache);
+        }
+
+        // Ступінь 1 (чорновий, < 100 мс): лише читання кешу мініатюр —
+        // на цьому шляху немає ні декодування, ні звертань до джерел.
+        let draft_delivered = match self.cache.get_valid_preview_path(
+            source_path,
+            PreviewKind::Thumbnail,
+            size,
+            modified_at,
+        ) {
+            Some(draft_path) => {
+                on_delivery(PreviewDelivery {
+                    source_path: source_path.to_string(),
+                    quality: PreviewQuality::Draft,
+                    preview_path: draft_path,
+                });
+                true
+            }
+            None => false,
+        };
+
+        // Ступінь 2 (різкий): генерація P0-задачею (T-067 — витісняє фонові),
+        // збереження у кеш і доставка-підміна. Збій генерації не «забирає»
+        // вже показане чорнове превью — просто немає другої доставки.
+        let cache = Arc::clone(&self.cache);
+        let sources = self.sources.clone();
+        let encoder = Arc::clone(&self.encoder);
+        let path_owned = source_path.to_string();
+        self.scheduler
+            .submit(path_owned.clone(), PreviewPriority::P0, move |token| {
+                if token.is_cancelled() {
+                    return;
+                }
+                let Some(raw) = generate_from_chain(&sources, &path_owned, sharp_edge) else {
+                    return;
+                };
+                if token.is_cancelled() {
+                    return;
+                }
+                let Ok(bytes) = encoder.encode(&raw) else {
+                    return;
+                };
+                if let Ok(preview_path) =
+                    cache.save_preview(&path_owned, PreviewKind::Large, size, modified_at, &bytes)
+                {
+                    on_delivery(PreviewDelivery {
+                        source_path: path_owned.clone(),
+                        quality: PreviewQuality::Sharp,
+                        preview_path,
+                    });
+                }
+            });
+
+        Ok(if draft_delivered {
+            TwoStageOutcome::DraftThenSharpScheduled
+        } else {
+            TwoStageOutcome::SharpScheduledOnly
+        })
+    }
+
+    /// Скасувати запит превью для шляху (користувач поїхав далі, T-067).
+    pub fn cancel(&self, source_path: &str) {
+        self.scheduler.cancel(source_path);
+    }
+}
+
+/// Пройти ланцюжок джерел: перше `Some` виграє; `Ok(None)` і помилка
+/// окремого джерела не зривають ланцюжок (architecture.md §5.2).
+fn generate_from_chain(
+    sources: &[Arc<dyn ThumbnailSource>],
+    path: &str,
+    max_edge: u32,
+) -> Option<RawThumbnail> {
+    for source in sources {
+        if let Ok(Some(raw)) = source.thumbnail(path, max_edge) {
+            return Some(raw);
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -642,5 +833,220 @@ mod tests {
             .is_none());
 
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    // --- T-073: двоступенева якість -------------------------------------
+
+    use std::sync::atomic::AtomicUsize;
+
+    /// Джерело-лічильник: віддає суцільну мініатюру та рахує звертання.
+    struct CountingSource {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl ThumbnailSource for CountingSource {
+        fn thumbnail(&self, _path: &str, max_edge: u32) -> Result<Option<RawThumbnail>, CoreError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let edge = max_edge.min(8);
+            Ok(Some(RawThumbnail {
+                width: edge,
+                height: edge,
+                bgra: vec![7u8; (edge * edge * 4) as usize],
+            }))
+        }
+    }
+
+    /// Джерело, що не покриває жодного файла (`Ok(None)`).
+    struct NoneSource;
+
+    impl ThumbnailSource for NoneSource {
+        fn thumbnail(&self, _p: &str, _e: u32) -> Result<Option<RawThumbnail>, CoreError> {
+            Ok(None)
+        }
+    }
+
+    /// Джерело, що завжди падає (помилка не має зривати ланцюжок).
+    struct FailingSource;
+
+    impl ThumbnailSource for FailingSource {
+        fn thumbnail(&self, _p: &str, _e: u32) -> Result<Option<RawThumbnail>, CoreError> {
+            Err(CoreError::io("декодер впав"))
+        }
+    }
+
+    /// Тестовий кодувальник: префікс + пікселі як є.
+    struct PassthroughEncoder;
+
+    impl ThumbnailEncoder for PassthroughEncoder {
+        fn encode(&self, thumbnail: &RawThumbnail) -> Result<Vec<u8>, CoreError> {
+            let mut out = b"ENC".to_vec();
+            out.extend_from_slice(&thumbnail.bgra);
+            Ok(out)
+        }
+    }
+
+    struct TwoStageFixture {
+        previewer: TwoStagePreviewer,
+        cache: Arc<PreviewCacheManager>,
+        source_calls: Arc<AtomicUsize>,
+        temp_dir: std::path::PathBuf,
+    }
+
+    fn two_stage_fixture(
+        name: &str,
+        chain_prefix: Vec<Arc<dyn ThumbnailSource>>,
+    ) -> TwoStageFixture {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "tr_t073_{name}_{}",
+            Instant::now().elapsed().as_nanos()
+        ));
+        let db = Arc::new(MockPreviewCache::new());
+        let cache = Arc::new(PreviewCacheManager::new(
+            temp_dir.clone(),
+            db as Arc<dyn PreviewCache>,
+        ));
+        let source_calls = Arc::new(AtomicUsize::new(0));
+        let mut sources = chain_prefix;
+        sources.push(Arc::new(CountingSource {
+            calls: Arc::clone(&source_calls),
+        }));
+        let previewer = TwoStagePreviewer::new(
+            Arc::clone(&cache),
+            Arc::new(PreviewScheduler::new(1, 0.0)),
+            sources,
+            Arc::new(PassthroughEncoder),
+        );
+        TwoStageFixture {
+            previewer,
+            cache,
+            source_calls,
+            temp_dir,
+        }
+    }
+
+    /// Зібрати доставки у вектор + канал для очікування Sharp.
+    fn delivery_recorder() -> (
+        PreviewDeliveryFn,
+        Arc<Mutex<Vec<PreviewDelivery>>>,
+        mpsc::Receiver<PreviewQuality>,
+    ) {
+        let log: Arc<Mutex<Vec<PreviewDelivery>>> = Arc::new(Mutex::new(Vec::new()));
+        let (tx, rx) = mpsc::channel();
+        let log_cb = Arc::clone(&log);
+        let cb: PreviewDeliveryFn = Arc::new(move |delivery: PreviewDelivery| {
+            let quality = delivery.quality;
+            log_cb.lock().unwrap().push(delivery);
+            let _ = tx.send(quality);
+        });
+        (cb, log, rx)
+    }
+
+    /// Чорнове превью доставляється синхронно з кешу (шлях < 100 мс —
+    /// без генерації), різке генерується і підміняє його.
+    #[test]
+    fn draft_from_cache_then_sharp_replacement() {
+        let fx = two_stage_fixture("draft_sharp", vec![]);
+        let source = r"C:\media\clip_frame.jpg";
+        let size = ByteSize(1000);
+        let mtime = Some(FsTimestamp(42));
+
+        // Наповнюємо кеш мініатюр (як це зробив би конвеєр плиток).
+        fx.cache
+            .save_preview(source, PreviewKind::Thumbnail, size, mtime, b"tiny")
+            .unwrap();
+
+        let (cb, log, rx) = delivery_recorder();
+        let outcome = fx
+            .previewer
+            .request_large_preview(source, size, mtime, 512, cb)
+            .unwrap();
+        assert_eq!(outcome, TwoStageOutcome::DraftThenSharpScheduled);
+
+        // Чорнове вже доставлено до повернення з request (синхронний шлях
+        // кешу — жодного джерела/декодування ще не викликано).
+        {
+            let seen = log.lock().unwrap();
+            assert_eq!(seen.len(), 1);
+            assert_eq!(seen[0].quality, PreviewQuality::Draft);
+        }
+        assert_eq!(
+            rx.recv_timeout(Duration::from_millis(50)).unwrap(),
+            PreviewQuality::Draft
+        );
+
+        // Різке доганяє і підміняє.
+        assert_eq!(
+            rx.recv_timeout(Duration::from_millis(500)).unwrap(),
+            PreviewQuality::Sharp
+        );
+        let seen = log.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[1].quality, PreviewQuality::Sharp);
+        assert!(Path::new(&seen[1].preview_path).exists(), "різке — у кеші");
+        assert_eq!(fx.source_calls.load(Ordering::SeqCst), 1);
+
+        // Наступний запит того самого файла — різке одразу з кешу.
+        let (cb2, log2, _rx2) = delivery_recorder();
+        let outcome2 = fx
+            .previewer
+            .request_large_preview(source, size, mtime, 512, cb2)
+            .unwrap();
+        assert_eq!(outcome2, TwoStageOutcome::SharpFromCache);
+        assert_eq!(log2.lock().unwrap()[0].quality, PreviewQuality::Sharp);
+        assert_eq!(fx.source_calls.load(Ordering::SeqCst), 1, "без регенерації");
+
+        let _ = std::fs::remove_dir_all(&fx.temp_dir);
+    }
+
+    /// Порожній кеш: чорнового немає, різке генерується і доставляється.
+    #[test]
+    fn empty_cache_schedules_sharp_only() {
+        let fx = two_stage_fixture("cold", vec![]);
+        let (cb, log, rx) = delivery_recorder();
+        let outcome = fx
+            .previewer
+            .request_large_preview(r"C:\media\new.png", ByteSize(5), None, 256, cb)
+            .unwrap();
+        assert_eq!(outcome, TwoStageOutcome::SharpScheduledOnly);
+        assert!(log.lock().unwrap().is_empty(), "нічого до генерації");
+
+        assert_eq!(
+            rx.recv_timeout(Duration::from_millis(500)).unwrap(),
+            PreviewQuality::Sharp
+        );
+        let _ = std::fs::remove_dir_all(&fx.temp_dir);
+    }
+
+    /// `Ok(None)` та помилка джерела не зривають ланцюжок — виграє перше
+    /// джерело, що віддає мініатюру.
+    #[test]
+    fn chain_falls_through_none_and_errors() {
+        let fx = two_stage_fixture("chain", vec![Arc::new(NoneSource), Arc::new(FailingSource)]);
+        let (cb, _log, rx) = delivery_recorder();
+        fx.previewer
+            .request_large_preview(r"C:\media\odd.bin", ByteSize(1), None, 128, cb)
+            .unwrap();
+        assert_eq!(
+            rx.recv_timeout(Duration::from_millis(500)).unwrap(),
+            PreviewQuality::Sharp
+        );
+        assert_eq!(fx.source_calls.load(Ordering::SeqCst), 1);
+        let _ = std::fs::remove_dir_all(&fx.temp_dir);
+    }
+
+    /// Порожній шлях — помилка аргументу, як у всіх джерел конвеєра.
+    #[test]
+    fn two_stage_empty_path_is_invalid_argument() {
+        let fx = two_stage_fixture("badarg", vec![]);
+        let (cb, _log, _rx) = delivery_recorder();
+        let err = fx
+            .previewer
+            .request_large_preview("", ByteSize(1), None, 128, cb)
+            .expect_err("порожній шлях");
+        assert_eq!(
+            err.code,
+            trashradar_domain::error::ErrorCode::InvalidArgument
+        );
+        let _ = std::fs::remove_dir_all(&fx.temp_dir);
     }
 }

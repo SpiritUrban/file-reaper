@@ -29,7 +29,8 @@ const SCHEMA_VERSION_V1: i64 = 1;
 const SCHEMA_VERSION_V2: i64 = 2;
 const SCHEMA_VERSION_V3: i64 = 3;
 const SCHEMA_VERSION_V4: i64 = 4;
-const LATEST_SCHEMA_VERSION: i64 = SCHEMA_VERSION_V4;
+const SCHEMA_VERSION_V5: i64 = 5;
+const LATEST_SCHEMA_VERSION: i64 = SCHEMA_VERSION_V5;
 const WRITER_QUEUE_CHANNEL_CLOSED: &str = "sqlite index writer queue is closed";
 
 /// Migration v1 creates the persistent file-record layer used by scanner output and
@@ -128,6 +129,23 @@ CREATE TABLE IF NOT EXISTS preview_cache (
 PRAGMA user_version = 4;
 "#;
 
+/// T-073: вид превью `large` (повнорозмірне для великого показу).
+/// SQLite не вміє розширити CHECK — таблиця перестворюється; втрата
+/// кешу превью — не помилка, а холодний старт (architecture.md §10).
+const SCHEMA_V5_SQL: &str = r#"
+DROP TABLE IF EXISTS preview_cache;
+CREATE TABLE preview_cache (
+    source_path TEXT NOT NULL,
+    preview_kind TEXT NOT NULL CHECK (preview_kind IN ('thumbnail', 'scrub', 'large')),
+    size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+    modified_at_filetime INTEGER NOT NULL DEFAULT 0,
+    preview_path TEXT NOT NULL,
+    PRIMARY KEY (source_path, preview_kind)
+);
+
+PRAGMA user_version = 5;
+"#;
+
 const MIGRATIONS: &[Migration] = &[
     Migration {
         version: SCHEMA_VERSION_V1,
@@ -144,6 +162,10 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         version: SCHEMA_VERSION_V4,
         sql: SCHEMA_V4_SQL,
+    },
+    Migration {
+        version: SCHEMA_VERSION_V5,
+        sql: SCHEMA_V5_SQL,
     },
 ];
 
@@ -1032,6 +1054,7 @@ fn preview_kind_name(kind: trashradar_app::ports::PreviewKind) -> &'static str {
     match kind {
         trashradar_app::ports::PreviewKind::Thumbnail => "thumbnail",
         trashradar_app::ports::PreviewKind::Scrub => "scrub",
+        trashradar_app::ports::PreviewKind::Large => "large",
     }
 }
 
@@ -1569,6 +1592,41 @@ mod tests {
         let got2 = db.get_entry(r"C:\T\x.bin").unwrap().unwrap();
         assert_eq!(got2.partial.unwrap().0[0], 0xAA); // merge kept partial
         assert_eq!(got2.content.unwrap().0[0], 0xBB);
+
+        cleanup(profile_dir);
+    }
+
+    /// T-073: схема v5 приймає вид `large`; слот незалежний від `thumbnail`.
+    #[test]
+    fn preview_cache_accepts_large_kind_t073() {
+        use trashradar_app::ports::{PreviewCache, PreviewCacheEntry, PreviewKind};
+
+        let profile_dir = temp_profile_dir("preview-cache-v5-large");
+        let raw = IndexDatabase::open_profile(&profile_dir).expect("open");
+        assert_eq!(raw.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let db = ThreadSafePreviewCache::new(raw);
+
+        let large = PreviewCacheEntry {
+            source_path: r"C:\T\photo.jpg".to_string(),
+            preview_kind: PreviewKind::Large,
+            size: ByteSize(4096),
+            modified_at: Some(FsTimestamp(777)),
+            preview_path: r"C:\cache\abc_large.png".to_string(),
+        };
+        db.put_preview_entry(&large).unwrap();
+
+        let got = db
+            .get_preview_entry(r"C:\T\photo.jpg", PreviewKind::Large)
+            .unwrap()
+            .unwrap();
+        assert_eq!(got.preview_kind, PreviewKind::Large);
+        assert_eq!(got.preview_path, r"C:\cache\abc_large.png");
+
+        // Слот thumbnail того самого шляху — окремий і порожній.
+        assert!(db
+            .get_preview_entry(r"C:\T\photo.jpg", PreviewKind::Thumbnail)
+            .unwrap()
+            .is_none());
 
         cleanup(profile_dir);
     }

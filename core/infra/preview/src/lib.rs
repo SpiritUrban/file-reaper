@@ -13,14 +13,19 @@
 //!
 //! T-071: ключовий кадр і тривалість відео — ffmpeg sidecar-процесом
 //! ([`FfmpegVideoFrameSource`], модуль `video`; мультиплатформно).
+//!
+//! T-073: кодувальник превью для дискового кешу — нестиснений PNG
+//! ([`PngThumbnailEncoder`], модуль `encode`; мультиплатформно).
 
 #[cfg(windows)]
 mod com;
+mod encode;
 mod image;
 #[cfg(all(test, windows))]
 pub(crate) mod test_media;
 mod video;
 
+pub use encode::PngThumbnailEncoder;
 pub use image::ImageThumbnailSource;
 pub use video::{FfmpegVideoFrameSource, FFMPEG_ENV_VAR};
 
