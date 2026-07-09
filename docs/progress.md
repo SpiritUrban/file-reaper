@@ -73,6 +73,8 @@
 
 | T-038 Перерахунок порогів без рескану | ✅ | 2026-07-09 | local | **thresholds:** `ThresholdValue`, keys `min_size_bytes`/`min_age_days`. **Detector:** `set_threshold`/`get_threshold` (default no-op). **Registry:** set/get threshold by id. **Orchestrator:** `recalculate_batch`/`recalculate_index` (unmatched→Uncategorized), `set_threshold_and_recalculate`, `recalculate_inplace` (hot path). DoD: age 180→90 rebuilds OldFiles; raise threshold clears; **1M inplace ~126 мс < 1 с** (release ignored). IPC `category.set_threshold` лишається planned (shell farm wiring з T-039+). 16 unit (14+1 ignored). clippy `-D warnings`. |
 
+| T-039 Детектор «Великі файли» | ✅ | 2026-07-09 | local | **`detectors/large_files`:** `LargeFilesDetector` (id `large_files`, CategoryId::LargeFiles); дефолт поріг **100 МіБ**; `evaluate` size≥порогу → Verdict explanation «розмір N ГБ» (`format_size_gb`), safety ReviewRecommended; лише `CandidateUnit::File`; `min_size_bytes` live (T-038). DoD: 7 unit. clippy `-D warnings`. |
+
 ## Легенда
 
 ✅ виконано й верифіковано · 🔄 в роботі · ⛔ заблоковано (причина в нотатках)

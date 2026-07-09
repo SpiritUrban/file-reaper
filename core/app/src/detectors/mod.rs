@@ -7,11 +7,14 @@
 //! Конкретні детектори MVP: T-039…T-053.
 
 mod contract;
+mod format;
+pub mod large_files;
 mod orchestrator;
 mod registry;
 pub mod thresholds;
 
 pub use contract::{Detector, DetectorHit, DetectorId};
+pub use large_files::{LargeFilesDetector, DETECTOR_ID as LARGE_FILES_ID};
 pub use orchestrator::{
     apply_primary_hit, apply_primary_hit_mut, clear_category, clear_category_mut,
     CategorizationStats, CategorizeBatchResult, DetectorOrchestrator,
