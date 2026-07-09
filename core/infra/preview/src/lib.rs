@@ -7,6 +7,17 @@
 //! через Shell API (`IShellItemImageFactory::GetImage`). Для файлів, які
 //! користувач колись бачив у Explorer (або має системний thumbnail-провайдер),
 //! превью віддається без власного декодування — decode робить ОС/її провайдери.
+//!
+//! T-070: власна генерація мініатюр зображень — декодування з даунскейлом
+//! через Windows Imaging Component ([`ImageThumbnailSource`], модуль `image`).
+
+#[cfg(windows)]
+mod com;
+mod image;
+#[cfg(all(test, windows))]
+pub(crate) mod test_media;
+
+pub use image::ImageThumbnailSource;
 
 use trashradar_app::ports::{RawThumbnail, ThumbnailSource};
 use trashradar_domain::error::CoreError;
@@ -58,14 +69,7 @@ mod win {
     use trashradar_app::ports::RawThumbnail;
     use trashradar_domain::error::CoreError;
 
-    /// Мінімальний COM GUID.
-    #[repr(C)]
-    struct Guid {
-        data1: u32,
-        data2: u16,
-        data3: u16,
-        data4: [u8; 8],
-    }
+    use crate::com::{ComApartment, Guid};
 
     /// `IShellItemImageFactory` — {bcc18b79-ba16-442f-80c4-8a59c30c463b}.
     const IID_SHELL_ITEM_IMAGE_FACTORY: Guid = Guid {
@@ -139,12 +143,6 @@ mod win {
         ) -> i32;
     }
 
-    #[link(name = "ole32")]
-    extern "system" {
-        fn CoInitializeEx(reserved: *mut c_void, co_init: u32) -> i32;
-        fn CoUninitialize();
-    }
-
     #[link(name = "gdi32")]
     extern "system" {
         fn GetObjectW(handle: *mut c_void, c: i32, pv: *mut c_void) -> i32;
@@ -166,15 +164,6 @@ mod win {
         fn ReleaseDC(hwnd: *mut c_void, hdc: *mut c_void) -> i32;
     }
 
-    /// `COINIT_APARTMENTTHREADED` — модель для Shell thumbnail-провайдерів.
-    const COINIT_APARTMENTTHREADED: u32 = 0x2;
-    /// `S_OK`.
-    const S_OK: i32 = 0;
-    /// `S_FALSE` — COM уже ініціалізовано на цьому потоці цією ж моделлю.
-    const S_FALSE: i32 = 1;
-    /// `RPC_E_CHANGED_MODE` — потік уже в COM з іншою моделлю; працюємо без
-    /// власної ініціалізації і не викликаємо `CoUninitialize`.
-    const RPC_E_CHANGED_MODE: i32 = 0x8001_0106u32 as i32;
     /// `SIIGBF_RESIZETOFIT` (0) | `SIIGBF_THUMBNAILONLY` (0x8): вписати в розмір,
     /// лише справжні мініатюри — без generic-іконок.
     const SIIGBF_THUMBNAILONLY: u32 = 0x0000_0008;
@@ -192,24 +181,8 @@ mod win {
 
     /// Отримати системну мініатюру файла. `Ok(None)` — системної мініатюри немає.
     pub fn shell_thumbnail(path: &str, max_edge: u32) -> Result<Option<RawThumbnail>, CoreError> {
-        unsafe {
-            let hr_init = CoInitializeEx(std::ptr::null_mut(), COINIT_APARTMENTTHREADED);
-            // Ми володіємо ініціалізацією (і маємо Uninitialize) лише якщо самі
-            // її підняли. RPC_E_CHANGED_MODE — потік уже в COM, працюємо як є.
-            let owns_com = hr_init == S_OK || hr_init == S_FALSE;
-            if hr_init < 0 && hr_init != RPC_E_CHANGED_MODE {
-                return Err(CoreError::io(format!(
-                    "CoInitializeEx для thumbnail не вдалося (HRESULT {hr_init:#010x})."
-                )));
-            }
-
-            let result = extract(path, max_edge);
-
-            if owns_com {
-                CoUninitialize();
-            }
-            result
-        }
+        let _apartment = ComApartment::enter()?;
+        unsafe { extract(path, max_edge) }
     }
 
     /// Внутрішнє видобування (COM уже ініціалізовано на потоці).
@@ -360,7 +333,7 @@ mod tests {
         let dir = std::env::temp_dir().join("tr_t069_thumb");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("solid_256.bmp");
-        std::fs::write(&path, make_bmp(256, 256, [40, 90, 200])).unwrap();
+        std::fs::write(&path, crate::test_media::make_bmp(256, 256, [40, 90, 200])).unwrap();
 
         let src = WindowsShellThumbnailSource::new();
         let thumb = src
@@ -374,40 +347,5 @@ mod tests {
         assert!(thumb.width <= 128 && thumb.height <= 128);
 
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// Згенерувати суцільний 24-бітний BMP (BGR) заданого розміру.
-    #[cfg(windows)]
-    fn make_bmp(width: u32, height: u32, bgr: [u8; 3]) -> Vec<u8> {
-        let row_stride = (width * 3).div_ceil(4) * 4;
-        let pixel_bytes = (row_stride * height) as usize;
-        let file_size = 54 + pixel_bytes;
-        let mut out = Vec::with_capacity(file_size);
-        // BITMAPFILEHEADER
-        out.extend_from_slice(b"BM");
-        out.extend_from_slice(&(file_size as u32).to_le_bytes());
-        out.extend_from_slice(&0u32.to_le_bytes()); // reserved
-        out.extend_from_slice(&54u32.to_le_bytes()); // pixel data offset
-                                                     // BITMAPINFOHEADER
-        out.extend_from_slice(&40u32.to_le_bytes());
-        out.extend_from_slice(&(width as i32).to_le_bytes());
-        out.extend_from_slice(&(height as i32).to_le_bytes());
-        out.extend_from_slice(&1u16.to_le_bytes()); // planes
-        out.extend_from_slice(&24u16.to_le_bytes()); // bit count
-        out.extend_from_slice(&0u32.to_le_bytes()); // BI_RGB
-        out.extend_from_slice(&(pixel_bytes as u32).to_le_bytes());
-        out.extend_from_slice(&2835i32.to_le_bytes()); // x ppm (~72 dpi)
-        out.extend_from_slice(&2835i32.to_le_bytes()); // y ppm
-        out.extend_from_slice(&0u32.to_le_bytes()); // clr used
-        out.extend_from_slice(&0u32.to_le_bytes()); // clr important
-                                                    // Пікселі (bottom-up), з паддінгом рядків
-        let pad = (row_stride - width * 3) as usize;
-        for _ in 0..height {
-            for _ in 0..width {
-                out.extend_from_slice(&bgr);
-            }
-            out.extend(std::iter::repeat_n(0u8, pad));
-        }
-        out
     }
 }
