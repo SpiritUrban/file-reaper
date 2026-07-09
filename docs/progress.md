@@ -67,6 +67,8 @@
 
 | T-035 Бенчмарк скану: 1 ТБ / 1.5 млн файлів | ✅ | 2026-07-09 | local | Standalone `benches/scan-bench` (як T-019): **synthetic CI** — PathResolver+Batcher→InMemoryIndex на **1 500 000** файлів; baseline fill ~3.3 с (~461k f/s), memory ~90.7 МБ; жорстка стеля **10 с (§15)** + memory hard-gate >15%; timings WARN+floor. **Live** `--volume X` (elevated): warmup+warm `scan_volume_to_index`, проєкція на 1.5 млн, fail якщо >10 с. CI job `bench` розширено (index-bench + scan-bench). Верифіковано: `--bless` + check exit 0; clippy `-D warnings`; fmt. |
 
+| T-036 Контракт детектора | ✅ | 2026-07-09 | local | **Domain:** `Verdict::new` / `is_complete` (category+explanation+safety, §6.2). **App `detectors`:** trait `Detector` (id/category/is_enabled/evaluate), `DetectorId`, `DetectorHit`, `DetectorRegistry` (register/try_register, evaluate_record, evaluate_stream; disabled skip). DoD: тестові SizeProbe/PathProbe реєструються лише через `register` без змін «оркестратора»; вердикт з 3 полями. 5 unit + 1 domain. Перевірено: `cargo test -p trashradar-app detectors`; domain verdict; clippy `-D warnings`. |
+
 ## Легенда
 
 ✅ виконано й верифіковано · 🔄 в роботі · ⛔ заблоковано (причина в нотатках)

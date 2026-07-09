@@ -114,13 +114,37 @@ pub enum Decision {
     Marked,
 }
 
-/// Вердикт детектора: чому файл є кандидатом (docs/architecture.md §6.2).
+/// Вердикт детектора: чому файл є кандидатом (docs/architecture.md §6.2, T-036).
+///
+/// Обов'язкові три поля: категорія, пояснення (рядок UI), рівень безпечності
+/// (`safe-to-bulk` вмикає [Позначити все]; `review-recommended` — маркер «?»).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Verdict {
     pub category: CategoryId,
     /// Людське пояснення: «відео 4.2 ГБ, останній доступ 8 міс тому».
     pub explanation: String,
     pub safety: SafetyLevel,
+}
+
+impl Verdict {
+    /// Зібрати вердикт. `explanation` має бути непорожнім (готовий до показу).
+    pub fn new(category: CategoryId, explanation: impl Into<String>, safety: SafetyLevel) -> Self {
+        let explanation = explanation.into();
+        debug_assert!(
+            !explanation.trim().is_empty(),
+            "Verdict.explanation не може бути порожнім"
+        );
+        Self {
+            category,
+            explanation,
+            safety,
+        }
+    }
+
+    /// Чи вердикт валідний для показу в UI (усі три поля заповнені змістовно).
+    pub fn is_complete(&self) -> bool {
+        !self.explanation.trim().is_empty()
+    }
 }
 
 /// Рівень безпечності масового видалення.
@@ -239,5 +263,26 @@ mod tests {
         assert_eq!(FileKind::from_path("C:\\repo\\.env"), FileKind::Other);
         assert_eq!(FileKind::from_path("noext"), FileKind::Other);
         assert_eq!(FileKind::from_path("trailingdot."), FileKind::Other);
+    }
+
+    #[test]
+    fn verdict_holds_category_explanation_and_safety() {
+        // T-036 / architecture.md §6.2: три обов'язкові поля вердикту.
+        let v = Verdict::new(
+            CategoryId::ForgottenVideos,
+            "відео 4.2 ГБ, останній доступ 8 міс тому",
+            SafetyLevel::ReviewRecommended,
+        );
+        assert_eq!(v.category, CategoryId::ForgottenVideos);
+        assert!(v.explanation.contains("4.2"));
+        assert_eq!(v.safety, SafetyLevel::ReviewRecommended);
+        assert!(v.is_complete());
+
+        let incomplete = Verdict {
+            category: CategoryId::Archives,
+            explanation: "   ".into(),
+            safety: SafetyLevel::SafeToBulk,
+        };
+        assert!(!incomplete.is_complete());
     }
 }
