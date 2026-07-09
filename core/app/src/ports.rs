@@ -188,6 +188,47 @@ pub trait PreviewCache: Send + Sync {
     fn delete_all_previews_for_path(&self, source_path: &str) -> Result<(), CoreError>;
 }
 
+/// Декодована мініатюра з джерела превью (T-069+).
+///
+/// Пікселі — `BGRA`, 4 байти на піксель, рядки зверху вниз (top-down DIB,
+/// як віддає GDI). Це сира растрова форма; кодування у файл кешу (T-068) —
+/// відповідальність викликача. Джерело віддає мініатюру вже декодованою.
+#[derive(Clone)]
+pub struct RawThumbnail {
+    /// Ширина мініатюри в пікселях.
+    pub width: u32,
+    /// Висота мініатюри в пікселях.
+    pub height: u32,
+    /// Пікселі BGRA, `width * height * 4` байти, рядки зверху вниз.
+    pub bgra: Vec<u8>,
+}
+
+impl std::fmt::Debug for RawThumbnail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Не друкуємо мільйони байтів пікселів — лише геометрію.
+        f.debug_struct("RawThumbnail")
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("bytes", &self.bgra.len())
+            .finish()
+    }
+}
+
+/// Джерело мініатюр — ланка ланцюжка превью (architecture.md §5.2).
+///
+/// Реалізації (кожна — окреме джерело за спаданням швидкості):
+/// системний кеш мініатюр Windows (T-069, `preview`), власне декодування
+/// зображень (T-070), витяг ключового кадру відео (T-071).
+///
+/// Контракт: `Ok(None)` означає «це джерело не має мініатюри для файла» —
+/// викликач переходить до наступного джерела в ланцюжку. `Err` — реальний
+/// збій (некоректний аргумент, недоступний ресурс).
+pub trait ThumbnailSource: Send + Sync {
+    /// Спробувати отримати мініатюру файла, вписану в квадрат `max_edge` пікселів
+    /// (зі збереженням пропорцій). `Ok(None)` — джерело не покриває цей файл.
+    fn thumbnail(&self, path: &str, max_edge: u32) -> Result<Option<RawThumbnail>, CoreError>;
+}
+
 /// Єдиний шлюз деструктивних операцій з FS (move/restore/purge).
 /// Реалізація: `quarantine-fs` (T-077, T-079…T-084). Інваріант D4:
 /// жоден інший порт не має права змінювати файлову систему.
