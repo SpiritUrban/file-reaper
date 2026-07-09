@@ -6,8 +6,8 @@ use std::collections::HashMap;
 
 use trashradar_domain::candidate::{ByteSize, CandidateId, FileRecord};
 use trashradar_domain::duplicates::{
-    group_by_partial_hash, ExactSizeGroup, PartialHash, PartialHashGroup, PartialHashKey,
-    PartialHashStageStats,
+    group_by_partial_hash, ContentHash, ExactSizeGroup, PartialHash, PartialHashGroup,
+    PartialHashKey, PartialHashStageStats,
 };
 use trashradar_domain::error::CoreError;
 
@@ -128,11 +128,13 @@ where
     })
 }
 
-/// Тестовий Hasher: map path → partial (0 I/O).
+/// Тестовий Hasher: map path → partial / full (0 I/O).
 #[derive(Debug, Default)]
 pub struct MapHasher {
     pub map: HashMap<String, PartialHash>,
+    pub full: HashMap<String, ContentHash>,
     pub fail: HashMap<String, bool>,
+    pub fail_full: HashMap<String, bool>,
 }
 
 impl Hasher for MapHasher {
@@ -144,6 +146,24 @@ impl Hasher for MapHasher {
             .get(path)
             .copied()
             .ok_or_else(|| CoreError::io(format!("mock missing: {path}")))
+    }
+
+    fn full_hash(
+        &self,
+        path: &str,
+        _size: ByteSize,
+        cancel: &CancellationToken,
+    ) -> Result<ContentHash, CoreError> {
+        if cancel.is_cancelled() {
+            return Err(CoreError::cancelled("full_hash"));
+        }
+        if self.fail_full.get(path).copied().unwrap_or(false) {
+            return Err(CoreError::io(format!("mock full fail: {path}")));
+        }
+        self.full
+            .get(path)
+            .copied()
+            .ok_or_else(|| CoreError::io(format!("mock full missing: {path}")))
     }
 }
 
@@ -200,7 +220,9 @@ mod tests {
             ]
             .into_iter()
             .collect(),
+            full: HashMap::new(),
             fail: HashMap::new(),
+            fail_full: HashMap::new(),
         };
         let out =
             run_partial_hash_stage(&size_groups, &targets, &hasher, &CancellationToken::new());
@@ -233,7 +255,9 @@ mod tests {
             ]
             .into_iter()
             .collect(),
+            full: HashMap::new(),
             fail: HashMap::new(),
+            fail_full: HashMap::new(),
         };
         let out =
             run_partial_hash_stage(&size_groups, &targets, &hasher, &CancellationToken::new());
@@ -272,7 +296,9 @@ mod tests {
             ]
             .into_iter()
             .collect(),
+            full: HashMap::new(),
             fail: HashMap::new(),
+            fail_full: HashMap::new(),
         };
         let cancel = CancellationToken::new();
         cancel.cancel();
@@ -295,7 +321,9 @@ mod tests {
             map: [("a".into(), ph(1)), ("c".into(), ph(1))]
                 .into_iter()
                 .collect(),
+            full: HashMap::new(),
             fail: [("b".into(), true)].into_iter().collect(),
+            fail_full: HashMap::new(),
         };
         let out =
             run_partial_hash_stage(&size_groups, &targets, &hasher, &CancellationToken::new());
@@ -320,7 +348,9 @@ mod tests {
             map: [("x".into(), ph(3)), ("y".into(), ph(3))]
                 .into_iter()
                 .collect(),
+            full: HashMap::new(),
             fail: HashMap::new(),
+            fail_full: HashMap::new(),
         });
         let slot = Arc::new(Mutex::new(None));
         let slot2 = Arc::clone(&slot);

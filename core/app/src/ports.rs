@@ -66,8 +66,10 @@ use trashradar_domain::{
     category::CategoryId,
     error::CoreError,
     scan::{ScanEntry, UsnChange, UsnCursor, UsnJournalInfo},
-    PartialHash,
+    ContentHash, PartialHash,
 };
+
+use crate::workers::CancellationToken;
 
 /// Persistent-індекс кандидатів і журнал Quarantine.
 /// Реалізація: `index-sqlite` (T-011…T-014, T-078).
@@ -145,13 +147,24 @@ pub trait QuarantineFs {}
 /// Хешування для каскаду дублікатів. Реалізація: `hash` (T-059/T-060).
 ///
 /// T-059: partial fingerprint (перші+останні 64 КіБ, ≤ 128 КіБ читання).
-/// T-060: повний потоковий BLAKE3.
+/// T-060: повний потоковий BLAKE3 (константна пам'ять на файл).
 pub trait Hasher: Send + Sync {
     /// Частковий відбиток файла. `size` — з індексу (уникаємо зайвого stat).
     ///
     /// Інваріант DoD T-059: адаптер читає з диска **не більше**
     /// [`PARTIAL_HASH_MAX_READ_BYTES`](trashradar_domain::PARTIAL_HASH_MAX_READ_BYTES).
     fn partial_hash(&self, path: &str, size: ByteSize) -> Result<PartialHash, CoreError>;
+
+    /// Повний BLAKE3 файла потоково (T-060).
+    ///
+    /// Інваріанти: константна пам'ять (фіксований буфер читання);
+    /// перевірка `cancel` між блоками — кооперативна відміна великих файлів.
+    fn full_hash(
+        &self,
+        path: &str,
+        size: ByteSize,
+        cancel: &CancellationToken,
+    ) -> Result<ContentHash, CoreError>;
 }
 
 /// Джерело часу — для тестованості TTL і «віку» файлів.

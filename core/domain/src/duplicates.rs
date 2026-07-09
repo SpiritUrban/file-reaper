@@ -7,11 +7,15 @@
 //! ГРУПИ ОДНАКОВОГО РОЗМІРУ
 //!   │  щабель 2: частковий хеш (перші+останні 64 КБ)  (T-059)
 //!   ▼     різний partial → НЕ дублікат
-//! ГРУПИ-КАНДИДАТИ → щабель 3…
+//! ГРУПИ-КАНДИДАТИ
+//!   │  щабель 3: повний потоковий BLAKE3                 (T-060)
+//!   ▼     різний content hash → НЕ дублікат
+//! ПІДТВЕРДЖЕНІ ГРУПИ ДУБЛІКАТІВ
 //! ```
 //!
 //! DoD T-058: унікальний розмір відкинутий; 1 млн < 1 с.
 //! DoD T-059: групи з різними partial-хешами розділяються; ≤ 128 КБ/файл (I/O у infra).
+//! DoD T-060: повний хеш — константна пам'ять на файл; I/O-bound (не CPU).
 
 use serde::{Deserialize, Serialize};
 
@@ -259,6 +263,141 @@ impl PartialHashStageStats {
     }
 }
 
+// ─── Щабель 3: повний content hash (T-060) ───────────────────────────────────
+
+/// Повний BLAKE3 файла (32 байти) — підтверджений дублікат.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ContentHash(pub [u8; 32]);
+
+impl ContentHash {
+    pub const ZERO: Self = Self([0u8; 32]);
+
+    pub fn to_hex(self) -> String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut out = String::with_capacity(64);
+        for b in self.0 {
+            out.push(HEX[(b >> 4) as usize] as char);
+            out.push(HEX[(b & 0xf) as usize] as char);
+        }
+        out
+    }
+}
+
+/// Вхід щабля 3 після повного хешу.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContentHashKey {
+    pub candidate_id: CandidateId,
+    pub size: ByteSize,
+    pub content_hash: ContentHash,
+}
+
+/// Підтверджена група дублікатів (однаковий size + content hash).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContentHashGroup {
+    pub size: ByteSize,
+    pub content_hash: ContentHash,
+    pub members: Vec<CandidateId>,
+}
+
+impl ContentHashGroup {
+    pub fn potential_reclaim_bytes(&self) -> u64 {
+        let n = self.members.len() as u64;
+        self.size.0.saturating_mul(n.saturating_sub(1))
+    }
+
+    pub fn member_count(&self) -> usize {
+        self.members.len()
+    }
+}
+
+/// Згрупувати за (size, content_hash); синглтони відкинути.
+pub fn group_by_content_hash(
+    files: impl IntoIterator<Item = ContentHashKey>,
+) -> Vec<ContentHashGroup> {
+    use std::collections::HashMap;
+
+    let mut buckets: HashMap<(u64, [u8; 32]), Vec<CandidateId>> = HashMap::new();
+    for f in files {
+        if f.size.0 == 0 {
+            continue;
+        }
+        buckets
+            .entry((f.size.0, f.content_hash.0))
+            .or_default()
+            .push(f.candidate_id);
+    }
+
+    let mut groups: Vec<ContentHashGroup> = buckets
+        .into_iter()
+        .filter_map(|((size, hash), mut members)| {
+            if members.len() < 2 {
+                return None;
+            }
+            members.sort_unstable_by_key(|id| id.0);
+            members.dedup();
+            if members.len() < 2 {
+                return None;
+            }
+            Some(ContentHashGroup {
+                size: ByteSize(size),
+                content_hash: ContentHash(hash),
+                members,
+            })
+        })
+        .collect();
+
+    groups.sort_unstable_by(|a, b| {
+        b.potential_reclaim_bytes()
+            .cmp(&a.potential_reclaim_bytes())
+            .then_with(|| b.size.0.cmp(&a.size.0))
+            .then_with(|| a.content_hash.0.cmp(&b.content_hash.0))
+            .then_with(|| a.members[0].0.cmp(&b.members[0].0))
+    });
+    groups
+}
+
+/// Підсумок щабля 3.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContentHashStageStats {
+    pub files_hashed: u64,
+    pub files_failed: u64,
+    pub files_unique_content: u64,
+    pub files_in_groups: u64,
+    pub group_count: u64,
+    pub potential_reclaim_bytes: u64,
+    /// Байти, прочитані під час повного хешу (≈ сума size успішних).
+    pub bytes_read: u64,
+    pub cancelled: bool,
+    /// Скільки потоків файлів використано (1 = послідовно).
+    pub file_workers: u32,
+}
+
+impl ContentHashStageStats {
+    pub fn from_groups(
+        files_hashed: u64,
+        files_failed: u64,
+        bytes_read: u64,
+        cancelled: bool,
+        file_workers: u32,
+        groups: &[ContentHashGroup],
+    ) -> Self {
+        let files_in_groups: u64 = groups.iter().map(|g| g.member_count() as u64).sum();
+        let potential_reclaim_bytes = groups.iter().map(|g| g.potential_reclaim_bytes()).sum();
+        Self {
+            files_hashed,
+            files_failed,
+            files_unique_content: files_hashed.saturating_sub(files_in_groups),
+            files_in_groups,
+            group_count: groups.len() as u64,
+            potential_reclaim_bytes,
+            bytes_read,
+            cancelled,
+            file_workers,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -421,5 +560,39 @@ mod tests {
     fn partial_chunk_constants_match_architecture() {
         assert_eq!(PARTIAL_HASH_CHUNK_BYTES, 64 * 1024);
         assert_eq!(PARTIAL_HASH_MAX_READ_BYTES, 128 * 1024);
+    }
+
+    fn chash(byte: u8) -> ContentHash {
+        let mut a = [0u8; 32];
+        a[0] = byte;
+        ContentHash(a)
+    }
+
+    fn ckey(id: u64, size: u64, h: u8) -> ContentHashKey {
+        ContentHashKey {
+            candidate_id: CandidateId(id),
+            size: ByteSize(size),
+            content_hash: chash(h),
+        }
+    }
+
+    #[test]
+    fn different_content_hashes_split_group() {
+        let groups = group_by_content_hash([
+            ckey(1, 500, 0x11),
+            ckey(2, 500, 0x11),
+            ckey(3, 500, 0x22),
+            ckey(4, 500, 0x22),
+            ckey(5, 500, 0x33), // alone
+        ]);
+        assert_eq!(groups.len(), 2);
+        assert!(groups.iter().all(|g| g.members.len() >= 2));
+        assert!(!groups.iter().any(|g| g.content_hash == chash(0x33)));
+    }
+
+    #[test]
+    fn content_hash_hex_stable() {
+        assert_eq!(chash(0xAB).to_hex().len(), 64);
+        assert!(chash(0xAB).to_hex().starts_with("ab"));
     }
 }
