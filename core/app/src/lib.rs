@@ -12,6 +12,7 @@
 pub mod aggregator;
 pub mod change_monitor;
 pub mod detectors;
+pub mod disk_forecast;
 pub mod elevation;
 pub mod location_registry;
 pub mod mvp_farm;
@@ -23,5 +24,7 @@ pub mod usn_fallback;
 pub mod workers;
 
 pub use aggregator::{Aggregator, LiveTotals};
+pub use disk_forecast::{marked_unique_bytes, DiskForecast, QuarantineHeld};
 pub use mvp_farm::mvp_predicate_registry;
 pub use trashradar_domain::aggregate::{CandidateContribution, CategoryRollup, FreeableSummary};
+pub use trashradar_domain::forecast::{CleanupForecast, ForecastInputs, VolumeUsage};

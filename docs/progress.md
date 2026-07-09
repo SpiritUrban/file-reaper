@@ -102,6 +102,7 @@
 | T-053 Папка як одиниця | ✅ | 2026-07-09 | local | **`detectors/folder_units`:** `FolderUnitAcc`/`FolderUnitSpec`/`build_folder_unit` → `CandidateUnit::Folder`, size=Σ, explanation DoD «label · N ГБ · 44 000 файлів» (`format_file_count` з пробілами тисяч); `apply_unit_decision` = одне позначення; sort by size. Рефактор `aggregate_units` у app_caches/node_modules/build/unity. DoD unit на 44k files. clippy `-D warnings`; fmt. |
 | T-054 Чесна цифра (унікалізація) | ✅ | 2026-07-09 | local | **Domain `aggregate`:** `FreeableSummary` / `summarize_unique` — unique_bytes 1× на candidate; by_category може перетинатися; Keep виключено. **App `Aggregator`:** `from_hits` (orchestrator multi-hit) + `from_primary_records`. DoD: 3 категорії → unique=size, category_sum=3×. 6 domain + 4 app unit. clippy `-D warnings`. |
 | T-055 Живі агрегати + події UI | ✅ | 2026-07-09 | local | **`LiveTotals`** (ingest hits по батчах); **`mvp_predicate_registry`**; shell: `cleanup.total_updated` + `category.updated`, `AggregateThrottle` ≤10/с; scan pipeline: insert→categorize→upsert→live emit; final flush; unique==index. Contracts/UI types. DoD unit live growth + throttle. clippy `-D warnings`. |
+| T-056 Прогноз диска після очищення | ✅ | 2026-07-09 | local | **Domain `forecast`:** `free_after = free + quarantine_held + marked` (cap capacity); % used now/after (UI 91%→86%). **App `DiskForecast`:** mark з індексу; reap→held (free без змін); purge→held↓ free↑; fact==forecast. 5+3 unit. clippy clean. |
 
 ## Легенда
 
