@@ -14,12 +14,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::RwLock;
 
 use super::contract::{Detector, DetectorId};
-use super::format::{app_cache_unit_explanation, format_bytes_as_gb};
-use crate::location_registry::{path_matches_prefix, KnownLocationsRegistry, LocationKind};
-use trashradar_domain::candidate::{
-    ByteSize, CandidateId, CandidateUnit, Decision, FileAttributes, FileKind, FileRecord,
-    SafetyLevel, Verdict,
+use super::folder_units::{
+    build_folder_unit_from_acc, id_ns, sort_folder_units_by_size_desc, FolderUnitAcc,
+    FolderUnitSpec,
 };
+use super::format::format_bytes_as_gb;
+use crate::location_registry::{path_matches_prefix, KnownLocationsRegistry, LocationKind};
+use trashradar_domain::candidate::{CandidateUnit, Decision, FileRecord, SafetyLevel, Verdict};
 use trashradar_domain::category::CategoryId;
 
 /// Стабільний id детектора.
@@ -113,16 +114,15 @@ impl AppCachesDetector {
             .cloned()
     }
 
-    /// Згорнути файли індексу в **папки-одиниці** кешу (DoD T-048).
+    /// Згорнути файли індексу в **папки-одиниці** кешу (DoD T-048 / T-053).
     ///
     /// Для кожного кореня реєстру, під яким є ≥1 файл (не Keep), будує
     /// [`FileRecord`] з `unit = Folder`, `size = Σ size`, поясненням
-    /// «Label · N ГБ · M файлів».
+    /// «Label · N ГБ · M файлів» — **одна** одиниця позначення.
     pub fn aggregate_units(&self, records: &[FileRecord]) -> Vec<FileRecord> {
         #[derive(Default)]
         struct Acc {
-            bytes: u64,
-            count: u64,
+            unit: FolderUnitAcc,
             root: Option<CacheRoot>,
         }
 
@@ -140,8 +140,7 @@ impl AppCachesDetector {
             };
             let key = root.path.clone();
             let acc = by_root.entry(key).or_default();
-            acc.bytes = acc.bytes.saturating_add(record.size.0);
-            acc.count = acc.count.saturating_add(1);
+            acc.unit.add_file(record.size.0);
             if acc.root.is_none() {
                 acc.root = Some(root);
             }
@@ -151,47 +150,31 @@ impl AppCachesDetector {
             .into_values()
             .filter_map(|acc| {
                 let root = acc.root?;
-                if acc.count == 0 {
-                    return None;
-                }
                 let label = if root.label.is_empty() {
-                    root.location_id.as_str()
+                    root.location_id.clone()
                 } else {
-                    root.label.as_str()
+                    root.label.clone()
                 };
-                let explanation = app_cache_unit_explanation(label, acc.bytes, acc.count);
-                Some(FileRecord {
-                    candidate_id: CandidateId(stable_folder_id(&root.path)),
-                    path: root.path,
-                    size: ByteSize(acc.bytes),
-                    created_at: None,
-                    modified_at: None,
-                    accessed_at: None,
-                    kind: FileKind::Other,
-                    unit: CandidateUnit::Folder,
-                    category: CategoryId::AppCaches,
-                    safety: root.safety,
-                    decision: Decision::Undecided,
-                    detector_id: DETECTOR_ID.as_str().to_string(),
-                    explanation,
-                    attributes: FileAttributes::default(),
-                })
+                build_folder_unit_from_acc(
+                    FolderUnitSpec {
+                        path: root.path,
+                        label,
+                        bytes: 0,
+                        file_count: 0,
+                        category: CategoryId::AppCaches,
+                        safety: root.safety,
+                        detector_id: DETECTOR_ID,
+                        notes: vec![],
+                        id_namespace: id_ns::APP_CACHES,
+                    },
+                    acc.unit,
+                )
             })
             .collect();
 
-        // Стабільний порядок: найбільші кеші зверху.
-        units.sort_by(|a, b| b.size.0.cmp(&a.size.0).then_with(|| a.path.cmp(&b.path)));
+        sort_folder_units_by_size_desc(&mut units);
         units
     }
-}
-
-/// Детермінований id папки з шляху.
-fn stable_folder_id(path: &str) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut h = DefaultHasher::new();
-    path.to_ascii_lowercase().hash(&mut h);
-    0x8000_0000_0000_0000 | (h.finish() & 0x7fff_ffff_ffff_ffff)
 }
 
 fn paths_equal_norm(a: &str, b: &str) -> bool {
@@ -255,6 +238,7 @@ mod tests {
     use super::*;
     use crate::detectors::{DetectorOrchestrator, DetectorRegistry};
     use crate::location_registry::KnownLocationsRegistry;
+    use trashradar_domain::candidate::{ByteSize, CandidateId, FileAttributes, FileKind};
 
     const MIB: u64 = 1024 * 1024;
 

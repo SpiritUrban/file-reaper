@@ -20,14 +20,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::RwLock;
 
 use super::contract::{Detector, DetectorId};
-use super::format::{app_cache_unit_explanation, format_bytes_as_gb};
+use super::folder_units::{
+    build_folder_unit_from_acc, id_ns, sort_folder_units_by_size_desc, FolderUnitAcc,
+    FolderUnitSpec,
+};
+use super::format::format_bytes_as_gb;
 use super::node_modules::{file_name, normalize_path, parent_dir};
 use super::project_activity::{append_activity_phrase, ProjectActivityIndex};
 use super::thresholds::{self, keys, ThresholdValue};
-use trashradar_domain::candidate::{
-    ByteSize, CandidateId, CandidateUnit, Decision, FileAttributes, FileKind, FileRecord,
-    SafetyLevel, Verdict,
-};
+use trashradar_domain::candidate::{CandidateUnit, Decision, FileRecord, SafetyLevel, Verdict};
 use trashradar_domain::category::CategoryId;
 use trashradar_domain::error::CoreError;
 
@@ -228,14 +229,13 @@ impl BuildArtifactsDetector {
         )
     }
 
-    /// Згорнути файли в одиниці-папки (T-053 prep). Оновлює активність (T-052).
+    /// Згорнути файли в одиниці-папки (T-053). Оновлює активність (T-052).
     pub fn aggregate_units(&self, records: &[FileRecord]) -> Vec<FileRecord> {
         self.rebuild_activity(records);
 
         #[derive(Default)]
         struct Acc {
-            bytes: u64,
-            count: u64,
+            unit: FolderUnitAcc,
             kind: Option<BuildFolderKind>,
         }
         let mut by_root: HashMap<String, Acc> = HashMap::new();
@@ -248,8 +248,7 @@ impl BuildArtifactsDetector {
                 continue;
             };
             let acc = by_root.entry(root).or_default();
-            acc.bytes = acc.bytes.saturating_add(record.size.0);
-            acc.count = acc.count.saturating_add(1);
+            acc.unit.add_file(record.size.0);
             acc.kind = Some(kind);
         }
 
@@ -257,29 +256,29 @@ impl BuildArtifactsDetector {
             .into_iter()
             .filter_map(|(path, acc)| {
                 let kind = acc.kind?;
-                let label = kind.as_str();
                 let (safety, phrase) = self.safety_and_phrase(&path);
-                let base = app_cache_unit_explanation(label, acc.bytes, acc.count);
-                let explanation = append_activity_phrase(&base, &phrase);
-                Some(FileRecord {
-                    candidate_id: CandidateId(stable_id(&path)),
-                    path,
-                    size: ByteSize(acc.bytes),
-                    created_at: None,
-                    modified_at: None,
-                    accessed_at: None,
-                    kind: FileKind::Other,
-                    unit: CandidateUnit::Folder,
-                    category: CategoryId::DevArtifacts,
-                    safety,
-                    decision: Decision::Undecided,
-                    detector_id: DETECTOR_ID.as_str().to_string(),
-                    explanation,
-                    attributes: FileAttributes::default(),
-                })
+                let notes = if phrase.is_empty() {
+                    vec![]
+                } else {
+                    vec![phrase]
+                };
+                build_folder_unit_from_acc(
+                    FolderUnitSpec {
+                        path,
+                        label: kind.as_str().into(),
+                        bytes: 0,
+                        file_count: 0,
+                        category: CategoryId::DevArtifacts,
+                        safety,
+                        detector_id: DETECTOR_ID,
+                        notes,
+                        id_namespace: id_ns::BUILD_ARTIFACTS,
+                    },
+                    acc.unit,
+                )
             })
             .collect();
-        units.sort_by(|a, b| b.size.0.cmp(&a.size.0).then_with(|| a.path.cmp(&b.path)));
+        sort_folder_units_by_size_desc(&mut units);
         units
     }
 }
@@ -399,20 +398,14 @@ pub fn outermost_build_root(path: &str) -> Option<(String, BuildFolderKind)> {
     None
 }
 
-fn stable_id(path: &str) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut h = DefaultHasher::new();
-    normalize_path(path).hash(&mut h);
-    0xA000_0000_0000_0000 | (h.finish() & 0x0fff_ffff_ffff_ffff)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::detectors::format::FILETIME_PER_DAY;
     use crate::detectors::{DetectorOrchestrator, DetectorRegistry};
-    use trashradar_domain::candidate::FsTimestamp;
+    use trashradar_domain::candidate::{
+        ByteSize, CandidateId, FileAttributes, FileKind, FsTimestamp,
+    };
 
     const NOW: i64 = 50_000 * FILETIME_PER_DAY;
 

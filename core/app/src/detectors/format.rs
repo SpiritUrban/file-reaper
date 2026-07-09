@@ -55,14 +55,29 @@ pub fn archive_explanation(bytes: u64) -> String {
     format!("архів {}", format_bytes_as_gb(bytes))
 }
 
-/// Пояснення T-048: одиниця-каталог кешу з сумарним розміром.
-/// «Chrome Cache · 1.20 ГБ · 44000 файлів»
-pub fn app_cache_unit_explanation(label: &str, bytes: u64, file_count: u64) -> String {
+/// Кількість файлів для плитки: тисячі з пробілом (DoD T-053 «44 000»).
+pub fn format_file_count(n: u64) -> String {
+    let s = n.to_string();
+    let chars: Vec<char> = s.chars().collect();
+    let len = chars.len();
+    let mut out = String::with_capacity(len + len / 3);
+    for (i, ch) in chars.into_iter().enumerate() {
+        if i > 0 && (len - i).is_multiple_of(3) {
+            out.push(' ');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// Пояснення папки-одиниці (T-048 / T-053).
+/// «node_modules · 1.20 ГБ · 44 000 файлів»
+pub fn folder_unit_explanation(label: &str, bytes: u64, file_count: u64) -> String {
     format!(
         "{} · {} · {} файлів",
         label,
         format_bytes_as_gb(bytes),
-        file_count
+        format_file_count(file_count)
     )
 }
 
@@ -195,5 +210,18 @@ mod tests {
         // не підрядок: WindowsBackup ≠ Download
         assert!(!is_downloads_like_path(r"C:\WindowsBackup\setup.exe"));
         assert!(!is_downloads_like_path(r"C:\Program Files\App\setup.exe"));
+    }
+
+    #[test]
+    fn folder_unit_explanation_dod_shape() {
+        let s = folder_unit_explanation(
+            "node_modules",
+            (1.2 * 1024.0 * 1024.0 * 1024.0) as u64,
+            44_000,
+        );
+        assert!(s.contains("node_modules"), "{s}");
+        assert!(s.contains("ГБ"), "{s}");
+        assert!(s.contains("44 000"), "{s}");
+        assert!(s.contains("файлів"), "{s}");
     }
 }
