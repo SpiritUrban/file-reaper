@@ -33,10 +33,11 @@ pub use decisions::{
 pub use disk_forecast::{marked_unique_bytes, DiskForecast, QuarantineHeld};
 pub use duplicates::{
     default_file_workers, estimated_partial_read, hash_targets_from_records, run_duplicate_cascade,
-    run_duplicate_cascade_default, run_full_hash_stage, run_partial_hash_stage, run_size_stage,
-    run_size_stage_from_index, spawn_duplicate_cascade, spawn_full_hash_stage,
-    spawn_partial_hash_stage, CascadeResult, FullHashStageResult, HashTarget, MapHasher,
-    PartialHashStageResult, SizeStageResult,
+    run_duplicate_cascade_default, run_duplicate_cascade_with_cache, run_full_hash_stage,
+    run_full_hash_stage_cached, run_partial_hash_stage, run_partial_hash_stage_cached,
+    run_size_stage, run_size_stage_from_index, spawn_duplicate_cascade, spawn_full_hash_stage,
+    spawn_partial_hash_stage, CascadeResult, CountingHasher, FullHashStageResult, HashTarget,
+    MapHasher, MemoryHashCache, PartialHashStageResult, SizeStageResult,
 };
 pub use mvp_farm::mvp_predicate_registry;
 pub use trashradar_domain::aggregate::{CandidateContribution, CategoryRollup, FreeableSummary};

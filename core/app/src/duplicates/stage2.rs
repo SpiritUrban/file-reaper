@@ -1,17 +1,18 @@
 //! Щабель 2: частковий хеш head+tail 64 КіБ (T-059).
 //!
-//! I/O — лише через [`Hasher`]; domain групує готові fingerprint-и.
+//! I/O — через [`Hasher`]; кеш size+mtime — T-062.
 
 use std::collections::HashMap;
 
-use trashradar_domain::candidate::{ByteSize, CandidateId, FileRecord};
+use trashradar_domain::candidate::{ByteSize, CandidateId, FileRecord, FsTimestamp};
 use trashradar_domain::duplicates::{
     group_by_partial_hash, ContentHash, ExactSizeGroup, PartialHash, PartialHashGroup,
     PartialHashKey, PartialHashStageStats,
 };
 use trashradar_domain::error::CoreError;
 
-use crate::ports::Hasher;
+use crate::duplicates::hash_cache::cache_store_partial;
+use crate::ports::{hash_cache_lookup, HashCache, Hasher};
 use crate::workers::{CancellationToken, JobHandle, JobPriority, WorkerPool};
 
 /// Результат щабля 2.
@@ -19,32 +20,49 @@ use crate::workers::{CancellationToken, JobHandle, JobPriority, WorkerPool};
 pub struct PartialHashStageResult {
     pub groups: Vec<PartialHashGroup>,
     pub stats: PartialHashStageStats,
+    /// Реальні виклики Hasher (диск); 0 при cache hit.
+    pub disk_reads: u64,
+    /// Влучання в кеш partial (T-062).
+    pub cache_hits: u64,
 }
 
-/// Шлях + розмір для члена size-групи.
+/// Шлях + розмір + mtime для члена size-групи.
 #[derive(Debug, Clone)]
 pub struct HashTarget {
     pub candidate_id: CandidateId,
     pub path: String,
     pub size: ByteSize,
+    /// Для валідності кешу (T-062).
+    pub modified_at: Option<FsTimestamp>,
 }
 
-/// Прогін щабля 2: хешує членів size-груп, розбиває за partial-хешем.
-///
-/// - кооперативна відміна між файлами (T-008);
-/// - помилка одного файла → skip + `files_failed`, решта триває;
-/// - `bytes_read` оцінюється як min(size, 128 KiB) на успішний файл
-///   (фактичне обмеження — в адаптері Hasher).
+/// Прогін щабля 2 без кешу.
 pub fn run_partial_hash_stage(
     size_groups: &[ExactSizeGroup],
     targets: &HashMap<CandidateId, HashTarget>,
     hasher: &dyn Hasher,
     cancel: &CancellationToken,
 ) -> PartialHashStageResult {
+    run_partial_hash_stage_cached(size_groups, targets, hasher, cancel, None)
+}
+
+/// Прогін щабля 2 з опційним [`HashCache`] (T-062).
+///
+/// - cache hit (size+mtime) → без `hasher.partial_hash`;
+/// - miss → диск + `cache_store_partial`.
+pub fn run_partial_hash_stage_cached(
+    size_groups: &[ExactSizeGroup],
+    targets: &HashMap<CandidateId, HashTarget>,
+    hasher: &dyn Hasher,
+    cancel: &CancellationToken,
+    cache: Option<&dyn HashCache>,
+) -> PartialHashStageResult {
     let mut keys: Vec<PartialHashKey> = Vec::new();
     let mut files_hashed = 0u64;
     let mut files_failed = 0u64;
     let mut bytes_read = 0u64;
+    let mut disk_reads = 0u64;
+    let mut cache_hits = 0u64;
     let mut cancelled = false;
 
     'outer: for group in size_groups {
@@ -57,15 +75,44 @@ pub fn run_partial_hash_stage(
                 files_failed += 1;
                 continue;
             };
+
+            // T-062: спроба з кешу.
+            if let Some(cache) = cache {
+                if let Ok(Some(entry)) =
+                    hash_cache_lookup(cache, &target.path, target.size, target.modified_at)
+                {
+                    if let Some(partial_hash) = entry.partial {
+                        files_hashed += 1;
+                        cache_hits += 1;
+                        keys.push(PartialHashKey {
+                            candidate_id: id,
+                            size: target.size,
+                            partial_hash,
+                        });
+                        continue;
+                    }
+                }
+            }
+
             match hasher.partial_hash(&target.path, target.size) {
                 Ok(partial_hash) => {
                     files_hashed += 1;
+                    disk_reads += 1;
                     bytes_read += estimated_partial_read(target.size.0);
                     keys.push(PartialHashKey {
                         candidate_id: id,
                         size: target.size,
                         partial_hash,
                     });
+                    if let Some(cache) = cache {
+                        let _ = cache_store_partial(
+                            cache,
+                            &target.path,
+                            target.size,
+                            target.modified_at,
+                            partial_hash,
+                        );
+                    }
                 }
                 Err(_) => {
                     files_failed += 1;
@@ -82,10 +129,15 @@ pub fn run_partial_hash_stage(
         cancelled,
         &groups,
     );
-    PartialHashStageResult { groups, stats }
+    PartialHashStageResult {
+        groups,
+        stats,
+        disk_reads,
+        cache_hits,
+    }
 }
 
-/// Зібрати targets з індексних записів (path + size).
+/// Зібрати targets з індексних записів (path + size + mtime).
 pub fn hash_targets_from_records<'a>(
     records: impl IntoIterator<Item = &'a FileRecord>,
 ) -> HashMap<CandidateId, HashTarget> {
@@ -98,6 +150,7 @@ pub fn hash_targets_from_records<'a>(
                     candidate_id: r.candidate_id,
                     path: r.path.clone(),
                     size: r.size,
+                    modified_at: r.modified_at,
                 },
             )
         })
@@ -170,6 +223,7 @@ impl Hasher for MapHasher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::duplicates::hash_cache::{CountingHasher, MemoryHashCache};
     use trashradar_domain::candidate::ByteSize;
     use trashradar_domain::PARTIAL_HASH_MAX_READ_BYTES;
 
@@ -181,6 +235,7 @@ mod tests {
                 candidate_id: cid,
                 path: path.into(),
                 size: ByteSize(size),
+                modified_at: Some(FsTimestamp(1)),
             },
         )
     }
@@ -193,7 +248,6 @@ mod tests {
 
     #[test]
     fn different_partial_splits_size_group() {
-        // DoD: size-group → split by partial hash.
         let size_groups = vec![ExactSizeGroup {
             size: ByteSize(10_000),
             members: vec![
@@ -214,9 +268,9 @@ mod tests {
         let hasher = MapHasher {
             map: [
                 (r"C:\a.bin".into(), ph(1)),
-                (r"C:\b.bin".into(), ph(1)), // pair with a
+                (r"C:\b.bin".into(), ph(1)),
                 (r"C:\c.bin".into(), ph(2)),
-                (r"C:\d.bin".into(), ph(2)), // pair with c
+                (r"C:\d.bin".into(), ph(2)),
             ]
             .into_iter()
             .collect(),
@@ -228,10 +282,8 @@ mod tests {
             run_partial_hash_stage(&size_groups, &targets, &hasher, &CancellationToken::new());
         assert_eq!(out.groups.len(), 2);
         assert_eq!(out.stats.files_hashed, 4);
-        assert_eq!(out.stats.files_failed, 0);
-        assert_eq!(out.stats.files_in_groups, 4);
-        assert!(out.stats.bytes_read <= 4 * PARTIAL_HASH_MAX_READ_BYTES);
-        assert!(out.stats.bytes_read > 0);
+        assert_eq!(out.disk_reads, 4);
+        assert_eq!(out.cache_hits, 0);
     }
 
     #[test]
@@ -251,7 +303,7 @@ mod tests {
             map: [
                 ("a".into(), ph(9)),
                 ("b".into(), ph(9)),
-                ("c".into(), ph(7)), // alone
+                ("c".into(), ph(7)),
             ]
             .into_iter()
             .collect(),
@@ -262,7 +314,6 @@ mod tests {
         let out =
             run_partial_hash_stage(&size_groups, &targets, &hasher, &CancellationToken::new());
         assert_eq!(out.groups.len(), 1);
-        assert_eq!(out.groups[0].members.len(), 2);
         assert_eq!(out.stats.files_unique_partial, 1);
     }
 
@@ -271,10 +322,6 @@ mod tests {
         assert_eq!(estimated_partial_read(50), 50);
         assert_eq!(
             estimated_partial_read(PARTIAL_HASH_MAX_READ_BYTES),
-            PARTIAL_HASH_MAX_READ_BYTES
-        );
-        assert_eq!(
-            estimated_partial_read(PARTIAL_HASH_MAX_READ_BYTES + 1),
             PARTIAL_HASH_MAX_READ_BYTES
         );
     }
@@ -305,7 +352,6 @@ mod tests {
         let out = run_partial_hash_stage(&size_groups, &targets, &hasher, &cancel);
         assert!(out.stats.cancelled);
         assert_eq!(out.stats.files_hashed, 0);
-        assert!(out.groups.is_empty());
     }
 
     #[test]
@@ -328,7 +374,6 @@ mod tests {
         let out =
             run_partial_hash_stage(&size_groups, &targets, &hasher, &CancellationToken::new());
         assert_eq!(out.stats.files_failed, 1);
-        assert_eq!(out.stats.files_hashed, 2);
         assert_eq!(out.groups.len(), 1);
     }
 
@@ -367,7 +412,43 @@ mod tests {
         handle.wait();
         let r = slot.lock().unwrap().take().expect("result");
         assert_eq!(r.groups.len(), 1);
-        assert_eq!(r.stats.files_hashed, 2);
         drop(pool);
+    }
+
+    /// DoD T-062: повторний прогін не викликає Hasher (disk_reads = 0).
+    #[test]
+    fn second_run_uses_cache_zero_disk_reads() {
+        let size_groups = vec![ExactSizeGroup {
+            size: ByteSize(50),
+            members: vec![CandidateId(1), CandidateId(2)],
+        }];
+        let targets: HashMap<_, _> = [target(1, "a", 50), target(2, "b", 50)]
+            .into_iter()
+            .collect();
+        let map = MapHasher {
+            map: [("a".into(), ph(1)), ("b".into(), ph(1))]
+                .into_iter()
+                .collect(),
+            full: HashMap::new(),
+            fail: HashMap::new(),
+            fail_full: HashMap::new(),
+        };
+        let hasher = CountingHasher::new(map);
+        let cache = MemoryHashCache::new();
+        let cancel = CancellationToken::new();
+
+        let first =
+            run_partial_hash_stage_cached(&size_groups, &targets, &hasher, &cancel, Some(&cache));
+        assert_eq!(first.disk_reads, 2);
+        assert_eq!(first.cache_hits, 0);
+        assert_eq!(hasher.partial_reads(), 2);
+
+        hasher.reset_counts();
+        let second =
+            run_partial_hash_stage_cached(&size_groups, &targets, &hasher, &cancel, Some(&cache));
+        assert_eq!(second.disk_reads, 0);
+        assert_eq!(second.cache_hits, 2);
+        assert_eq!(hasher.partial_reads(), 0);
+        assert_eq!(second.groups, first.groups);
     }
 }

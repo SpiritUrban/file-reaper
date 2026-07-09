@@ -19,7 +19,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::candidate::{ByteSize, CandidateId};
+use crate::candidate::{ByteSize, CandidateId, FsTimestamp};
 
 /// Розмір одного «кінця» файла для щабля 2 (architecture.md §4).
 pub const PARTIAL_HASH_CHUNK_BYTES: u64 = 64 * 1024;
@@ -443,6 +443,44 @@ pub struct DuplicatesCategoryState {
     pub cancelled: bool,
 }
 
+// ─── Кеш хешів: валідність size + mtime (T-062) ──────────────────────────────
+
+/// Нормалізація шляху для ключа кешу (Windows: lower + `\`).
+pub fn normalize_hash_cache_path(path: &str) -> String {
+    path.replace('/', "\\").to_ascii_lowercase()
+}
+
+/// Запис кешу partial/full хешів (architecture.md §10).
+///
+/// Валідний, лише якщо **size + modified_at** збігаються з індексом.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileHashCacheEntry {
+    /// Нормалізований шлях (ключ).
+    pub path_key: String,
+    pub size: ByteSize,
+    pub modified_at: Option<FsTimestamp>,
+    pub partial: Option<PartialHash>,
+    pub content: Option<ContentHash>,
+}
+
+impl FileHashCacheEntry {
+    pub fn new(path: &str, size: ByteSize, modified_at: Option<FsTimestamp>) -> Self {
+        Self {
+            path_key: normalize_hash_cache_path(path),
+            size,
+            modified_at,
+            partial: None,
+            content: None,
+        }
+    }
+
+    /// Ключ валідності: size + mtime (architecture.md §10).
+    pub fn is_valid_for(&self, size: ByteSize, modified_at: Option<FsTimestamp>) -> bool {
+        self.size == size && self.modified_at == modified_at
+    }
+}
+
 impl DuplicatesCategoryState {
     pub fn idle() -> Self {
         Self::default()
@@ -729,5 +767,16 @@ mod tests {
         assert!(!s.refining);
         assert_eq!(s.reclaimable_bytes, 500);
         assert_eq!(s.phase, CascadePhase::Complete);
+    }
+
+    #[test]
+    fn hash_cache_valid_only_for_same_size_and_mtime() {
+        let mut e = FileHashCacheEntry::new(r"C:\A\f.bin", ByteSize(100), Some(FsTimestamp(9)));
+        e.partial = Some(phash(1));
+        assert!(e.is_valid_for(ByteSize(100), Some(FsTimestamp(9))));
+        assert!(!e.is_valid_for(ByteSize(101), Some(FsTimestamp(9))));
+        assert!(!e.is_valid_for(ByteSize(100), Some(FsTimestamp(8))));
+        assert!(!e.is_valid_for(ByteSize(100), None));
+        assert_eq!(normalize_hash_cache_path(r"C:/A/F.BIN"), r"c:\a\f.bin");
     }
 }

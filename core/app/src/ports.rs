@@ -62,11 +62,11 @@ pub enum UsnReadOutcome {
 }
 
 use trashradar_domain::{
-    candidate::{ByteSize, FileRecord, FileRecordSort},
+    candidate::{ByteSize, FileRecord, FileRecordSort, FsTimestamp},
     category::CategoryId,
     error::CoreError,
     scan::{ScanEntry, UsnChange, UsnCursor, UsnJournalInfo},
-    ContentHash, PartialHash,
+    ContentHash, FileHashCacheEntry, PartialHash,
 };
 
 use crate::workers::CancellationToken;
@@ -165,6 +165,30 @@ pub trait Hasher: Send + Sync {
         size: ByteSize,
         cancel: &CancellationToken,
     ) -> Result<ContentHash, CoreError>;
+}
+
+/// Кеш partial/full хешів у індексі (T-062, architecture.md §10).
+///
+/// Валідність: size + mtime. Повторний запуск не перехешовує незмінені файли.
+pub trait HashCache: Send + Sync {
+    /// Сирий lookup за шляхом (нормалізація — всередині адаптера).
+    fn get_entry(&self, path: &str) -> Result<Option<FileHashCacheEntry>, CoreError>;
+
+    /// Upsert запису (merge partial/content на стороні викликача або адаптера).
+    fn put_entry(&self, entry: &FileHashCacheEntry) -> Result<(), CoreError>;
+}
+
+/// Lookup: запис валідний лише якщо size+mtime збігаються.
+pub fn hash_cache_lookup(
+    cache: &dyn HashCache,
+    path: &str,
+    size: ByteSize,
+    modified_at: Option<FsTimestamp>,
+) -> Result<Option<FileHashCacheEntry>, CoreError> {
+    match cache.get_entry(path)? {
+        Some(entry) if entry.is_valid_for(size, modified_at) => Ok(Some(entry)),
+        _ => Ok(None),
+    }
 }
 
 /// Джерело часу — для тестованості TTL і «віку» файлів.

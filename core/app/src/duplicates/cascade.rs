@@ -12,10 +12,12 @@ use trashradar_domain::duplicates::{
 
 use crate::duplicates::stage1::{run_size_stage, SizeStageResult};
 use crate::duplicates::stage2::{
-    hash_targets_from_records, run_partial_hash_stage, HashTarget, PartialHashStageResult,
+    hash_targets_from_records, run_partial_hash_stage_cached, HashTarget, PartialHashStageResult,
 };
-use crate::duplicates::stage3::{default_file_workers, run_full_hash_stage, FullHashStageResult};
-use crate::ports::Hasher;
+use crate::duplicates::stage3::{
+    default_file_workers, run_full_hash_stage_cached, FullHashStageResult,
+};
+use crate::ports::{HashCache, Hasher};
 use crate::workers::{CancellationToken, JobHandle, JobPriority, WorkerPool};
 
 /// Повний результат каскаду + фінальний знімок для UI.
@@ -42,6 +44,18 @@ pub fn run_duplicate_cascade(
     hasher: &dyn Hasher,
     cancel: &CancellationToken,
     file_workers: usize,
+    on_update: impl FnMut(&DuplicatesCategoryState),
+) -> CascadeResult {
+    run_duplicate_cascade_with_cache(records, hasher, cancel, file_workers, None, on_update)
+}
+
+/// Каскад з кешем хешів (T-062): повторний запуск без дискових читань.
+pub fn run_duplicate_cascade_with_cache(
+    records: &[FileRecord],
+    hasher: &dyn Hasher,
+    cancel: &CancellationToken,
+    file_workers: usize,
+    cache: Option<&dyn HashCache>,
     mut on_update: impl FnMut(&DuplicatesCategoryState),
 ) -> CascadeResult {
     // --- Stage 1 ---
@@ -53,7 +67,7 @@ pub fn run_duplicate_cascade(
     let targets = hash_targets_from_records(records);
 
     // --- Stage 2 ---
-    let partial = run_partial_hash_stage(&size.groups, &targets, hasher, cancel);
+    let partial = run_partial_hash_stage_cached(&size.groups, &targets, hasher, cancel, cache);
     let mut state = DuplicatesCategoryState::preliminary_from_partial(&partial.stats);
     if cancel.is_cancelled() {
         state.cancelled = true;
@@ -70,11 +84,9 @@ pub fn run_duplicate_cascade(
     }
     on_update(&state);
 
-    // Немає кандидатів на full hash — preliminary і є фіналом (без confirmed groups).
     if partial.groups.is_empty() {
         state.refining = false;
         state.phase = trashradar_domain::duplicates::CascadePhase::Complete;
-        // Довіра лишається Preliminary (нічого не підтверджували), але refining знято.
         on_update(&state);
         return CascadeResult {
             state,
@@ -91,7 +103,8 @@ pub fn run_duplicate_cascade(
     } else {
         file_workers
     };
-    let full = run_full_hash_stage(&partial.groups, &targets, hasher, cancel, workers);
+    let full =
+        run_full_hash_stage_cached(&partial.groups, &targets, hasher, cancel, workers, cache);
     state = DuplicatesCategoryState::confirmed_from_full(&full.stats);
     on_update(&state);
 
@@ -119,6 +132,8 @@ fn empty_partial() -> PartialHashStageResult {
     PartialHashStageResult {
         groups: vec![],
         stats: Default::default(),
+        disk_reads: 0,
+        cache_hits: 0,
     }
 }
 
@@ -358,5 +373,64 @@ mod tests {
         assert!(result.state.cancelled);
         assert_eq!(result.state.phase, CascadePhase::Cancelled);
         assert!(!result.state.refining);
+    }
+
+    /// DoD T-062: другий прогін каскаду — 0 disk reads (partial + full).
+    #[test]
+    fn second_cascade_run_zero_disk_reads_with_cache() {
+        use crate::duplicates::hash_cache::{CountingHasher, MemoryHashCache};
+        use trashradar_domain::candidate::FsTimestamp;
+
+        let mut records = [
+            rec(1, "a", 1000),
+            rec(2, "b", 1000),
+            rec(3, "c", 1000),
+            rec(4, "d", 1000),
+        ];
+        for r in &mut records {
+            r.modified_at = Some(FsTimestamp(42));
+        }
+        let map = MapHasher {
+            map: [
+                ("a".into(), ph(1)),
+                ("b".into(), ph(1)),
+                ("c".into(), ph(2)),
+                ("d".into(), ph(2)),
+            ]
+            .into_iter()
+            .collect(),
+            full: [
+                ("a".into(), ch(1)),
+                ("b".into(), ch(1)),
+                ("c".into(), ch(2)),
+                ("d".into(), ch(2)),
+            ]
+            .into_iter()
+            .collect(),
+            fail: HashMap::new(),
+            fail_full: HashMap::new(),
+        };
+        let hasher = CountingHasher::new(map);
+        let cache = MemoryHashCache::new();
+        let cancel = CancellationToken::new();
+
+        let first =
+            run_duplicate_cascade_with_cache(&records, &hasher, &cancel, 1, Some(&cache), |_| {});
+        assert!(first.partial.disk_reads >= 4);
+        assert_eq!(first.full.as_ref().map(|f| f.disk_reads), Some(4));
+
+        hasher.reset_counts();
+        let second =
+            run_duplicate_cascade_with_cache(&records, &hasher, &cancel, 1, Some(&cache), |_| {});
+        assert_eq!(second.partial.disk_reads, 0);
+        assert_eq!(second.partial.cache_hits, 4);
+        assert_eq!(second.full.as_ref().map(|f| f.disk_reads), Some(0));
+        assert_eq!(second.full.as_ref().map(|f| f.cache_hits), Some(4));
+        assert_eq!(hasher.partial_reads(), 0);
+        assert_eq!(hasher.full_reads(), 0);
+        assert_eq!(
+            second.state.reclaimable_bytes,
+            first.state.reclaimable_bytes
+        );
     }
 }

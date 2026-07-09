@@ -19,6 +19,7 @@ use trashradar_domain::{
         FileRecordSort, FsTimestamp, SafetyLevel,
     },
     category::CategoryId,
+    duplicates::{normalize_hash_cache_path, ContentHash, FileHashCacheEntry, PartialHash},
     scan::UsnCursor,
 };
 
@@ -26,7 +27,8 @@ const DATABASE_FILE_NAME: &str = "index.sqlite3";
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const SCHEMA_VERSION_V1: i64 = 1;
 const SCHEMA_VERSION_V2: i64 = 2;
-const LATEST_SCHEMA_VERSION: i64 = SCHEMA_VERSION_V2;
+const SCHEMA_VERSION_V3: i64 = 3;
+const LATEST_SCHEMA_VERSION: i64 = SCHEMA_VERSION_V3;
 const WRITER_QUEUE_CHANNEL_CLOSED: &str = "sqlite index writer queue is closed";
 
 /// Migration v1 creates the persistent file-record layer used by scanner output and
@@ -96,6 +98,21 @@ CREATE TABLE IF NOT EXISTS volume_usn_state (
 PRAGMA user_version = 2;
 "#;
 
+/// T-062: кеш partial/full хешів (валідність size + mtime).
+const SCHEMA_V3_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS file_hash_cache (
+    path_key TEXT PRIMARY KEY NOT NULL,
+    size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+    modified_at_filetime INTEGER NOT NULL DEFAULT 0,
+    partial_hash BLOB,
+    content_hash BLOB,
+    CHECK (partial_hash IS NULL OR length(partial_hash) = 32),
+    CHECK (content_hash IS NULL OR length(content_hash) = 32)
+);
+
+PRAGMA user_version = 3;
+"#;
+
 const MIGRATIONS: &[Migration] = &[
     Migration {
         version: SCHEMA_VERSION_V1,
@@ -104,6 +121,10 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         version: SCHEMA_VERSION_V2,
         sql: SCHEMA_V2_SQL,
+    },
+    Migration {
+        version: SCHEMA_VERSION_V3,
+        sql: SCHEMA_V3_SQL,
     },
 ];
 
@@ -606,6 +627,61 @@ impl IndexDatabase {
         Ok(changed as u64)
     }
 
+    // --- T-062: file_hash_cache ------------------------------------------------
+
+    /// Прочитати запис кешу хешів (без перевірки size+mtime — це app-шар).
+    pub fn get_hash_cache_entry(&self, path: &str) -> Result<Option<FileHashCacheEntry>> {
+        let key = normalize_hash_cache_path(path);
+        type HashCacheRow = (i64, i64, Option<Vec<u8>>, Option<Vec<u8>>);
+        let row: Option<HashCacheRow> = self
+            .connection
+            .query_row(
+                "SELECT size_bytes, modified_at_filetime, partial_hash, content_hash
+                 FROM file_hash_cache WHERE path_key = ?1",
+                params![key],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        Ok(row.map(|(size, mtime, partial, content)| {
+            let modified_at = if mtime == 0 {
+                None
+            } else {
+                Some(FsTimestamp(mtime))
+            };
+            FileHashCacheEntry {
+                path_key: key,
+                size: ByteSize(size as u64),
+                modified_at,
+                partial: blob_to_partial(partial),
+                content: blob_to_content(content),
+            }
+        }))
+    }
+
+    /// Upsert кешу хешів (merge: NULL blob не затирає існуючий).
+    pub fn put_hash_cache_entry(&self, entry: &FileHashCacheEntry) -> Result<()> {
+        let mtime = entry.modified_at.map(|t| t.0).unwrap_or(0);
+        let partial = entry.partial.map(|h| h.0.to_vec());
+        let content = entry.content.map(|h| h.0.to_vec());
+        self.connection.execute(
+            "INSERT INTO file_hash_cache (path_key, size_bytes, modified_at_filetime, partial_hash, content_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(path_key) DO UPDATE SET
+                size_bytes = excluded.size_bytes,
+                modified_at_filetime = excluded.modified_at_filetime,
+                partial_hash = COALESCE(excluded.partial_hash, file_hash_cache.partial_hash),
+                content_hash = COALESCE(excluded.content_hash, file_hash_cache.content_hash)",
+            params![
+                entry.path_key,
+                entry.size.0 as i64,
+                mtime,
+                partial,
+                content
+            ],
+        )?;
+        Ok(())
+    }
+
     /// Скинути USN-курсор тому (T-031).
     pub fn clear_usn_cursor(&self, volume: char) -> Result<()> {
         let key = volume_key(volume)?;
@@ -726,6 +802,53 @@ impl trashradar_app::ports::IndexStore for IndexDatabase {
     }
 }
 
+/// Thread-safe обгортка `IndexDatabase` для [`HashCache`] (rusqlite Connection !Sync).
+///
+/// Один writer-lock на get/put — достатньо для T-062; ліміт I/O на том — T-063.
+pub struct ThreadSafeHashCache {
+    db: std::sync::Mutex<IndexDatabase>,
+}
+
+impl ThreadSafeHashCache {
+    pub fn new(db: IndexDatabase) -> Self {
+        Self {
+            db: std::sync::Mutex::new(db),
+        }
+    }
+
+    pub fn open_profile(profile_dir: impl AsRef<std::path::Path>) -> Result<Self> {
+        Ok(Self::new(IndexDatabase::open_profile(profile_dir)?))
+    }
+}
+
+impl trashradar_app::ports::HashCache for ThreadSafeHashCache {
+    fn get_entry(
+        &self,
+        path: &str,
+    ) -> std::result::Result<Option<FileHashCacheEntry>, trashradar_domain::error::CoreError> {
+        self.db
+            .lock()
+            .map_err(|_| {
+                trashradar_domain::error::CoreError::internal("hash cache mutex poisoned")
+            })?
+            .get_hash_cache_entry(path)
+            .map_err(|err| trashradar_domain::error::CoreError::internal(err.to_string()))
+    }
+
+    fn put_entry(
+        &self,
+        entry: &FileHashCacheEntry,
+    ) -> std::result::Result<(), trashradar_domain::error::CoreError> {
+        self.db
+            .lock()
+            .map_err(|_| {
+                trashradar_domain::error::CoreError::internal("hash cache mutex poisoned")
+            })?
+            .put_hash_cache_entry(entry)
+            .map_err(|err| trashradar_domain::error::CoreError::internal(err.to_string()))
+    }
+}
+
 fn volume_key(volume: char) -> Result<String> {
     if !volume.is_ascii_alphabetic() {
         return Err(IndexSqliteError::InvalidEnumValue {
@@ -734,6 +857,30 @@ fn volume_key(volume: char) -> Result<String> {
         });
     }
     Ok(volume.to_ascii_uppercase().to_string())
+}
+
+fn blob_to_partial(blob: Option<Vec<u8>>) -> Option<PartialHash> {
+    blob.and_then(|b| {
+        if b.len() == 32 {
+            let mut a = [0u8; 32];
+            a.copy_from_slice(&b);
+            Some(PartialHash(a))
+        } else {
+            None
+        }
+    })
+}
+
+fn blob_to_content(blob: Option<Vec<u8>>) -> Option<ContentHash> {
+    blob.and_then(|b| {
+        if b.len() == 32 {
+            let mut a = [0u8; 32];
+            a.copy_from_slice(&b);
+            Some(ContentHash(a))
+        } else {
+            None
+        }
+    })
 }
 
 impl IndexWriterQueue {
@@ -1204,6 +1351,38 @@ mod tests {
             reader.read_meta("probe").expect("read after commit"),
             Some("during".to_string())
         );
+
+        cleanup(profile_dir);
+    }
+
+    #[test]
+    fn hash_cache_roundtrip_and_merge_t062() {
+        use trashradar_app::ports::HashCache;
+        use trashradar_domain::duplicates::{ContentHash, FileHashCacheEntry, PartialHash};
+
+        let profile_dir = temp_profile_dir("hash-cache-v3");
+        let raw = IndexDatabase::open_profile(&profile_dir).expect("open");
+        assert_eq!(raw.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let db = ThreadSafeHashCache::new(raw);
+
+        let mut entry = FileHashCacheEntry::new(r"C:\T\x.bin", ByteSize(99), Some(FsTimestamp(7)));
+        let mut ph = [0u8; 32];
+        ph[0] = 0xAA;
+        entry.partial = Some(PartialHash(ph));
+        db.put_entry(&entry).unwrap();
+
+        let got = db.get_entry(r"C:\t\X.BIN").unwrap().unwrap();
+        assert_eq!(got.size.0, 99);
+        assert_eq!(got.modified_at, Some(FsTimestamp(7)));
+        assert_eq!(got.partial.unwrap().0[0], 0xAA);
+        assert!(got.content.is_none());
+
+        let mut full = FileHashCacheEntry::new(r"C:\T\x.bin", ByteSize(99), Some(FsTimestamp(7)));
+        full.content = Some(ContentHash([0xBB; 32]));
+        db.put_entry(&full).unwrap();
+        let got2 = db.get_entry(r"C:\T\x.bin").unwrap().unwrap();
+        assert_eq!(got2.partial.unwrap().0[0], 0xAA); // merge kept partial
+        assert_eq!(got2.content.unwrap().0[0], 0xBB);
 
         cleanup(profile_dir);
     }

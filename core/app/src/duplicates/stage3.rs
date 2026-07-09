@@ -14,8 +14,9 @@ use trashradar_domain::duplicates::{
     PartialHashGroup,
 };
 
+use crate::duplicates::hash_cache::cache_store_content;
 use crate::duplicates::stage2::HashTarget;
-use crate::ports::Hasher;
+use crate::ports::{hash_cache_lookup, HashCache, Hasher};
 use crate::workers::{CancellationToken, JobHandle, JobPriority, WorkerPool};
 
 /// Результат щабля 3 — підтверджені групи дублікатів.
@@ -23,6 +24,10 @@ use crate::workers::{CancellationToken, JobHandle, JobPriority, WorkerPool};
 pub struct FullHashStageResult {
     pub groups: Vec<ContentHashGroup>,
     pub stats: ContentHashStageStats,
+    /// Реальні виклики full_hash (диск).
+    pub disk_reads: u64,
+    /// Влучання content hash у кеш (T-062).
+    pub cache_hits: u64,
 }
 
 /// Скільки потоків файлів за замовчуванням (диск-bound: ≤ CPU count).
@@ -46,9 +51,20 @@ pub fn run_full_hash_stage(
     cancel: &CancellationToken,
     file_workers: usize,
 ) -> FullHashStageResult {
+    run_full_hash_stage_cached(partial_groups, targets, hasher, cancel, file_workers, None)
+}
+
+/// Щабель 3 з опційним кешем full hash (T-062).
+pub fn run_full_hash_stage_cached(
+    partial_groups: &[PartialHashGroup],
+    targets: &HashMap<CandidateId, HashTarget>,
+    hasher: &dyn Hasher,
+    cancel: &CancellationToken,
+    file_workers: usize,
+    cache: Option<&dyn HashCache>,
+) -> FullHashStageResult {
     let workers = file_workers.max(1);
 
-    // Плоский список задач: (id, size з групи — узгоджений з partial).
     let mut jobs: Vec<(CandidateId, trashradar_domain::candidate::ByteSize)> = Vec::new();
     for g in partial_groups {
         for &id in &g.members {
@@ -67,14 +83,16 @@ pub fn run_full_hash_stage(
                 workers as u32,
                 &[],
             ),
+            disk_reads: 0,
+            cache_hits: 0,
         };
     }
 
     if workers == 1 || jobs.len() == 1 {
-        return run_full_hash_sequential(&jobs, targets, hasher, cancel, workers as u32);
+        return run_full_hash_sequential(&jobs, targets, hasher, cancel, workers as u32, cache);
     }
 
-    run_full_hash_parallel(&jobs, targets, hasher, cancel, workers)
+    run_full_hash_parallel(&jobs, targets, hasher, cancel, workers, cache)
 }
 
 fn run_full_hash_sequential(
@@ -83,11 +101,14 @@ fn run_full_hash_sequential(
     hasher: &dyn Hasher,
     cancel: &CancellationToken,
     file_workers: u32,
+    cache: Option<&dyn HashCache>,
 ) -> FullHashStageResult {
     let mut keys = Vec::new();
     let mut files_hashed = 0u64;
     let mut files_failed = 0u64;
     let mut bytes_read = 0u64;
+    let mut disk_reads = 0u64;
+    let mut cache_hits = 0u64;
     let mut cancelled = false;
 
     for &(id, size) in jobs {
@@ -99,16 +120,43 @@ fn run_full_hash_sequential(
             files_failed += 1;
             continue;
         };
-        // size з групи (метадані індексу); path з target
+
+        if let Some(cache) = cache {
+            if let Ok(Some(entry)) =
+                hash_cache_lookup(cache, &target.path, target.size, target.modified_at)
+            {
+                if let Some(content_hash) = entry.content {
+                    files_hashed += 1;
+                    cache_hits += 1;
+                    keys.push(ContentHashKey {
+                        candidate_id: id,
+                        size,
+                        content_hash,
+                    });
+                    continue;
+                }
+            }
+        }
+
         match hasher.full_hash(&target.path, size, cancel) {
             Ok(content_hash) => {
                 files_hashed += 1;
+                disk_reads += 1;
                 bytes_read += size.0;
                 keys.push(ContentHashKey {
                     candidate_id: id,
                     size,
                     content_hash,
                 });
+                if let Some(cache) = cache {
+                    let _ = cache_store_content(
+                        cache,
+                        &target.path,
+                        target.size,
+                        target.modified_at,
+                        content_hash,
+                    );
+                }
             }
             Err(e) if e.code == trashradar_domain::error::ErrorCode::Cancelled => {
                 cancelled = true;
@@ -129,7 +177,12 @@ fn run_full_hash_sequential(
         file_workers,
         &groups,
     );
-    FullHashStageResult { groups, stats }
+    FullHashStageResult {
+        groups,
+        stats,
+        disk_reads,
+        cache_hits,
+    }
 }
 
 fn run_full_hash_parallel(
@@ -138,15 +191,17 @@ fn run_full_hash_parallel(
     hasher: &dyn Hasher,
     cancel: &CancellationToken,
     workers: usize,
+    cache: Option<&dyn HashCache>,
 ) -> FullHashStageResult {
     let next = AtomicUsize::new(0);
     let files_hashed = AtomicU64::new(0);
     let files_failed = AtomicU64::new(0);
     let bytes_read = AtomicU64::new(0);
+    let disk_reads = AtomicU64::new(0);
+    let cache_hits = AtomicU64::new(0);
     let cancelled_flag = AtomicBool::new(false);
     let keys: Mutex<Vec<ContentHashKey>> = Mutex::new(Vec::new());
 
-    // hasher & targets & jobs shared read-only across threads.
     thread::scope(|scope| {
         for _ in 0..workers {
             scope.spawn(|| loop {
@@ -163,15 +218,43 @@ fn run_full_hash_parallel(
                     files_failed.fetch_add(1, Ordering::Relaxed);
                     continue;
                 };
+
+                if let Some(cache) = cache {
+                    if let Ok(Some(entry)) =
+                        hash_cache_lookup(cache, &target.path, target.size, target.modified_at)
+                    {
+                        if let Some(content_hash) = entry.content {
+                            files_hashed.fetch_add(1, Ordering::Relaxed);
+                            cache_hits.fetch_add(1, Ordering::Relaxed);
+                            keys.lock().expect("keys mutex").push(ContentHashKey {
+                                candidate_id: id,
+                                size,
+                                content_hash,
+                            });
+                            continue;
+                        }
+                    }
+                }
+
                 match hasher.full_hash(&target.path, size, cancel) {
                     Ok(content_hash) => {
                         files_hashed.fetch_add(1, Ordering::Relaxed);
+                        disk_reads.fetch_add(1, Ordering::Relaxed);
                         bytes_read.fetch_add(size.0, Ordering::Relaxed);
                         keys.lock().expect("keys mutex").push(ContentHashKey {
                             candidate_id: id,
                             size,
                             content_hash,
                         });
+                        if let Some(cache) = cache {
+                            let _ = cache_store_content(
+                                cache,
+                                &target.path,
+                                target.size,
+                                target.modified_at,
+                                content_hash,
+                            );
+                        }
                     }
                     Err(e) if e.code == trashradar_domain::error::ErrorCode::Cancelled => {
                         cancelled_flag.store(true, Ordering::Release);
@@ -195,7 +278,12 @@ fn run_full_hash_parallel(
         workers as u32,
         &groups,
     );
-    FullHashStageResult { groups, stats }
+    FullHashStageResult {
+        groups,
+        stats,
+        disk_reads: disk_reads.load(Ordering::Relaxed),
+        cache_hits: cache_hits.load(Ordering::Relaxed),
+    }
 }
 
 /// Поставити щабель 3 у [`WorkerPool`].
@@ -238,6 +326,7 @@ mod tests {
                 candidate_id: cid,
                 path: path.into(),
                 size: ByteSize(size),
+                modified_at: Some(trashradar_domain::candidate::FsTimestamp(1)),
             },
         )
     }
