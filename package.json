@@ -1,0 +1,13 @@
+{
+  "name": "trashradar",
+  "private": true,
+  "description": "Root convenience scripts. Packages live in ui/ and core/.",
+  "scripts": {
+    "setup": "npm --prefix ui install",
+    "dev": "node scripts/tauri.mjs dev",
+    "dev:ui": "npm --prefix ui run dev",
+    "build": "node scripts/tauri.mjs build",
+    "build:ui": "npm --prefix ui run build",
+    "typecheck": "npm --prefix ui run typecheck"
+  }
+}

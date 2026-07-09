@@ -9,7 +9,7 @@
 - Node 20.19.6, npm 10.8.2
 - Rust 1.96.1 stable-msvc (rustup) + rustfmt + clippy; MSVC Build Tools 2022; WebView2 — є
 - Tauri CLI 2.11.4 — через `ui` devDependencies (`npm run tauri`)
-- Запуск повного застосунку: з `core/`: `..\ui\node_modules\.bin\tauri.cmd dev --config shell/tauri.conf.json`
+- Запуск повного застосунку: з **кореня репо** `npm run setup` (раз) → `npm run dev` (root `package.json` → ui + `core/shell/tauri.conf.json`)
 
 ## Журнал задач
 

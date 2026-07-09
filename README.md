@@ -26,13 +26,24 @@ registry/   Декларативні дані детекторів
 
 Вимоги: Node 20+, Rust stable MSVC (rustup) + VS Build Tools (C++), WebView2 (Windows 10/11).
 
+З **кореня репозиторію**:
+
 ```
-cd ui && npm install
-npm run dev                              # лише UI у браузері (localhost:5173)
-npm run tauri dev -- --config ../core/shell/tauri.conf.json   # повний застосунок
+npm run setup    # один раз: залежності UI
+npm run dev      # повний застосунок (UI + Core / Tauri)
 ```
 
-Tauri CLI встановлюється разом з dev-залежностями UI (`@tauri-apps/cli`).
+`npm run dev` піднімає Tauri з `core/` (де лежить `shell/tauri.conf.json`) — не з `ui/`.
+
+Інші скрипти:
+
+```
+npm run dev:ui     # лише UI у браузері (localhost:5173)
+npm run build      # релізний інсталятор (NSIS)
+npm run build:ui   # лише фронт у ui/dist
+```
+
+Tauri CLI ставиться разом із dev-залежностями UI (`@tauri-apps/cli`).
 
 ## Статус
 
