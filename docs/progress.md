@@ -77,6 +77,8 @@
 
 | T-040 Детектор «Старі файли» | ✅ | 2026-07-09 | local | **`detectors/old_files`:** `OldFilesDetector` (id `old_files`); вік = accessed_at else modified_at ≥ `min_age_days` (дефолт **365**); пояснення «останній доступ/зміна N … тому»; `with_now_filetime` для тестів; live `min_age_days` (T-038). DoD: 9 unit + format age helpers. clippy `-D warnings`. |
 
+| T-041 Детектор «Забуті відео» | ✅ | 2026-07-09 | local | **`detectors/forgotten_videos`:** `ForgottenVideosDetector` — Video ∧ size≥`min_size_bytes` (дефолт 100 МіБ) ∧ age≥`min_age_days` (дефолт 180); explanation «відео N ГБ, останній доступ …» (`forgotten_video_explanation`); обидва пороги live. DoD: 7 unit. clippy `-D warnings`. |
+
 ## Легенда
 
 ✅ виконано й верифіковано · 🔄 в роботі · ⛔ заблоковано (причина в нотатках)

@@ -24,22 +24,25 @@ pub fn age_days_filetime(now: i64, ts: i64) -> u64 {
     }
 }
 
-/// Людський розмір для пояснення «Великі файли» тощо.
-///
-/// DoD T-039: «розмір N ГБ». Для файлів &lt; 1 ГіБ показуємо частку ГБ
-/// (напр. «розмір 0.098 ГБ» для 100 МіБ), щоб формат був єдиним.
-pub fn format_size_gb(bytes: u64) -> String {
+/// Розмір у ГБ без префікса: «4.2 ГБ», «0.098 ГБ».
+pub fn format_bytes_as_gb(bytes: u64) -> String {
     let gb = bytes as f64 / (1024.0 * 1024.0 * 1024.0);
     if gb >= 100.0 {
-        format!("розмір {:.0} ГБ", gb)
+        format!("{:.0} ГБ", gb)
     } else if gb >= 10.0 {
-        format!("розмір {:.1} ГБ", gb)
+        format!("{:.1} ГБ", gb)
     } else if gb >= 1.0 {
-        format!("розмір {:.2} ГБ", gb)
+        format!("{:.2} ГБ", gb)
     } else {
-        // < 1 ГБ (типовий поріг 100 МіБ) — три знаки після коми
-        format!("розмір {:.3} ГБ", gb)
+        format!("{:.3} ГБ", gb)
     }
+}
+
+/// Людський розмір для пояснення «Великі файли» тощо.
+///
+/// DoD T-039: «розмір N ГБ».
+pub fn format_size_gb(bytes: u64) -> String {
+    format!("розмір {}", format_bytes_as_gb(bytes))
 }
 
 /// Повний рядок пояснення T-039: «розмір N ГБ».
@@ -80,6 +83,18 @@ pub fn old_file_explanation(age_days: u64, from_access: bool) -> String {
     }
 }
 
+/// Пояснення T-041: розмір + давність доступу (architecture.md §6.2 приклад).
+/// «відео 4.2 ГБ, останній доступ 8 міс. тому»
+pub fn forgotten_video_explanation(bytes: u64, age_days: u64, from_access: bool) -> String {
+    let size = format_bytes_as_gb(bytes);
+    let age = format_age_uk(age_days);
+    if from_access {
+        format!("відео {size}, останній доступ {age} тому")
+    } else {
+        format!("відео {size}, остання зміна {age} тому")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -115,5 +130,14 @@ mod tests {
         let now = 1_000_000_000_000_000i64;
         assert_eq!(age_days_filetime(now, now), 0);
         assert_eq!(age_days_filetime(now, now - FILETIME_PER_DAY * 10), 10);
+    }
+
+    #[test]
+    fn forgotten_video_explanation_has_size_and_age() {
+        let s = forgotten_video_explanation(4 * 1024 * 1024 * 1024, 240, true);
+        assert!(s.contains("відео"), "{s}");
+        assert!(s.contains("ГБ"), "{s}");
+        assert!(s.contains("доступ"), "{s}");
+        assert!(s.contains("тому"), "{s}");
     }
 }

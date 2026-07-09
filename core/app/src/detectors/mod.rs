@@ -7,6 +7,7 @@
 //! Конкретні детектори MVP: T-039…T-053.
 
 mod contract;
+pub mod forgotten_videos;
 mod format;
 pub mod large_files;
 pub mod old_files;
@@ -15,6 +16,7 @@ mod registry;
 pub mod thresholds;
 
 pub use contract::{Detector, DetectorHit, DetectorId};
+pub use forgotten_videos::{ForgottenVideosDetector, DETECTOR_ID as FORGOTTEN_VIDEOS_ID};
 pub use large_files::{LargeFilesDetector, DETECTOR_ID as LARGE_FILES_ID};
 pub use old_files::{OldFilesDetector, DETECTOR_ID as OLD_FILES_ID};
 pub use orchestrator::{
