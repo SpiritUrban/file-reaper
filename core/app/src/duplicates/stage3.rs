@@ -1,11 +1,11 @@
 //! Щабель 3: повний потоковий BLAKE3 (T-060).
 //!
 //! Багатопотоковість — паралель **файлів** (диск/CPU); пам'ять на файл
-//! константна (буфер у адаптері Hasher). Ліміт на том — T-063.
+//! константна (буфер у адаптері Hasher). Ліміт **на том** — T-063.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 use trashradar_domain::candidate::CandidateId;
@@ -16,6 +16,7 @@ use trashradar_domain::duplicates::{
 
 use crate::duplicates::hash_cache::cache_store_content;
 use crate::duplicates::stage2::HashTarget;
+use crate::duplicates::volume_limit::{acquire_for_path, VolumeIoGate};
 use crate::ports::{hash_cache_lookup, HashCache, Hasher};
 use crate::workers::{CancellationToken, JobHandle, JobPriority, WorkerPool};
 
@@ -54,7 +55,7 @@ pub fn run_full_hash_stage(
     run_full_hash_stage_cached(partial_groups, targets, hasher, cancel, file_workers, None)
 }
 
-/// Щабель 3 з опційним кешем full hash (T-062).
+/// Щабель 3 з опційним кешем full hash (T-062); volume gate — дефолтний (T-063).
 pub fn run_full_hash_stage_cached(
     partial_groups: &[PartialHashGroup],
     targets: &HashMap<CandidateId, HashTarget>,
@@ -63,7 +64,29 @@ pub fn run_full_hash_stage_cached(
     file_workers: usize,
     cache: Option<&dyn HashCache>,
 ) -> FullHashStageResult {
+    run_full_hash_stage_gated(
+        partial_groups,
+        targets,
+        hasher,
+        cancel,
+        file_workers,
+        cache,
+        None,
+    )
+}
+
+/// Щабель 3 з кешем і/або кастомним [`VolumeIoGate`] (T-062 / T-063).
+pub fn run_full_hash_stage_gated(
+    partial_groups: &[PartialHashGroup],
+    targets: &HashMap<CandidateId, HashTarget>,
+    hasher: &dyn Hasher,
+    cancel: &CancellationToken,
+    file_workers: usize,
+    cache: Option<&dyn HashCache>,
+    volume_gate: Option<Arc<VolumeIoGate>>,
+) -> FullHashStageResult {
     let workers = file_workers.max(1);
+    let gate = volume_gate.unwrap_or_else(VolumeIoGate::with_default_limit);
 
     let mut jobs: Vec<(CandidateId, trashradar_domain::candidate::ByteSize)> = Vec::new();
     for g in partial_groups {
@@ -89,10 +112,18 @@ pub fn run_full_hash_stage_cached(
     }
 
     if workers == 1 || jobs.len() == 1 {
-        return run_full_hash_sequential(&jobs, targets, hasher, cancel, workers as u32, cache);
+        return run_full_hash_sequential(
+            &jobs,
+            targets,
+            hasher,
+            cancel,
+            workers as u32,
+            cache,
+            &gate,
+        );
     }
 
-    run_full_hash_parallel(&jobs, targets, hasher, cancel, workers, cache)
+    run_full_hash_parallel(&jobs, targets, hasher, cancel, workers, cache, &gate)
 }
 
 fn run_full_hash_sequential(
@@ -102,6 +133,7 @@ fn run_full_hash_sequential(
     cancel: &CancellationToken,
     file_workers: u32,
     cache: Option<&dyn HashCache>,
+    gate: &Arc<VolumeIoGate>,
 ) -> FullHashStageResult {
     let mut keys = Vec::new();
     let mut files_hashed = 0u64;
@@ -138,7 +170,21 @@ fn run_full_hash_sequential(
             }
         }
 
-        match hasher.full_hash(&target.path, size, cancel) {
+        let permit = match acquire_for_path(gate, &target.path, cancel) {
+            Ok(p) => p,
+            Err(e) if e.code == trashradar_domain::error::ErrorCode::Cancelled => {
+                cancelled = true;
+                break;
+            }
+            Err(_) => {
+                files_failed += 1;
+                continue;
+            }
+        };
+        let result = hasher.full_hash(&target.path, size, cancel);
+        drop(permit);
+
+        match result {
             Ok(content_hash) => {
                 files_hashed += 1;
                 disk_reads += 1;
@@ -192,6 +238,7 @@ fn run_full_hash_parallel(
     cancel: &CancellationToken,
     workers: usize,
     cache: Option<&dyn HashCache>,
+    gate: &Arc<VolumeIoGate>,
 ) -> FullHashStageResult {
     let next = AtomicUsize::new(0);
     let files_hashed = AtomicU64::new(0);
@@ -236,7 +283,21 @@ fn run_full_hash_parallel(
                     }
                 }
 
-                match hasher.full_hash(&target.path, size, cancel) {
+                let permit = match acquire_for_path(gate, &target.path, cancel) {
+                    Ok(p) => p,
+                    Err(e) if e.code == trashradar_domain::error::ErrorCode::Cancelled => {
+                        cancelled_flag.store(true, Ordering::Release);
+                        break;
+                    }
+                    Err(_) => {
+                        files_failed.fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    }
+                };
+                let result = hasher.full_hash(&target.path, size, cancel);
+                drop(permit);
+
+                match result {
                     Ok(content_hash) => {
                         files_hashed.fetch_add(1, Ordering::Relaxed);
                         disk_reads.fetch_add(1, Ordering::Relaxed);
@@ -459,5 +520,80 @@ mod tests {
         let r = slot.lock().unwrap().take().expect("result");
         assert_eq!(r.groups.len(), 1);
         drop(pool);
+    }
+
+    /// DoD T-063: один том ≤ ceiling; два томи — обидва peak=1 при limit=1.
+    #[test]
+    fn volume_gate_limits_same_volume_allows_cross_volume() {
+        use crate::duplicates::volume_limit::VolumeIoGate;
+        use std::thread;
+        use std::time::Duration;
+
+        struct SlowHasher;
+
+        impl Hasher for SlowHasher {
+            fn partial_hash(
+                &self,
+                _path: &str,
+                _size: trashradar_domain::candidate::ByteSize,
+            ) -> Result<PartialHash, trashradar_domain::error::CoreError> {
+                unreachable!()
+            }
+            fn full_hash(
+                &self,
+                path: &str,
+                _size: trashradar_domain::candidate::ByteSize,
+                _cancel: &CancellationToken,
+            ) -> Result<ContentHash, trashradar_domain::error::CoreError> {
+                thread::sleep(Duration::from_millis(35));
+                let mut h = [0u8; 32];
+                h[0] = path.as_bytes().iter().fold(0u8, |a, b| a.wrapping_add(*b));
+                Ok(ContentHash(h))
+            }
+        }
+
+        // 4 files on C:, limit 2, workers 4 → gate peak C ≤ 2
+        let gate = VolumeIoGate::new(2);
+        let groups = [partial_group(10, &[1, 2, 3, 4])];
+        let targets: HashMap<_, _> = [
+            target(1, r"C:\a", 10),
+            target(2, r"C:\b", 10),
+            target(3, r"C:\c", 10),
+            target(4, r"C:\d", 10),
+        ]
+        .into_iter()
+        .collect();
+        let _ = run_full_hash_stage_gated(
+            &groups,
+            &targets,
+            &SlowHasher,
+            &CancellationToken::new(),
+            4,
+            None,
+            Some(Arc::clone(&gate)),
+        );
+        assert!(
+            gate.peak_for('C') <= 2,
+            "same volume peak {} must be ≤ 2",
+            gate.peak_for('C')
+        );
+
+        // C: + D: with limit 1 → both can peak at 1 (parallel across volumes).
+        let gate2 = VolumeIoGate::new(1);
+        let groups2 = [partial_group(10, &[10, 11])];
+        let targets2: HashMap<_, _> = [target(10, r"C:\x", 10), target(11, r"D:\y", 10)]
+            .into_iter()
+            .collect();
+        let _ = run_full_hash_stage_gated(
+            &groups2,
+            &targets2,
+            &SlowHasher,
+            &CancellationToken::new(),
+            2,
+            None,
+            Some(Arc::clone(&gate2)),
+        );
+        assert_eq!(gate2.peak_for('C'), 1);
+        assert_eq!(gate2.peak_for('D'), 1);
     }
 }

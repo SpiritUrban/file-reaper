@@ -11,7 +11,10 @@ use trashradar_domain::duplicates::{
 };
 use trashradar_domain::error::CoreError;
 
+use std::sync::Arc;
+
 use crate::duplicates::hash_cache::cache_store_partial;
+use crate::duplicates::volume_limit::{acquire_for_path, VolumeIoGate};
 use crate::ports::{hash_cache_lookup, HashCache, Hasher};
 use crate::workers::{CancellationToken, JobHandle, JobPriority, WorkerPool};
 
@@ -46,10 +49,10 @@ pub fn run_partial_hash_stage(
     run_partial_hash_stage_cached(size_groups, targets, hasher, cancel, None)
 }
 
-/// Прогін щабля 2 з опційним [`HashCache`] (T-062).
+/// Прогін щабля 2 з опційним [`HashCache`] (T-062); volume gate — дефолтний (T-063).
 ///
 /// - cache hit (size+mtime) → без `hasher.partial_hash`;
-/// - miss → диск + `cache_store_partial`.
+/// - miss → диск під [`VolumeIoGate`] + `cache_store_partial`.
 pub fn run_partial_hash_stage_cached(
     size_groups: &[ExactSizeGroup],
     targets: &HashMap<CandidateId, HashTarget>,
@@ -57,6 +60,19 @@ pub fn run_partial_hash_stage_cached(
     cancel: &CancellationToken,
     cache: Option<&dyn HashCache>,
 ) -> PartialHashStageResult {
+    run_partial_hash_stage_gated(size_groups, targets, hasher, cancel, cache, None)
+}
+
+/// Щабель 2 з кешем і/або кастомним volume gate.
+pub fn run_partial_hash_stage_gated(
+    size_groups: &[ExactSizeGroup],
+    targets: &HashMap<CandidateId, HashTarget>,
+    hasher: &dyn Hasher,
+    cancel: &CancellationToken,
+    cache: Option<&dyn HashCache>,
+    volume_gate: Option<Arc<VolumeIoGate>>,
+) -> PartialHashStageResult {
+    let gate = volume_gate.unwrap_or_else(VolumeIoGate::with_default_limit);
     let mut keys: Vec<PartialHashKey> = Vec::new();
     let mut files_hashed = 0u64;
     let mut files_failed = 0u64;
@@ -94,7 +110,21 @@ pub fn run_partial_hash_stage_cached(
                 }
             }
 
-            match hasher.partial_hash(&target.path, target.size) {
+            let permit = match acquire_for_path(&gate, &target.path, cancel) {
+                Ok(p) => p,
+                Err(e) if e.code == trashradar_domain::error::ErrorCode::Cancelled => {
+                    cancelled = true;
+                    break 'outer;
+                }
+                Err(_) => {
+                    files_failed += 1;
+                    continue;
+                }
+            };
+            let result = hasher.partial_hash(&target.path, target.size);
+            drop(permit);
+
+            match result {
                 Ok(partial_hash) => {
                     files_hashed += 1;
                     disk_reads += 1;
