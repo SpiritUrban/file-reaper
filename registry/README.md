@@ -75,6 +75,17 @@ API: `KnownLocationsRegistry::load_default()` / `load_from_file` / `from_json_st
 - `cargo test -p trashradar-app location_registry`
 - завантажує workspace `registry/known-locations.json`, якщо файл існує
 
+### Temp-локації (T-045)
+
+| id | Шляхи | Примітка |
+|---|---|---|
+| `windows.temp.user` | `%TEMP%`, `%TMP%`, `%LOCALAPPDATA%\Temp` | User profile temp (зазвичай збігаються) |
+| `windows.temp.system` | `%WINDIR%\Temp`, `%SystemRoot%\Temp` | `C:\Windows\Temp` |
+| `windows.temp.programdata` | `%PROGRAMDATA%\Temp` | може бути відсутній — ok |
+| `windows.temp.internet` | INetCache / Temporary Internet Files | legacy IE + сучасний INetCache |
+
+Усі `kind: temp_files`, `safety: safe_to_bulk`. DoD: user + system temp існують на чистій Win10/11.
+
 ---
 
 ## `dev-artifacts.json`

@@ -85,6 +85,8 @@
 
 | T-044 Формат реєстру відомих локацій | ✅ | 2026-07-09 | local | **Схема v1** `registry/known-locations.json` + README. **App `location_registry`:** parse/validate (`LocationEntry`, `kind`, `safety`, `paths` з `%VAR%`), runtime `load_from_file`/`load_default` (TRASHRADAR_REGISTRY_DIR), `expand_path_template`, `path_matches_prefix`. DoD: новий JSON-запис без змін Rust; 10 unit. clippy `-D warnings`. |
 
+| T-045 Temp-локації в реєстрі | ✅ | 2026-07-09 | local | **known-locations.json:** `windows.temp.user` (%TEMP%/%TMP%/Local\\Temp), `windows.temp.system` (WINDIR\\Temp), `windows.temp.programdata`, `windows.temp.internet` (INetCache); усі temp_files + safe_to_bulk. **API:** `expanded_roots`/`existing_roots`, `temp_locations`. DoD: user+system temp існують на Windows (2 unit). 12 location_registry tests. |
+
 ## Легенда
 
 ✅ виконано й верифіковано · 🔄 в роботі · ⛔ заблоковано (причина в нотатках)

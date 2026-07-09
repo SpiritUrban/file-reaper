@@ -1,5 +1,54 @@
 {
-  "$comment": "Декларативний реєстр відомих локацій (T-044). Схема v1 — docs у registry/README.md. Наповнення Temp: T-045; кеші ЦА: T-046. Завантаження з диска в рантаймі — без перекомпіляції ядра.",
+  "$comment": "Декларативний реєстр відомих локацій (T-044 schema v1). Temp: T-045; кеші ЦА: T-046. Runtime load — без перекомпіляції ядра.",
   "schema_version": 1,
-  "locations": []
+  "locations": [
+    {
+      "id": "windows.temp.user",
+      "kind": "temp_files",
+      "safety": "safe_to_bulk",
+      "paths": [
+        "%TEMP%",
+        "%TMP%",
+        "%LOCALAPPDATA%\\Temp"
+      ],
+      "match_mode": "prefix",
+      "explanation": "тимчасові файли користувача",
+      "label": "User Temp"
+    },
+    {
+      "id": "windows.temp.system",
+      "kind": "temp_files",
+      "safety": "safe_to_bulk",
+      "paths": [
+        "%WINDIR%\\Temp",
+        "%SystemRoot%\\Temp"
+      ],
+      "match_mode": "prefix",
+      "explanation": "системні тимчасові файли Windows",
+      "label": "Windows Temp"
+    },
+    {
+      "id": "windows.temp.programdata",
+      "kind": "temp_files",
+      "safety": "safe_to_bulk",
+      "paths": [
+        "%PROGRAMDATA%\\Temp"
+      ],
+      "match_mode": "prefix",
+      "explanation": "спільні тимчасові файли ProgramData",
+      "label": "ProgramData Temp"
+    },
+    {
+      "id": "windows.temp.internet",
+      "kind": "temp_files",
+      "safety": "safe_to_bulk",
+      "paths": [
+        "%LOCALAPPDATA%\\Microsoft\\Windows\\INetCache",
+        "%LOCALAPPDATA%\\Microsoft\\Windows\\Temporary Internet Files"
+      ],
+      "match_mode": "prefix",
+      "explanation": "тимчасові інтернет-файли Windows",
+      "label": "INetCache"
+    }
+  ]
 }

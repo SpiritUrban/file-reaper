@@ -155,6 +155,37 @@ impl KnownLocationsRegistry {
     pub fn by_kind(&self, kind: LocationKind) -> impl Iterator<Item = &LocationEntry> {
         self.locations.iter().filter(move |e| e.kind == kind)
     }
+
+    /// Усі `temp_files` з реєстру.
+    pub fn temp_locations(&self) -> impl Iterator<Item = &LocationEntry> {
+        self.by_kind(LocationKind::TempFiles)
+    }
+}
+
+impl LocationEntry {
+    /// Розгорнути `paths` у абсолютні корені (невідомі `%VAR%` пропускаються).
+    pub fn expanded_roots(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut seen = HashSet::new();
+        for template in &self.paths {
+            if let Some(p) = expand_path_template(template) {
+                let key = normalize_path_for_match(&p);
+                if seen.insert(key) {
+                    out.push(p);
+                }
+            }
+        }
+        out
+    }
+
+    /// Розгорнуті корені, які **існують** як каталоги на цій машині.
+    pub fn existing_roots(&self) -> Vec<PathBuf> {
+        self.expanded_roots()
+            .into_iter()
+            .map(PathBuf::from)
+            .filter(|p| p.is_dir())
+            .collect()
+    }
 }
 
 fn validate_document(doc: &KnownLocationsDocument) -> Result<(), CoreError> {
@@ -451,21 +482,100 @@ mod tests {
         assert!(expand_path_template("%TRASHRADAR_NO_SUCH_VAR_XYZ%\\x").is_none());
     }
 
-    #[test]
-    fn loads_workspace_registry_file_if_present() {
-        // Від core/app → ../../registry/known-locations.json
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    fn workspace_registry_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..")
             .join("registry")
-            .join(KNOWN_LOCATIONS_FILE);
+            .join(KNOWN_LOCATIONS_FILE)
+    }
+
+    #[test]
+    fn loads_workspace_registry_file_if_present() {
+        let path = workspace_registry_path();
         if !path.is_file() {
-            // CI / alternate layout — skip soft
             return;
         }
         let reg = KnownLocationsRegistry::load_from_file(&path).expect("workspace registry");
         assert_eq!(reg.schema_version, KNOWN_LOCATIONS_SCHEMA_VERSION);
-        // Файл може бути порожнім (locations: []) до T-045 — це валідно.
         assert!(reg.locations.iter().all(|e| !e.id.is_empty()));
+    }
+
+    /// DoD T-045: стандартні Temp-локації є в реєстрі й резолвляться на Windows.
+    #[test]
+    fn t045_temp_entries_present_in_registry() {
+        let path = workspace_registry_path();
+        if !path.is_file() {
+            return;
+        }
+        let reg = KnownLocationsRegistry::load_from_file(&path).expect("load");
+        let temps: Vec<_> = reg.temp_locations().collect();
+        assert!(
+            !temps.is_empty(),
+            "T-045: очікували ≥1 temp_files у known-locations.json"
+        );
+
+        let ids: HashSet<_> = temps.iter().map(|e| e.id.as_str()).collect();
+        assert!(
+            ids.contains("windows.temp.user"),
+            "обов'язковий windows.temp.user: {ids:?}"
+        );
+        assert!(
+            ids.contains("windows.temp.system"),
+            "обов'язковий windows.temp.system: {ids:?}"
+        );
+
+        for e in &temps {
+            assert_eq!(e.kind, LocationKind::TempFiles);
+            assert_eq!(
+                e.safety,
+                SafetyLevel::SafeToBulk,
+                "{} має бути safe_to_bulk",
+                e.id
+            );
+            assert!(!e.paths.is_empty());
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn t045_standard_temp_dirs_exist_on_clean_windows() {
+        // DoD: «Стандартні Temp-локації знаходяться на чистій інсталяції Windows».
+        let path = workspace_registry_path();
+        if !path.is_file() {
+            return;
+        }
+        let reg = KnownLocationsRegistry::load_from_file(&path).expect("load");
+
+        let user = reg.get("windows.temp.user").expect("user temp entry");
+        let user_roots = user.existing_roots();
+        assert!(
+            !user_roots.is_empty(),
+            "User Temp (%TEMP% / Local\\Temp) має існувати; expanded={:?}",
+            user.expanded_roots()
+        );
+
+        let system = reg.get("windows.temp.system").expect("system temp entry");
+        let system_roots = system.existing_roots();
+        assert!(
+            !system_roots.is_empty(),
+            "Windows\\Temp має існувати; expanded={:?}",
+            system.expanded_roots()
+        );
+
+        // Хоча б один шлях з user збігається з env TEMP (типова чиста інсталяція).
+        if let Ok(temp) = std::env::var("TEMP") {
+            let temp_n = normalize_path_for_match(&temp);
+            let hit = user_roots.iter().any(|r| {
+                let rn = normalize_path_for_match(&r.to_string_lossy());
+                rn == temp_n
+                    || temp_n.starts_with(&(rn.clone() + "\\"))
+                    || rn.starts_with(&(temp_n.clone() + "\\"))
+            });
+            assert!(
+                hit,
+                "%TEMP%={temp} має покриватись windows.temp.user roots={user_roots:?}"
+            );
+        }
     }
 }
