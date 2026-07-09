@@ -1,0 +1,23 @@
+[package]
+name = "trashradar-bench-scan"
+description = "Бенчмарк-гейт скану: час «до наповнення індексу» на еталоні ~1.5 млн файлів (T-035, architecture.md §15)."
+version = "0.1.0"
+edition = "2021"
+license = "UNLICENSED"
+publish = false
+
+[[bin]]
+name = "scan-bench"
+path = "src/main.rs"
+
+[dependencies]
+trashradar-domain = { path = "../../core/domain" }
+trashradar-app = { path = "../../core/app" }
+trashradar-index-memory = { path = "../../core/infra/index-memory" }
+trashradar-scan-mft = { path = "../../core/infra/scan-mft" }
+trashradar-platform-win = { path = "../../core/infra/platform-win" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = 3

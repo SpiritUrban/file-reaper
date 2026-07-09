@@ -65,6 +65,8 @@
 
 | T-034 Elevation: запит адмін-прав з поясненням, шлях відмови | ✅ | 2026-07-09 | local | **App `elevation`:** `ElevationSession` / `ElevationPromptKind` / `evaluate_elevation_prompt` — сесійна політика (offer → decline → no re-prompt); пояснення вигоди MFT українською. **platform-win:** `relaunch_elevated` через ShellExecuteExW `runas` (UAC cancel → `cancelled`). **Shell IPC:** `app.request_elevation` (relaunch + exit), `app.decline_elevation` (AtomicBool сесії), `app.health.elevation` {status, offerPending, message, ntfsVolumeCount}. **UI Health:** банер + кнопки «UAC» / «Продовжити без прав». **DoD:** з правами → MFT (T-028); після decline → walk + offer_pending=false у сесії. Перевірено: `cargo test -p trashradar-app elevation` (7); platform-win (6); shell elevation+повний (20); clippy `-D warnings`; `npm run build`. |
 
+| T-035 Бенчмарк скану: 1 ТБ / 1.5 млн файлів | ✅ | 2026-07-09 | local | Standalone `benches/scan-bench` (як T-019): **synthetic CI** — PathResolver+Batcher→InMemoryIndex на **1 500 000** файлів; baseline fill ~3.3 с (~461k f/s), memory ~90.7 МБ; жорстка стеля **10 с (§15)** + memory hard-gate >15%; timings WARN+floor. **Live** `--volume X` (elevated): warmup+warm `scan_volume_to_index`, проєкція на 1.5 млн, fail якщо >10 с. CI job `bench` розширено (index-bench + scan-bench). Верифіковано: `--bless` + check exit 0; clippy `-D warnings`; fmt. |
+
 ## Легенда
 
 ✅ виконано й верифіковано · 🔄 в роботі · ⛔ заблоковано (причина в нотатках)
@@ -84,3 +86,9 @@
   this repository public»). Готовий конфіг: contexts = UI (typecheck + build),
   Core (fmt + clippy + check), Core shell (tauri check); strict=false;
   enforce_admins=false. Застосувати одразу після переходу на public/Pro.
+- T-035: CI-гейт `scan-bench` за замовчуванням міряє **синтетичний** конвеєр
+  PathResolver+Batcher→index (1.5 млн) — без I/O MFT (shared-runner без
+  elevation/репрезентативного тому). Жорстка стеля §15 10 с + memory hard-gate.
+  Повний «теплий диск» — live `--volume X` (elevated, локально); проєкція на
+  1.5 млн валить процес якщо >10 с. Узгоджено з політикою T-019 (CI = детерміноване
+  + стеля; живий том — на машині розробника).
