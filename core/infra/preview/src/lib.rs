@@ -10,14 +10,19 @@
 //!
 //! T-070: власна генерація мініатюр зображень — декодування з даунскейлом
 //! через Windows Imaging Component ([`ImageThumbnailSource`], модуль `image`).
+//!
+//! T-071: ключовий кадр і тривалість відео — ffmpeg sidecar-процесом
+//! ([`FfmpegVideoFrameSource`], модуль `video`; мультиплатформно).
 
 #[cfg(windows)]
 mod com;
 mod image;
 #[cfg(all(test, windows))]
 pub(crate) mod test_media;
+mod video;
 
 pub use image::ImageThumbnailSource;
+pub use video::{FfmpegVideoFrameSource, FFMPEG_ENV_VAR};
 
 use trashradar_app::ports::{RawThumbnail, ThumbnailSource};
 use trashradar_domain::error::CoreError;

@@ -53,7 +53,8 @@ impl ThumbnailSource for ImageThumbnailSource {
 
 /// Вписати розмір у квадрат `max_edge` зі збереженням пропорцій.
 /// Лише даунскейл: менше зображення не розтягується. Мінімум 1 піксель.
-fn fit_within(width: u32, height: u32, max_edge: u32) -> (u32, u32) {
+/// Спільний і для зображень (T-070), і для кадрів відео (T-071).
+pub(crate) fn fit_within(width: u32, height: u32, max_edge: u32) -> (u32, u32) {
     if width <= max_edge && height <= max_edge {
         return (width, height);
     }

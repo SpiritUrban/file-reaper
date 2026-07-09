@@ -229,6 +229,35 @@ pub trait ThumbnailSource: Send + Sync {
     fn thumbnail(&self, path: &str, max_edge: u32) -> Result<Option<RawThumbnail>, CoreError>;
 }
 
+/// Метадані відеофайла, визначені декодером (T-071).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VideoMetadata {
+    /// Тривалість відео в мілісекундах.
+    pub duration_ms: u64,
+    /// Ширина кадру джерела в пікселях.
+    pub width: u32,
+    /// Висота кадру джерела в пікселях.
+    pub height: u32,
+}
+
+/// Джерело кадрів відео — ланка ланцюжка превью для відеофайлів
+/// (architecture.md §5.2: «відео — витяг ключових кадрів»).
+///
+/// Реалізація: `preview` (T-071, ffmpeg-функціональність). Порт
+/// платформонезалежний; скраб-смуга 10–20 кадрів — розширення T-072.
+///
+/// Контракт `Ok(None)` — як у [`ThumbnailSource`]: файл не розпізнано
+/// як відео або декодер недоступний → викликач рендерить типізовану
+/// плитку без превью. `Err` — некоректні аргументи чи реальний збій.
+pub trait VideoFrameSource: Send + Sync {
+    /// Метадані відео: тривалість (DoD T-071) і розмір кадру джерела.
+    fn probe(&self, path: &str) -> Result<Option<VideoMetadata>, CoreError>;
+
+    /// Ключовий кадр для мініатюри плитки, вписаний у квадрат `max_edge`
+    /// зі збереженням пропорцій (лише даунскейл).
+    fn key_frame(&self, path: &str, max_edge: u32) -> Result<Option<RawThumbnail>, CoreError>;
+}
+
 /// Єдиний шлюз деструктивних операцій з FS (move/restore/purge).
 /// Реалізація: `quarantine-fs` (T-077, T-079…T-084). Інваріант D4:
 /// жоден інший порт не має права змінювати файлову систему.
