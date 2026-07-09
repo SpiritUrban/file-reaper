@@ -87,6 +87,8 @@
 
 | T-045 Temp-локації в реєстрі | ✅ | 2026-07-09 | local | **known-locations.json:** `windows.temp.user` (%TEMP%/%TMP%/Local\\Temp), `windows.temp.system` (WINDIR\\Temp), `windows.temp.programdata`, `windows.temp.internet` (INetCache); усі temp_files + safe_to_bulk. **API:** `expanded_roots`/`existing_roots`, `temp_locations`. DoD: user+system temp існують на Windows (2 unit). 12 location_registry tests. |
 
+| T-046 Кеші топ-програм ЦА | ✅ | 2026-07-09 | local | **25 app_caches** у known-locations: Chrome/Edge/Firefox/Brave/Opera, VS Code/Cursor/JetBrains/VS, npm/yarn/pnpm/pip/cargo/NuGet, Discord/Telegram/Slack/Teams, Adobe Media/AE, Resolve, Blender, Steam, Spotify. `app_cache_locations()`. Live probe: 13 present / 12 absent на dev-машині. DoD catalog ≥20 + probe. |
+
 ## Легенда
 
 ✅ виконано й верифіковано · 🔄 в роботі · ⛔ заблоковано (причина в нотатках)

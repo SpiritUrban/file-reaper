@@ -86,6 +86,23 @@ API: `KnownLocationsRegistry::load_default()` / `load_from_file` / `from_json_st
 
 Усі `kind: temp_files`, `safety: safe_to_bulk`. DoD: user + system temp існують на чистій Win10/11.
 
+### Кеші програм ЦА (T-046)
+
+≥20 записів `kind: app_caches` — браузери, IDE, пакетні менеджери, месенджери,
+рендер-кеші, ігри/медіа:
+
+| Сегмент | Приклади id |
+|---|---|
+| Браузери | `browser.chrome.cache`, `browser.edge.cache`, `browser.firefox.cache`, Brave, Opera |
+| IDE | `ide.vscode.cache`, `ide.cursor.cache`, JetBrains, VS |
+| Пакетні менеджери | npm, yarn, pnpm, pip, cargo, NuGet HTTP |
+| Месенджери | Discord, Telegram (review), Slack, Teams |
+| Рендер | Adobe Media Cache, AE temp, DaVinci Resolve, Blender |
+| Ігри/медіа | Steam htmlcache, Spotify |
+
+**Верифікація:** `cargo test -p trashradar-app t046` — каталог ≥20 + live probe
+існуючих каталогів на машині (встановлене ПЗ). Відсутня інсталяція ≠ помилка схеми.
+
 ---
 
 ## `dev-artifacts.json`

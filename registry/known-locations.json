@@ -1,16 +1,12 @@
 {
-  "$comment": "Декларативний реєстр відомих локацій (T-044 schema v1). Temp: T-045; кеші ЦА: T-046. Runtime load — без перекомпіляції ядра.",
+  "$comment": "T-044 schema v1. Temp T-045; app caches T-046 (топ програм ЦА). Runtime load — без перекомпіляції.",
   "schema_version": 1,
   "locations": [
     {
       "id": "windows.temp.user",
       "kind": "temp_files",
       "safety": "safe_to_bulk",
-      "paths": [
-        "%TEMP%",
-        "%TMP%",
-        "%LOCALAPPDATA%\\Temp"
-      ],
+      "paths": ["%TEMP%", "%TMP%", "%LOCALAPPDATA%\\Temp"],
       "match_mode": "prefix",
       "explanation": "тимчасові файли користувача",
       "label": "User Temp"
@@ -19,10 +15,7 @@
       "id": "windows.temp.system",
       "kind": "temp_files",
       "safety": "safe_to_bulk",
-      "paths": [
-        "%WINDIR%\\Temp",
-        "%SystemRoot%\\Temp"
-      ],
+      "paths": ["%WINDIR%\\Temp", "%SystemRoot%\\Temp"],
       "match_mode": "prefix",
       "explanation": "системні тимчасові файли Windows",
       "label": "Windows Temp"
@@ -31,9 +24,7 @@
       "id": "windows.temp.programdata",
       "kind": "temp_files",
       "safety": "safe_to_bulk",
-      "paths": [
-        "%PROGRAMDATA%\\Temp"
-      ],
+      "paths": ["%PROGRAMDATA%\\Temp"],
       "match_mode": "prefix",
       "explanation": "спільні тимчасові файли ProgramData",
       "label": "ProgramData Temp"
@@ -49,6 +40,327 @@
       "match_mode": "prefix",
       "explanation": "тимчасові інтернет-файли Windows",
       "label": "INetCache"
+    },
+
+    {
+      "id": "browser.chrome.cache",
+      "kind": "app_caches",
+      "safety": "safe_to_bulk",
+      "paths": [
+        "%LOCALAPPDATA%\\Google\\Chrome\\User Data\\Default\\Cache",
+        "%LOCALAPPDATA%\\Google\\Chrome\\User Data\\Default\\Code Cache",
+        "%LOCALAPPDATA%\\Google\\Chrome\\User Data\\Default\\GPUCache",
+        "%LOCALAPPDATA%\\Google\\Chrome\\User Data\\ShaderCache",
+        "%LOCALAPPDATA%\\Google\\Chrome\\User Data\\GrShaderCache"
+      ],
+      "match_mode": "prefix",
+      "explanation": "кеш Google Chrome (перестворюється)",
+      "label": "Chrome Cache"
+    },
+    {
+      "id": "browser.edge.cache",
+      "kind": "app_caches",
+      "safety": "safe_to_bulk",
+      "paths": [
+        "%LOCALAPPDATA%\\Microsoft\\Edge\\User Data\\Default\\Cache",
+        "%LOCALAPPDATA%\\Microsoft\\Edge\\User Data\\Default\\Code Cache",
+        "%LOCALAPPDATA%\\Microsoft\\Edge\\User Data\\Default\\GPUCache",
+        "%LOCALAPPDATA%\\Microsoft\\Edge\\User Data\\ShaderCache",
+        "%LOCALAPPDATA%\\Microsoft\\Edge\\User Data\\GrShaderCache"
+      ],
+      "match_mode": "prefix",
+      "explanation": "кеш Microsoft Edge (перестворюється)",
+      "label": "Edge Cache"
+    },
+    {
+      "id": "browser.firefox.cache",
+      "kind": "app_caches",
+      "safety": "review_recommended",
+      "paths": [
+        "%LOCALAPPDATA%\\Mozilla\\Firefox\\Profiles"
+      ],
+      "match_mode": "prefix",
+      "explanation": "профілі Firefox (кеш cache2 поруч із даними профілю — переглянути)",
+      "label": "Firefox Profiles"
+    },
+    {
+      "id": "browser.brave.cache",
+      "kind": "app_caches",
+      "safety": "safe_to_bulk",
+      "paths": [
+        "%LOCALAPPDATA%\\BraveSoftware\\Brave-Browser\\User Data\\Default\\Cache",
+        "%LOCALAPPDATA%\\BraveSoftware\\Brave-Browser\\User Data\\Default\\Code Cache",
+        "%LOCALAPPDATA%\\BraveSoftware\\Brave-Browser\\User Data\\Default\\GPUCache"
+      ],
+      "match_mode": "prefix",
+      "explanation": "кеш Brave Browser",
+      "label": "Brave Cache"
+    },
+    {
+      "id": "browser.opera.cache",
+      "kind": "app_caches",
+      "safety": "safe_to_bulk",
+      "paths": [
+        "%APPDATA%\\Opera Software\\Opera Stable\\Cache",
+        "%LOCALAPPDATA%\\Opera Software\\Opera Stable\\Cache"
+      ],
+      "match_mode": "prefix",
+      "explanation": "кеш Opera",
+      "label": "Opera Cache"
+    },
+
+    {
+      "id": "ide.vscode.cache",
+      "kind": "app_caches",
+      "safety": "safe_to_bulk",
+      "paths": [
+        "%APPDATA%\\Code\\Cache",
+        "%APPDATA%\\Code\\CachedData",
+        "%APPDATA%\\Code\\CachedExtensionVSIXs",
+        "%APPDATA%\\Code\\Code Cache",
+        "%APPDATA%\\Code\\GPUCache"
+      ],
+      "match_mode": "prefix",
+      "explanation": "кеш Visual Studio Code",
+      "label": "VS Code Cache"
+    },
+    {
+      "id": "ide.cursor.cache",
+      "kind": "app_caches",
+      "safety": "safe_to_bulk",
+      "paths": [
+        "%APPDATA%\\Cursor\\Cache",
+        "%APPDATA%\\Cursor\\CachedData",
+        "%APPDATA%\\Cursor\\Code Cache",
+        "%APPDATA%\\Cursor\\GPUCache"
+      ],
+      "match_mode": "prefix",
+      "explanation": "кеш Cursor IDE",
+      "label": "Cursor Cache"
+    },
+    {
+      "id": "ide.jetbrains.caches",
+      "kind": "app_caches",
+      "safety": "safe_to_bulk",
+      "paths": [
+        "%LOCALAPPDATA%\\JetBrains"
+      ],
+      "match_mode": "prefix",
+      "explanation": "локальні дані JetBrains (caches/index у product-теках; Toolbox теж тут)",
+      "label": "JetBrains"
+    },
+    {
+      "id": "ide.visualstudio.component_cache",
+      "kind": "app_caches",
+      "safety": "safe_to_bulk",
+      "paths": [
+        "%PROGRAMDATA%\\Microsoft\\VisualStudio\\Packages",
+        "%LOCALAPPDATA%\\Microsoft\\VisualStudio\\Roslyn\\Cache"
+      ],
+      "match_mode": "prefix",
+      "explanation": "кеш компонентів / Roslyn Visual Studio",
+      "label": "VS Component Cache"
+    },
+
+    {
+      "id": "pkg.npm.cache",
+      "kind": "app_caches",
+      "safety": "safe_to_bulk",
+      "paths": [
+        "%LOCALAPPDATA%\\npm-cache",
+        "%APPDATA%\\npm-cache"
+      ],
+      "match_mode": "prefix",
+      "explanation": "кеш npm (перестворюється npm install)",
+      "label": "npm cache"
+    },
+    {
+      "id": "pkg.yarn.cache",
+      "kind": "app_caches",
+      "safety": "safe_to_bulk",
+      "paths": [
+        "%LOCALAPPDATA%\\Yarn\\Cache",
+        "%LOCALAPPDATA%\\Yarn\\Berry\\cache"
+      ],
+      "match_mode": "prefix",
+      "explanation": "кеш Yarn",
+      "label": "Yarn Cache"
+    },
+    {
+      "id": "pkg.pnpm.store",
+      "kind": "app_caches",
+      "safety": "safe_to_bulk",
+      "paths": [
+        "%LOCALAPPDATA%\\pnpm\\store",
+        "%LOCALAPPDATA%\\pnpm-store"
+      ],
+      "match_mode": "prefix",
+      "explanation": "store pnpm",
+      "label": "pnpm store"
+    },
+    {
+      "id": "pkg.pip.cache",
+      "kind": "app_caches",
+      "safety": "safe_to_bulk",
+      "paths": [
+        "%LOCALAPPDATA%\\pip\\Cache"
+      ],
+      "match_mode": "prefix",
+      "explanation": "кеш pip",
+      "label": "pip Cache"
+    },
+    {
+      "id": "pkg.cargo.registry",
+      "kind": "app_caches",
+      "safety": "safe_to_bulk",
+      "paths": [
+        "%USERPROFILE%\\.cargo\\registry\\cache",
+        "%USERPROFILE%\\.cargo\\git\\db"
+      ],
+      "match_mode": "prefix",
+      "explanation": "кеш cargo registry / git db",
+      "label": "Cargo Cache"
+    },
+    {
+      "id": "pkg.nuget.http_cache",
+      "kind": "app_caches",
+      "safety": "safe_to_bulk",
+      "paths": [
+        "%LOCALAPPDATA%\\NuGet\\v3-cache",
+        "%LOCALAPPDATA%\\NuGet\\plugins-cache"
+      ],
+      "match_mode": "prefix",
+      "explanation": "HTTP-кеш NuGet (не global-packages)",
+      "label": "NuGet HTTP Cache"
+    },
+
+    {
+      "id": "messenger.discord.cache",
+      "kind": "app_caches",
+      "safety": "safe_to_bulk",
+      "paths": [
+        "%APPDATA%\\discord\\Cache",
+        "%APPDATA%\\discord\\Code Cache",
+        "%APPDATA%\\discord\\GPUCache"
+      ],
+      "match_mode": "prefix",
+      "explanation": "кеш Discord",
+      "label": "Discord Cache"
+    },
+    {
+      "id": "messenger.telegram.tdata_temp",
+      "kind": "app_caches",
+      "safety": "review_recommended",
+      "paths": [
+        "%APPDATA%\\Telegram Desktop\\tdata\\user_data",
+        "%APPDATA%\\Telegram Desktop\\tdata\\temp"
+      ],
+      "match_mode": "prefix",
+      "explanation": "медіа/temp Telegram Desktop (може містити потрібні файли)",
+      "label": "Telegram media"
+    },
+    {
+      "id": "messenger.slack.cache",
+      "kind": "app_caches",
+      "safety": "safe_to_bulk",
+      "paths": [
+        "%APPDATA%\\Slack\\Cache",
+        "%APPDATA%\\Slack\\Code Cache",
+        "%APPDATA%\\Slack\\GPUCache"
+      ],
+      "match_mode": "prefix",
+      "explanation": "кеш Slack",
+      "label": "Slack Cache"
+    },
+    {
+      "id": "messenger.teams.cache",
+      "kind": "app_caches",
+      "safety": "safe_to_bulk",
+      "paths": [
+        "%APPDATA%\\Microsoft\\Teams\\Cache",
+        "%APPDATA%\\Microsoft\\Teams\\blob_storage",
+        "%APPDATA%\\Microsoft\\Teams\\GPUCache",
+        "%LOCALAPPDATA%\\Packages\\MSTeams_8wekyb3d8bbwe\\LocalCache"
+      ],
+      "match_mode": "prefix",
+      "explanation": "кеш Microsoft Teams (classic / new)",
+      "label": "Teams Cache"
+    },
+
+    {
+      "id": "render.adobe.media_cache",
+      "kind": "app_caches",
+      "safety": "safe_to_bulk",
+      "paths": [
+        "%USERPROFILE%\\Documents\\Adobe\\Common\\Media Cache Files",
+        "%USERPROFILE%\\Documents\\Adobe\\Common\\Media Cache",
+        "%APPDATA%\\Adobe\\Common\\Media Cache Files",
+        "%APPDATA%\\Adobe\\Common\\Media Cache"
+      ],
+      "match_mode": "prefix",
+      "explanation": "Media Cache Adobe Common (перестворюється)",
+      "label": "Adobe Media Cache"
+    },
+    {
+      "id": "render.adobe.after_effects",
+      "kind": "app_caches",
+      "safety": "safe_to_bulk",
+      "paths": [
+        "%LOCALAPPDATA%\\Temp\\Adobe\\After Effects"
+      ],
+      "match_mode": "prefix",
+      "explanation": "temp/disk cache After Effects",
+      "label": "After Effects Temp"
+    },
+    {
+      "id": "render.davinci.resolve.cache",
+      "kind": "app_caches",
+      "safety": "safe_to_bulk",
+      "paths": [
+        "%APPDATA%\\Blackmagic Design\\DaVinci Resolve\\Support\\Resolve Disk Cache",
+        "%LOCALAPPDATA%\\Blackmagic Design\\DaVinci Resolve\\CacheClip"
+      ],
+      "match_mode": "prefix",
+      "explanation": "дисковий кеш DaVinci Resolve",
+      "label": "Resolve Cache"
+    },
+    {
+      "id": "render.blender.cache",
+      "kind": "app_caches",
+      "safety": "safe_to_bulk",
+      "paths": [
+        "%LOCALAPPDATA%\\Blender Foundation\\Blender",
+        "%APPDATA%\\Blender Foundation\\Blender"
+      ],
+      "match_mode": "prefix",
+      "explanation": "локальні дані/кеш Blender (версійні підтеки)",
+      "label": "Blender"
+    },
+
+    {
+      "id": "game.steam.htmlcache",
+      "kind": "app_caches",
+      "safety": "safe_to_bulk",
+      "paths": [
+        "%LOCALAPPDATA%\\Steam\\htmlcache",
+        "%LOCALAPPDATA%\\Steam\\appcache"
+      ],
+      "match_mode": "prefix",
+      "explanation": "HTML/app cache клієнта Steam",
+      "label": "Steam Cache"
+    },
+    {
+      "id": "game.spotify.storage",
+      "kind": "app_caches",
+      "safety": "safe_to_bulk",
+      "paths": [
+        "%LOCALAPPDATA%\\Spotify\\Storage",
+        "%APPDATA%\\Spotify\\Storage",
+        "%LOCALAPPDATA%\\Spotify\\Data"
+      ],
+      "match_mode": "prefix",
+      "explanation": "офлайн/кеш Spotify (перекачається)",
+      "label": "Spotify Cache"
     }
   ]
 }

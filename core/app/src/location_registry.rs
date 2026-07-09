@@ -160,6 +160,11 @@ impl KnownLocationsRegistry {
     pub fn temp_locations(&self) -> impl Iterator<Item = &LocationEntry> {
         self.by_kind(LocationKind::TempFiles)
     }
+
+    /// Усі `app_caches` з реєстру (T-046).
+    pub fn app_cache_locations(&self) -> impl Iterator<Item = &LocationEntry> {
+        self.by_kind(LocationKind::AppCaches)
+    }
 }
 
 impl LocationEntry {
@@ -575,6 +580,93 @@ mod tests {
             assert!(
                 hit,
                 "%TEMP%={temp} має покриватись windows.temp.user roots={user_roots:?}"
+            );
+        }
+    }
+
+    /// DoD T-046: ≥20 записів app_caches, валідна схема, покриття сегментів ЦА.
+    #[test]
+    fn t046_app_cache_catalog_present() {
+        let path = workspace_registry_path();
+        if !path.is_file() {
+            return;
+        }
+        let reg = KnownLocationsRegistry::load_from_file(&path).expect("load");
+        let caches: Vec<_> = reg.app_cache_locations().collect();
+        assert!(
+            caches.len() >= 20,
+            "T-046: очікували ≥20 app_caches, є {}",
+            caches.len()
+        );
+
+        let ids: HashSet<_> = caches.iter().map(|e| e.id.as_str()).collect();
+        for required in [
+            "browser.chrome.cache",
+            "browser.edge.cache",
+            "ide.vscode.cache",
+            "pkg.npm.cache",
+            "pkg.pip.cache",
+            "pkg.cargo.registry",
+            "messenger.discord.cache",
+            "render.adobe.media_cache",
+            "game.steam.htmlcache",
+        ] {
+            assert!(ids.contains(required), "немає {required} у {ids:?}");
+        }
+
+        for e in &caches {
+            assert_eq!(e.kind, LocationKind::AppCaches);
+            assert!(!e.paths.is_empty(), "{} без paths", e.id);
+            assert!(!e.explanation.trim().is_empty(), "{} без explanation", e.id);
+            for p in &e.paths {
+                assert!(
+                    p.contains('%') || p.chars().nth(1) == Some(':'),
+                    "{} path «{p}» виглядає невалідно",
+                    e.id
+                );
+            }
+        }
+    }
+
+    /// Live probe: для встановленого ПЗ existing_roots непорожній.
+    /// Не вимагаємо всі 20 на CI — лише узгодженість шаблонів з FS.
+    #[test]
+    #[cfg(windows)]
+    fn t046_live_probe_installed_app_caches() {
+        let path = workspace_registry_path();
+        if !path.is_file() {
+            return;
+        }
+        let reg = KnownLocationsRegistry::load_from_file(&path).expect("load");
+
+        let mut present = Vec::new();
+        let mut absent = Vec::new();
+        for e in reg.app_cache_locations() {
+            let roots = e.existing_roots();
+            if roots.is_empty() {
+                absent.push(e.id.as_str());
+            } else {
+                present.push((e.id.as_str(), roots));
+            }
+        }
+
+        println!(
+            "T-046 live probe: {} present / {} absent (of {})",
+            present.len(),
+            absent.len(),
+            present.len() + absent.len()
+        );
+        for (id, roots) in &present {
+            println!("  OK  {id}: {roots:?}");
+        }
+        for id in &absent {
+            println!("  --  {id}: not installed / path missing");
+        }
+
+        for (id, roots) in &present {
+            assert!(
+                roots.iter().all(|r| r.is_dir()),
+                "{id}: existing_roots має бути dir"
             );
         }
     }
