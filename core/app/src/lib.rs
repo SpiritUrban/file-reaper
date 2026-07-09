@@ -19,6 +19,7 @@ pub mod elevation;
 pub mod location_registry;
 pub mod mvp_farm;
 pub mod ports;
+pub mod preview;
 pub mod scan_control;
 pub mod scan_strategy;
 pub mod usn_apply;
@@ -42,6 +43,7 @@ pub use duplicates::{
     PartialHashStageResult, SizeStageResult, VolumeIoGate, DEFAULT_MAX_CONCURRENT_READS_PER_VOLUME,
 };
 pub use mvp_farm::mvp_predicate_registry;
+pub use preview::{PreviewPriority, PreviewScheduler};
 pub use trashradar_domain::aggregate::{CandidateContribution, CategoryRollup, FreeableSummary};
 pub use trashradar_domain::duplicates::{
     DuplicateRole, KeepPolicy, MarkedDuplicateGroup, MarkedDuplicateMember,
