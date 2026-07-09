@@ -10,7 +10,7 @@
     "app.health": {
       "status": "implemented",
       "task": "T-009",
-      "$comment": "Diagnostics: versions, module states, IPC counters (T-009); elevated + scanPlans per volume strategy MFT|walk (T-028)"
+      "$comment": "Diagnostics: versions, module states, IPC counters (T-009); elevated + scanPlans (T-028); elevation {status,offerPending,message…} (T-034)"
     },
     "app.ping": {
       "status": "implemented",
@@ -21,6 +21,16 @@
       "status": "implemented",
       "task": "T-005",
       "$comment": "Діагностика каналу подій: payload {count?, intervalMs?} -> ack {accepted} ОДРАЗУ; далі count подій app.test у фоні"
+    },
+    "app.request_elevation": {
+      "status": "implemented",
+      "task": "T-034",
+      "$comment": "UAC relaunch (runas) → {status: started|already_elevated, willExit}; cancel UAC → cancelled; started exits process after reply"
+    },
+    "app.decline_elevation": {
+      "status": "implemented",
+      "task": "T-034",
+      "$comment": "Session refuse: no re-prompt this process; walk path (T-028); → {declined:true, offerPending:false}"
     },
     "scan.start": {
       "status": "implemented",

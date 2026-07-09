@@ -63,6 +63,8 @@
 
 | T-033 IPC start/stop скану + progress | ✅ | 2026-07-09 | local | **App `scan_control`:** `ScanController`, `run_scan_session`, `CancellableVolumeScanner`, `SteppedTestScanner`; DoD cancel ≤500ms + partial batches. **scan-mft:** `enumerate_with_cancel` / `scan_volume_to_index_cancel`. **Shell `scan_runtime`:** `scan.start`/`scan.stop`, `ScanRuntime` (hot index + controller), MFT/walk auto strategy, `scan.progress` events. **Contracts/UI:** implemented. **DoD:** 4 unit scan_control + shell partial index on cancel. Перевірено: `cargo test -p trashradar-app scan_control`; `cargo test -p trashradar-shell` (18); clippy `-D warnings`. |
 
+| T-034 Elevation: запит адмін-прав з поясненням, шлях відмови | ✅ | 2026-07-09 | local | **App `elevation`:** `ElevationSession` / `ElevationPromptKind` / `evaluate_elevation_prompt` — сесійна політика (offer → decline → no re-prompt); пояснення вигоди MFT українською. **platform-win:** `relaunch_elevated` через ShellExecuteExW `runas` (UAC cancel → `cancelled`). **Shell IPC:** `app.request_elevation` (relaunch + exit), `app.decline_elevation` (AtomicBool сесії), `app.health.elevation` {status, offerPending, message, ntfsVolumeCount}. **UI Health:** банер + кнопки «UAC» / «Продовжити без прав». **DoD:** з правами → MFT (T-028); після decline → walk + offer_pending=false у сесії. Перевірено: `cargo test -p trashradar-app elevation` (7); platform-win (6); shell elevation+повний (20); clippy `-D warnings`; `npm run build`. |
+
 ## Легенда
 
 ✅ виконано й верифіковано · 🔄 в роботі · ⛔ заблоковано (причина в нотатках)

@@ -110,6 +110,33 @@ export interface HealthInfo {
   elevated: boolean;
   /** Автовибір MFT ↔ walk по томах (T-028). */
   scanPlans: VolumeScanPlan[];
+  /** Пропозиція / відмова elevation (T-034). */
+  elevation: ElevationInfo;
+}
+
+/** Сесійний стан elevation (T-034). */
+export interface ElevationInfo {
+  /** elevated | not_needed | offer | declined */
+  status: "elevated" | "not_needed" | "offer" | "declined" | string;
+  /** Чи UI має показувати банер з поясненням. */
+  offerPending: boolean;
+  declinedThisSession: boolean;
+  /** Пояснення вигоди (українською). */
+  message: string;
+  summary: string;
+  ntfsVolumeCount: number;
+}
+
+/** Відповідь app.request_elevation (T-034). */
+export interface RequestElevationReply {
+  status: "started" | "already_elevated" | string;
+  willExit: boolean;
+}
+
+/** Відповідь app.decline_elevation (T-034). */
+export interface DeclineElevationReply {
+  declined: boolean;
+  offerPending: boolean;
 }
 
 export interface ModuleHealth {
@@ -177,6 +204,8 @@ export type CommandName =
   | "app.health"
   | "app.ping"
   | "app.test_stream"
+  | "app.request_elevation"
+  | "app.decline_elevation"
   | "scan.start"
   | "scan.stop"
   | "category.window"

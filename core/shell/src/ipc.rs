@@ -11,15 +11,31 @@
 //!   функція тут + рядок у generate_handler + запис у contracts/.
 
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 use tauri::{AppHandle, Runtime};
+use trashradar_app::elevation::{
+    elevation_benefit_message, elevation_benefit_summary, evaluate_elevation_prompt,
+    ElevationSession,
+};
 use trashradar_domain::error::CoreError;
+use trashradar_platform_win::{relaunch_elevated, ElevationRelaunch};
 
 use crate::events;
 
 static COMMANDS_RECEIVED: AtomicU64 = AtomicU64::new(0);
 static COMMAND_ERRORS: AtomicU64 = AtomicU64::new(0);
+
+/// Сесійна відмова від elevation (T-034): один процес = одна сесія.
+static ELEVATION_DECLINED: AtomicBool = AtomicBool::new(false);
+
+fn elevation_session() -> ElevationSession {
+    let mut s = ElevationSession::new();
+    if ELEVATION_DECLINED.load(Ordering::Relaxed) {
+        s.decline();
+    }
+    s
+}
 
 pub(crate) fn record_command() {
     COMMANDS_RECEIVED.fetch_add(1, Ordering::Relaxed);
@@ -62,7 +78,25 @@ pub struct VolumeScanPlan {
     pub elevated: bool,
 }
 
-/// Відповідь `app.health` — використовується діагностикою (T-009, T-028).
+/// Сесійний стан elevation для health/UI (T-034).
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ElevationInfo {
+    /// `elevated` | `not_needed` | `offer` | `declined`.
+    pub status: String,
+    /// Чи UI має показувати банер з поясненням (активна пропозиція).
+    pub offer_pending: bool,
+    /// Користувач відмовився в цій сесії (DoD: без повторних запитів).
+    pub declined_this_session: bool,
+    /// Пояснення вигоди (українською).
+    pub message: String,
+    /// Короткий підсумок для компактних UI.
+    pub summary: String,
+    /// Скільки NTFS-томів виграли б від MFT.
+    pub ntfs_volume_count: u32,
+}
+
+/// Відповідь `app.health` — використовується діагностикою (T-009, T-028, T-034).
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HealthInfo {
@@ -74,6 +108,27 @@ pub struct HealthInfo {
     pub elevated: bool,
     /// Автовибір MFT ↔ walk по томах (T-028 DoD: видно у health).
     pub scan_plans: Vec<VolumeScanPlan>,
+    /// Пропозиція / відмова elevation (T-034).
+    pub elevation: ElevationInfo,
+}
+
+/// Відповідь `app.request_elevation` (T-034).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestElevationReply {
+    /// `started` | `already_elevated`.
+    pub status: String,
+    /// Якщо `started` — поточний процес завершується після відповіді.
+    pub will_exit: bool,
+}
+
+/// Відповідь `app.decline_elevation` (T-034).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeclineElevationReply {
+    pub declined: bool,
+    /// Після decline offer більше не pending.
+    pub offer_pending: bool,
 }
 
 /// Будує плани скану для всіх видимих томів (T-028).
@@ -110,12 +165,31 @@ pub fn build_scan_plans() -> (bool, Vec<VolumeScanPlan>) {
     (elevated, plans)
 }
 
+/// Зібрати [`ElevationInfo`] з планів і сесійного стану (T-034).
+pub fn build_elevation_info(elevated: bool, scan_plans: &[VolumeScanPlan]) -> ElevationInfo {
+    let ntfs_volume_count = scan_plans
+        .iter()
+        .filter(|p| p.file_system.eq_ignore_ascii_case("NTFS"))
+        .count() as u32;
+    let session = elevation_session();
+    let kind = evaluate_elevation_prompt(elevated, ntfs_volume_count > 0, session);
+    ElevationInfo {
+        status: kind.as_str().to_string(),
+        offer_pending: kind.offer_pending(),
+        declined_this_session: session.is_declined(),
+        message: elevation_benefit_message().to_string(),
+        summary: elevation_benefit_summary().to_string(),
+        ntfs_volume_count,
+    }
+}
+
 #[tauri::command]
 pub fn app_health() -> HealthInfo {
     record_command();
     tracing::debug!("запит app.health");
     let event_metrics = events::metrics();
     let (elevated, scan_plans) = build_scan_plans();
+    let elevation = build_elevation_info(elevated, &scan_plans);
     // T-028: автовибір готовий; деталі стратегії — у scan_plans, не в status.
     HealthInfo {
         app_version: env!("CARGO_PKG_VERSION"),
@@ -159,7 +233,61 @@ pub fn app_health() -> HealthInfo {
         },
         elevated,
         scan_plans,
+        elevation,
     }
+}
+
+/// Запит UAC elevation: relaunch з `runas` (T-034).
+///
+/// При успіху (`started`) процес завершується після відправки відповіді,
+/// щоб не лишалось два вікна. Скасування UAC → `cancelled` (UI може
+/// запропонувати decline).
+#[tauri::command]
+pub fn app_request_elevation() -> Result<RequestElevationReply, CoreError> {
+    record_command();
+    tracing::info!("запит app.request_elevation");
+    match relaunch_elevated() {
+        Ok(ElevationRelaunch::AlreadyElevated) => Ok(RequestElevationReply {
+            status: "already_elevated".into(),
+            will_exit: false,
+        }),
+        Ok(ElevationRelaunch::Started) => {
+            tracing::info!("UAC accepted — elevated process started; exiting current");
+            // Дати Tauri відправити IPC-відповідь, потім вийти.
+            std::thread::spawn(|| {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                std::process::exit(0);
+            });
+            Ok(RequestElevationReply {
+                status: "started".into(),
+                will_exit: true,
+            })
+        }
+        Err(err) => {
+            record_command_error();
+            // Скасування UAC — не decline сесії автоматично: користувач
+            // може натиснути «Продовжити без прав» окремо (явний шлях відмови).
+            Err(err)
+        }
+    }
+}
+
+/// Відмова від elevation на сесію (T-034 DoD: без повторних запитів).
+///
+/// Сканування далі йде через directory walk (T-028). Повторний offer
+/// з’явиться лише в новому процесі (перезапуск).
+#[tauri::command]
+pub fn app_decline_elevation() -> Result<DeclineElevationReply, CoreError> {
+    record_command();
+    tracing::info!("запит app.decline_elevation");
+    ELEVATION_DECLINED.store(true, Ordering::Relaxed);
+
+    let (elevated, plans) = build_scan_plans();
+    let info = build_elevation_info(elevated, &plans);
+    Ok(DeclineElevationReply {
+        declined: true,
+        offer_pending: info.offer_pending,
+    })
 }
 
 /// Параметри `app.ping`. Все опційне: `{}` — миттєвий успіх.
@@ -368,6 +496,70 @@ mod tests {
                 assert_ne!(plan.strategy, "mft");
             }
         }
+    }
+
+    #[test]
+    fn health_includes_elevation_info_t034() {
+        let (elevated, plans) = build_scan_plans();
+        let info = build_elevation_info(elevated, &plans);
+        assert!(
+            matches!(
+                info.status.as_str(),
+                "elevated" | "not_needed" | "offer" | "declined"
+            ),
+            "status: {}",
+            info.status
+        );
+        assert!(!info.message.is_empty());
+        assert!(!info.summary.is_empty());
+        // Інваріанти: elevated → status elevated, no offer.
+        if elevated {
+            assert_eq!(info.status, "elevated");
+            assert!(!info.offer_pending);
+        }
+        // offer_pending лише для status=offer.
+        if info.offer_pending {
+            assert_eq!(info.status, "offer");
+        }
+        // З правами — MFT на NTFS (T-034 DoD частина 1).
+        if elevated {
+            for plan in &plans {
+                if plan.file_system.eq_ignore_ascii_case("NTFS") {
+                    assert_eq!(plan.strategy, "mft");
+                }
+            }
+        } else {
+            // Без прав — walk (T-034 + T-028).
+            for plan in &plans {
+                assert_ne!(plan.strategy, "mft");
+            }
+        }
+    }
+
+    #[test]
+    fn decline_elevation_clears_offer_and_keeps_walk() {
+        // DoD T-034: після відмови — walk, без повторного offer у сесії.
+        let reply = app_decline_elevation().expect("decline ok");
+        assert!(reply.declined);
+        assert!(!reply.offer_pending);
+
+        let (elevated, plans) = build_scan_plans();
+        let info = build_elevation_info(elevated, &plans);
+        assert!(info.declined_this_session);
+        assert!(!info.offer_pending);
+        if !elevated {
+            assert_eq!(info.status, "declined");
+            for plan in &plans {
+                assert_ne!(
+                    plan.strategy, "mft",
+                    "після decline без admin — walk, plan={plan:?}"
+                );
+            }
+        }
+        // Повторний decline ідемпотентний.
+        let again = app_decline_elevation().expect("second decline");
+        assert!(again.declined);
+        assert!(!again.offer_pending);
     }
 
     #[test]

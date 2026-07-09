@@ -4,7 +4,8 @@
 //! всередині `infra/*` (docs/repository.md §10).
 //!
 //! T-028: тип файлової системи тому, elevation процесу, перелік томів.
-//! T-034: запит elevation з UI (окремо) — тут лише детекція.
+//! T-034: детекція + UAC-relaunch (`relaunch_elevated`); сесійна політика
+//! відмови — у `trashradar_app::elevation`.
 
 use trashradar_app::ports::ScanEnvironment;
 use trashradar_domain::error::CoreError;
@@ -81,6 +82,41 @@ pub fn is_ntfs_volume(volume: char) -> Result<bool, CoreError> {
     WinScanEnvironment.is_ntfs(volume)
 }
 
+/// Запит UAC elevation: перезапуск поточного exe з дієсловом `runas` (T-034).
+///
+/// - `Ok(ElevationRelaunch::Started)` — новий elevated-процес запущено;
+///   **викликач має завершити поточний процес** (інакше два вікна).
+/// - `Ok(ElevationRelaunch::AlreadyElevated)` — уже admin, relaunch не потрібен.
+/// - `Err` — користувач скасував UAC (`cancelled`) або збій запуску (`io`).
+///
+/// Політика «не питати знову в сесії» — **не** тут: shell викликає
+/// [`trashradar_app::elevation::ElevationSession::decline`] окремо.
+pub fn relaunch_elevated() -> Result<ElevationRelaunch, CoreError> {
+    if is_process_elevated() {
+        return Ok(ElevationRelaunch::AlreadyElevated);
+    }
+    #[cfg(windows)]
+    {
+        windows::relaunch_elevated()
+    }
+    #[cfg(not(windows))]
+    {
+        Err(CoreError::new(
+            trashradar_domain::error::ErrorCode::NotImplemented,
+            "Elevation relaunch доступний лише на Windows.",
+        ))
+    }
+}
+
+/// Результат спроби UAC-relaunch (T-034).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ElevationRelaunch {
+    /// Новий процес з admin-правами запущено.
+    Started,
+    /// Поточний процес уже elevated.
+    AlreadyElevated,
+}
+
 #[cfg(windows)]
 mod windows {
     use super::*;
@@ -102,6 +138,7 @@ mod windows {
         ) -> i32;
         fn GetLogicalDrives() -> u32;
         fn GetDriveTypeW(root_path_name: *const u16) -> u32;
+        fn GetLastError() -> u32;
     }
 
     #[link(name = "advapi32")]
@@ -120,11 +157,40 @@ mod windows {
         ) -> i32;
     }
 
+    #[link(name = "shell32")]
+    extern "system" {
+        fn ShellExecuteExW(info: *mut ShellExecuteInfoW) -> i32;
+    }
+
     const TOKEN_QUERY: u32 = 0x0008;
     const TOKEN_ELEVATION_CLASS: u32 = 20; // TokenElevation
     const DRIVE_REMOVABLE: u32 = 2;
     const DRIVE_FIXED: u32 = 3;
     const DRIVE_RAMDISK: u32 = 6;
+    /// ERROR_CANCELLED — користувач закрив UAC.
+    const ERROR_CANCELLED: u32 = 1223;
+    /// SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI (без зайвих діалогів shell).
+    const SEE_MASK_NOCLOSEPROCESS: u32 = 0x0000_0040;
+    const SW_SHOWNORMAL: i32 = 1;
+
+    #[repr(C)]
+    struct ShellExecuteInfoW {
+        cb_size: u32,
+        f_mask: u32,
+        hwnd: *mut c_void,
+        lp_verb: *const u16,
+        lp_file: *const u16,
+        lp_parameters: *const u16,
+        lp_directory: *const u16,
+        n_show: i32,
+        h_inst_app: *mut c_void,
+        lp_id_list: *mut c_void,
+        lp_class: *const u16,
+        h_key_class: *mut c_void,
+        dw_hot_key: u32,
+        h_icon_or_monitor: *mut c_void,
+        h_process: *mut c_void,
+    }
 
     #[repr(C)]
     struct TokenElevation {
@@ -208,6 +274,88 @@ mod windows {
         out
     }
 
+    /// UAC-relaunch поточного exe (ShellExecuteExW + runas).
+    pub fn relaunch_elevated() -> Result<super::ElevationRelaunch, CoreError> {
+        use super::ElevationRelaunch;
+        use std::os::windows::ffi::OsStrExt;
+        use trashradar_domain::error::ErrorCode;
+
+        let exe = std::env::current_exe().map_err(|e| {
+            CoreError::new(
+                ErrorCode::Io,
+                format!("Не вдалося визначити шлях до exe: {e}."),
+            )
+        })?;
+        let exe_wide: Vec<u16> = exe
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        // Аргументи командного рядка без argv[0] (як GetCommandLine / args_os).
+        let params: String = std::env::args_os()
+            .skip(1)
+            .map(|a| {
+                let s = a.to_string_lossy();
+                if s.contains(' ') || s.contains('"') {
+                    format!("\"{}\"", s.replace('"', "\\\""))
+                } else {
+                    s.into_owned()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        let params_wide: Vec<u16> = if params.is_empty() {
+            vec![0]
+        } else {
+            params.encode_utf16().chain(std::iter::once(0)).collect()
+        };
+        let verb: Vec<u16> = "runas\0".encode_utf16().collect();
+
+        let mut info = ShellExecuteInfoW {
+            cb_size: std::mem::size_of::<ShellExecuteInfoW>() as u32,
+            f_mask: SEE_MASK_NOCLOSEPROCESS,
+            hwnd: std::ptr::null_mut(),
+            lp_verb: verb.as_ptr(),
+            lp_file: exe_wide.as_ptr(),
+            lp_parameters: if params.is_empty() {
+                std::ptr::null()
+            } else {
+                params_wide.as_ptr()
+            },
+            lp_directory: std::ptr::null(),
+            n_show: SW_SHOWNORMAL,
+            h_inst_app: std::ptr::null_mut(),
+            lp_id_list: std::ptr::null_mut(),
+            lp_class: std::ptr::null(),
+            h_key_class: std::ptr::null_mut(),
+            dw_hot_key: 0,
+            h_icon_or_monitor: std::ptr::null_mut(),
+            h_process: std::ptr::null_mut(),
+        };
+
+        let ok = unsafe { ShellExecuteExW(&mut info) };
+        if ok == 0 {
+            let err = unsafe { GetLastError() };
+            if err == ERROR_CANCELLED {
+                return Err(CoreError::new(
+                    ErrorCode::Cancelled,
+                    "Запит адмін-прав скасовано. Сканування продовжиться через обхід каталогів.",
+                ));
+            }
+            return Err(CoreError::new(
+                ErrorCode::Io,
+                format!("Не вдалося запустити elevated-процес (Win32 error {err})."),
+            ));
+        }
+        // Закриваємо handle нового процесу — нам достатньо факту старту.
+        if !info.h_process.is_null() {
+            unsafe {
+                CloseHandle(info.h_process);
+            }
+        }
+        Ok(ElevationRelaunch::Started)
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -250,6 +398,17 @@ mod windows {
             let env = WinScanEnvironment;
             assert_eq!(env.is_elevated(), is_process_elevated());
             assert_eq!(env.list_scan_volumes(), list_drive_letters());
+        }
+
+        /// `relaunch_elevated` при вже elevated — no-op без UAC (не відкриває діалог).
+        #[test]
+        fn relaunch_when_elevated_is_already_elevated_or_ok_path() {
+            // Без elevation цей тест лише перевіряє, що API не панікує
+            // на гілці «вже elevated»; повний UAC не викликаємо в CI.
+            if is_process_elevated() {
+                let r = super::super::relaunch_elevated().expect("already elevated");
+                assert_eq!(r, super::super::ElevationRelaunch::AlreadyElevated);
+            }
         }
     }
 }

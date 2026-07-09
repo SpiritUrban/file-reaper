@@ -28,6 +28,8 @@ fn main() {
             ipc::app_health,
             ipc::app_ping,
             ipc::app_test_stream,
+            ipc::app_request_elevation,
+            ipc::app_decline_elevation,
             scan_runtime::scan_start,
             scan_runtime::scan_stop,
         ])

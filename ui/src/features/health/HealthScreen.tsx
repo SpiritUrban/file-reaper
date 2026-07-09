@@ -1,7 +1,11 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { command, isTauri } from "@/ipc/client";
-import type { HealthInfo } from "@/ipc/types";
+import type {
+  DeclineElevationReply,
+  HealthInfo,
+  RequestElevationReply,
+} from "@/ipc/types";
 
 type HealthState =
   | { status: "loading"; data: null; error: null }
@@ -60,49 +64,110 @@ function reasonLabel(reason: string): string {
   }
 }
 
+function elevationStatusLabel(status: string): string {
+  switch (status) {
+    case "elevated":
+      return "admin (MFT available)";
+    case "offer":
+      return "offer pending";
+    case "declined":
+      return "declined this session → walk";
+    case "not_needed":
+      return "not needed (no NTFS)";
+    default:
+      return status;
+  }
+}
+
 export function HealthScreen() {
   const [state, setState] = useState<HealthState>({
     status: "loading",
     data: null,
     error: null,
   });
+  const [elevationBusy, setElevationBusy] = useState(false);
+  const [elevationNote, setElevationNote] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    if (!isTauri()) {
+      setState({
+        status: "error",
+        data: null,
+        error: "IPC недоступний поза Tauri.",
+      });
+      return;
+    }
+
+    try {
+      const data = await command<HealthInfo>("app.health");
+      setState({ status: "ready", data, error: null });
+    } catch (error) {
+      setState((previous) => ({
+        status: "error",
+        data: previous.data,
+        error: error instanceof Error ? error.message : String(error),
+      }));
+    }
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
 
-    async function refresh() {
-      if (!isTauri()) {
-        setState({
-          status: "error",
-          data: null,
-          error: "IPC недоступний поза Tauri.",
-        });
-        return;
-      }
-
-      try {
-        const data = await command<HealthInfo>("app.health");
-        if (!cancelled) {
-          setState({ status: "ready", data, error: null });
-        }
-      } catch (error) {
-        if (!cancelled) {
-          setState((previous) => ({
-            status: "error",
-            data: previous.data,
-            error: error instanceof Error ? error.message : String(error),
-          }));
-        }
-      }
+    async function tick() {
+      if (cancelled) return;
+      await refresh();
     }
 
-    void refresh();
-    const intervalId = window.setInterval(refresh, 1000);
+    void tick();
+    const intervalId = window.setInterval(() => {
+      void tick();
+    }, 1000);
     return () => {
       cancelled = true;
       window.clearInterval(intervalId);
     };
-  }, []);
+  }, [refresh]);
+
+  async function onRequestElevation() {
+    setElevationBusy(true);
+    setElevationNote(null);
+    try {
+      const reply = await command<RequestElevationReply>("app.request_elevation");
+      if (reply.willExit) {
+        setElevationNote("UAC прийнято — перезапуск з адмін-правами…");
+      } else {
+        setElevationNote("Уже з адмін-правами.");
+        await refresh();
+      }
+    } catch (error) {
+      setElevationNote(
+        error instanceof Error ? error.message : String(error),
+      );
+      await refresh();
+    } finally {
+      setElevationBusy(false);
+    }
+  }
+
+  async function onDeclineElevation() {
+    setElevationBusy(true);
+    setElevationNote(null);
+    try {
+      const reply = await command<DeclineElevationReply>("app.decline_elevation");
+      setElevationNote(
+        reply.declined
+          ? "Відмова на сесію: сканування через обхід каталогів, без повторних запитів."
+          : "Відмову не зафіксовано.",
+      );
+      await refresh();
+    } catch (error) {
+      setElevationNote(
+        error instanceof Error ? error.message : String(error),
+      );
+    } finally {
+      setElevationBusy(false);
+    }
+  }
 
   const metrics = useMemo(() => {
     const ipc = state.data?.ipc;
@@ -162,6 +227,64 @@ export function HealthScreen() {
                 : "—"}
             </div>
           </div>
+        </div>
+      </section>
+
+      <section>
+        <h2 className="text-xs font-semibold uppercase tracking-wider text-ink-dim">
+          Elevation (T-034)
+        </h2>
+        <p className="mt-1 text-xs text-ink-faint">
+          Сесійний запит адмін-прав для MFT; відмова → walk без повторних запитів
+        </p>
+        <div className="mt-2 rounded border border-line bg-panel px-3 py-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="font-mono text-sm text-ink">
+              {state.data?.elevation
+                ? elevationStatusLabel(state.data.elevation.status)
+                : "—"}
+            </div>
+            <div className="text-xs text-ink-faint">
+              NTFS volumes:{" "}
+              {state.data?.elevation?.ntfsVolumeCount ?? "—"}
+            </div>
+          </div>
+          {state.data?.elevation?.message ? (
+            <p className="mt-2 text-sm leading-relaxed text-ink-dim">
+              {state.data.elevation.message}
+            </p>
+          ) : null}
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button
+              type="button"
+              disabled={
+                elevationBusy ||
+                !isTauri() ||
+                state.data?.elevated === true ||
+                state.data?.elevation?.status === "not_needed"
+              }
+              onClick={() => void onRequestElevation()}
+              className="rounded border border-keep/40 bg-keep/10 px-3 py-1.5 text-sm text-keep disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              Увімкнути швидке сканування (UAC)
+            </button>
+            <button
+              type="button"
+              disabled={
+                elevationBusy ||
+                !isTauri() ||
+                state.data?.elevated === true ||
+                state.data?.elevation?.declinedThisSession === true
+              }
+              onClick={() => void onDeclineElevation()}
+              className="rounded border border-line bg-panel-2 px-3 py-1.5 text-sm text-ink-dim disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              Продовжити без прав
+            </button>
+          </div>
+          {elevationNote ? (
+            <p className="mt-2 text-xs text-quarantine">{elevationNote}</p>
+          ) : null}
         </div>
       </section>
 
