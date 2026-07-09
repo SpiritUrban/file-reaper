@@ -95,6 +95,8 @@
 
 | T-049 node_modules за маркерами | ✅ | 2026-07-09 | local | **`detectors/node_modules`:** outermost `node_modules` + маркер `package.json` у parent (з індексу, без I/O); 0 false positive без маркера; nested → один unit; `aggregate_units`; DevArtifacts + SafeToBulk. `dev-artifacts.json` schema v1. DoD: 9 unit. |
 
+| T-050 build/dist/target/obj | ✅ | 2026-07-09 | local | **`detectors/build_artifacts`:** target←Cargo.toml; dist←package.json; build←pkg/cmake/gradle/pom; obj←csproj/sln; без маркера = 0 hits; `aggregate_units`; dev-artifacts.json patterns. DoD: 8 unit. clippy clean. |
+
 ## Легенда
 
 ✅ виконано й верифіковано · 🔄 в роботі · ⛔ заблоковано (причина в нотатках)

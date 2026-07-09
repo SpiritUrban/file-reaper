@@ -8,6 +8,7 @@
 
 pub mod app_caches;
 pub mod archives;
+pub mod build_artifacts;
 mod contract;
 pub mod forgotten_videos;
 mod format;
@@ -22,6 +23,7 @@ pub mod thresholds;
 
 pub use app_caches::{AppCachesDetector, DETECTOR_ID as APP_CACHES_ID};
 pub use archives::{ArchivesDetector, DETECTOR_ID as ARCHIVES_ID};
+pub use build_artifacts::{BuildArtifactsDetector, DETECTOR_ID as BUILD_ARTIFACTS_ID};
 pub use contract::{Detector, DetectorHit, DetectorId};
 pub use forgotten_videos::{ForgottenVideosDetector, DETECTOR_ID as FORGOTTEN_VIDEOS_ID};
 pub use installers::{InstallersDetector, DETECTOR_ID as INSTALLERS_ID};

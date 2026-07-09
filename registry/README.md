@@ -112,5 +112,9 @@ API: `KnownLocationsRegistry::load_default()` / `load_from_file` / `from_json_st
 | id | folder | markers | nested_policy |
 |---|---|---|---|
 | `node_modules` | `node_modules` | `package.json` у parent | `outermost_only` |
+| `rust_target` | `target` | `Cargo.toml` | `outermost_only` |
+| `js_dist` | `dist` | `package.json` | `outermost_only` |
+| `generic_build` | `build` | package.json / CMake / Gradle / pom | `outermost_only` |
+| `dotnet_obj` | `obj` | `*.csproj` / `*.sln` | `outermost_only` |
 
-Реалізація: `trashradar_app::detectors::node_modules` (маркери з шляхів індексу).
+Реалізація: `detectors::node_modules`, `detectors::build_artifacts` (маркери з шляхів індексу).

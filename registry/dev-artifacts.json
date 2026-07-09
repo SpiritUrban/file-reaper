@@ -1,5 +1,5 @@
 {
-  "$comment": "Структурні патерни dev-артефактів (T-049+). schema v1: folder + markers. Логіка node_modules — trashradar_app::detectors::node_modules (маркер package.json у батьківській теці; outermost only).",
+  "$comment": "Структурні патерни dev-артефактів. T-049 node_modules; T-050 build/dist/target/obj. Реалізація: detectors::node_modules, detectors::build_artifacts.",
   "schema_version": 1,
   "patterns": [
     {
@@ -11,6 +11,53 @@
       "safety": "safe_to_bulk",
       "nested_policy": "outermost_only",
       "explanation": "node_modules (перестворюється npm/yarn/pnpm)"
+    },
+    {
+      "id": "rust_target",
+      "folder_name": "target",
+      "markers": ["Cargo.toml"],
+      "marker_relation": "parent_directory",
+      "category": "dev_artifacts",
+      "safety": "safe_to_bulk",
+      "nested_policy": "outermost_only",
+      "explanation": "Rust target/ (cargo clean)"
+    },
+    {
+      "id": "js_dist",
+      "folder_name": "dist",
+      "markers": ["package.json"],
+      "marker_relation": "parent_directory",
+      "category": "dev_artifacts",
+      "safety": "safe_to_bulk",
+      "nested_policy": "outermost_only",
+      "explanation": "JS/TS dist/ (rebuild)"
+    },
+    {
+      "id": "generic_build",
+      "folder_name": "build",
+      "markers": [
+        "package.json",
+        "CMakeLists.txt",
+        "build.gradle",
+        "build.gradle.kts",
+        "pom.xml",
+        "Cargo.toml"
+      ],
+      "marker_relation": "parent_directory",
+      "category": "dev_artifacts",
+      "safety": "safe_to_bulk",
+      "nested_policy": "outermost_only",
+      "explanation": "build/ (ecosystem marker required)"
+    },
+    {
+      "id": "dotnet_obj",
+      "folder_name": "obj",
+      "markers": ["*.csproj", "*.sln", "*.fsproj"],
+      "marker_relation": "parent_directory",
+      "category": "dev_artifacts",
+      "safety": "safe_to_bulk",
+      "nested_policy": "outermost_only",
+      "explanation": ".NET obj/ (msbuild intermediate)"
     }
   ]
 }
