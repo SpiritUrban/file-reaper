@@ -17,6 +17,7 @@ pub mod large_files;
 pub mod node_modules;
 pub mod old_files;
 mod orchestrator;
+pub mod project_activity;
 mod registry;
 pub mod temp_files;
 pub mod thresholds;
@@ -35,6 +36,7 @@ pub use orchestrator::{
     apply_primary_hit, apply_primary_hit_mut, clear_category, clear_category_mut,
     CategorizationStats, CategorizeBatchResult, DetectorOrchestrator,
 };
+pub use project_activity::{ProjectActivity, ProjectActivityIndex, DEFAULT_INACTIVE_AFTER_DAYS};
 pub use registry::DetectorRegistry;
 pub use temp_files::{TempFilesDetector, DETECTOR_ID as TEMP_FILES_ID};
 pub use thresholds::ThresholdValue;

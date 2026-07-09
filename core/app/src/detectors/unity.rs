@@ -1,4 +1,4 @@
-//! Розпізнавання Unity Library / Temp / Obj (T-051).
+//! Розпізнавання Unity Library / Temp / Obj (T-051) + активність проєкту (T-052).
 //!
 //! Unity-проєкт визначається за структурою (маркери в індексі, без I/O):
 //! - `ProjectSettings/ProjectVersion.txt` (канонічний),
@@ -10,7 +10,8 @@
 //! - `Temp/` — тимчасові файли редактора;
 //! - `Obj/` — проміжні (якщо є).
 //!
-//! DoD: проєкт за структурою; Library позначена як перестворювана.
+//! DoD T-051: проєкт за структурою; Library позначена як перестворювана.
+//! DoD T-052: свіжі джерела (Assets/ тощо) → ReviewRecommended.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -19,11 +20,14 @@ use std::sync::RwLock;
 use super::contract::{Detector, DetectorId};
 use super::format::{app_cache_unit_explanation, format_bytes_as_gb};
 use super::node_modules::{file_name, normalize_path, parent_dir};
+use super::project_activity::{append_activity_phrase, ProjectActivityIndex};
+use super::thresholds::{self, keys, ThresholdValue};
 use trashradar_domain::candidate::{
     ByteSize, CandidateId, CandidateUnit, Decision, FileAttributes, FileKind, FileRecord,
     SafetyLevel, Verdict,
 };
 use trashradar_domain::category::CategoryId;
+use trashradar_domain::error::CoreError;
 
 /// Стабільний id детектора.
 pub const DETECTOR_ID: DetectorId = DetectorId::new("dev.unity");
@@ -72,6 +76,8 @@ pub struct UnityArtifactsDetector {
     /// Підказки для евристики Assets+ProjectSettings.
     saw_assets_parent: RwLock<HashSet<String>>,
     saw_project_settings_parent: RwLock<HashSet<String>>,
+    /// Активність за датами поза артефактами (T-052).
+    activity: ProjectActivityIndex,
 }
 
 impl UnityArtifactsDetector {
@@ -81,6 +87,7 @@ impl UnityArtifactsDetector {
             project_roots: RwLock::new(HashSet::new()),
             saw_assets_parent: RwLock::new(HashSet::new()),
             saw_project_settings_parent: RwLock::new(HashSet::new()),
+            activity: ProjectActivityIndex::new(),
         }
     }
 
@@ -94,8 +101,38 @@ impl UnityArtifactsDetector {
         self.enabled.store(enabled, Ordering::Relaxed);
     }
 
+    pub fn with_now_filetime(self, now: i64) -> Self {
+        self.activity.set_now_filetime(Some(now));
+        self
+    }
+
+    pub fn set_now_filetime(&self, now: Option<i64>) {
+        self.activity.set_now_filetime(now);
+    }
+
+    pub fn inactive_after_days(&self) -> u64 {
+        self.activity.inactive_after_days()
+    }
+
+    pub fn activity_index(&self) -> &ProjectActivityIndex {
+        &self.activity
+    }
+
     pub fn project_count(&self) -> usize {
         self.project_roots.read().expect("lock").len()
+    }
+
+    /// Перерахувати активність Unity-коренів (T-052).
+    pub fn rebuild_activity(&self, records: &[FileRecord]) {
+        let roots: Vec<String> = self
+            .project_roots
+            .read()
+            .expect("lock")
+            .iter()
+            .cloned()
+            .collect();
+        self.activity
+            .rebuild_for_roots(roots.iter().map(|s| s.as_str()), records);
     }
 
     /// Оновити маркери з шляхів індексу / корпусу.
@@ -160,8 +197,21 @@ impl UnityArtifactsDetector {
         }
     }
 
-    /// Згорнути файли в одиниці-папки Library/Temp/Obj.
+    fn safety_and_phrase(&self, artifact_root: &str) -> (SafetyLevel, String) {
+        let project = match parent_dir(artifact_root) {
+            Some(p) => p,
+            None => return (SafetyLevel::SafeToBulk, String::new()),
+        };
+        (
+            self.activity.safety_for(&project),
+            self.activity.explanation_phrase(&project),
+        )
+    }
+
+    /// Згорнути файли в одиниці-папки Library/Temp/Obj. Оновлює активність (T-052).
     pub fn aggregate_units(&self, records: &[FileRecord]) -> Vec<FileRecord> {
+        self.rebuild_activity(records);
+
         #[derive(Default)]
         struct Acc {
             bytes: u64,
@@ -188,9 +238,11 @@ impl UnityArtifactsDetector {
             .filter_map(|(path, acc)| {
                 let kind = acc.kind?;
                 let label = format!("Unity {}", kind.as_str());
+                let (safety, phrase) = self.safety_and_phrase(&path);
                 let mut explanation = app_cache_unit_explanation(&label, acc.bytes, acc.count);
                 explanation.push_str(" · ");
                 explanation.push_str(kind.regenerable_note());
+                explanation = append_activity_phrase(&explanation, &phrase);
                 Some(FileRecord {
                     candidate_id: CandidateId(stable_id(&path)),
                     path,
@@ -201,7 +253,7 @@ impl UnityArtifactsDetector {
                     kind: FileKind::Other,
                     unit: CandidateUnit::Folder,
                     category: CategoryId::DevArtifacts,
-                    safety: SafetyLevel::SafeToBulk,
+                    safety,
                     decision: Decision::Undecided,
                     detector_id: DETECTOR_ID.as_str().to_string(),
                     explanation,
@@ -235,34 +287,59 @@ impl Detector for UnityArtifactsDetector {
 
     fn evaluate(&self, record: &FileRecord) -> Option<Verdict> {
         let (root, kind) = self.confirmed_root(&record.path)?;
+        let (safety, phrase) = self.safety_and_phrase(&root);
         if record.unit == CandidateUnit::Folder {
             if normalize_path(&record.path) != normalize_path(&root) {
                 return None;
             }
+            let base = format!(
+                "Unity {} · {} · {}",
+                kind.as_str(),
+                format_bytes_as_gb(record.size.0),
+                kind.regenerable_note()
+            );
             return Some(Verdict::new(
                 CategoryId::DevArtifacts,
-                format!(
-                    "Unity {} · {} · {}",
-                    kind.as_str(),
-                    format_bytes_as_gb(record.size.0),
-                    kind.regenerable_note()
-                ),
-                SafetyLevel::SafeToBulk,
+                append_activity_phrase(&base, &phrase),
+                safety,
             ));
         }
         if record.unit != CandidateUnit::File {
             return None;
         }
+        let base = format!(
+            "Unity {} · {} · {}",
+            kind.as_str(),
+            format_bytes_as_gb(record.size.0),
+            kind.regenerable_note()
+        );
         Some(Verdict::new(
             CategoryId::DevArtifacts,
-            format!(
-                "Unity {} · {} · {}",
-                kind.as_str(),
-                format_bytes_as_gb(record.size.0),
-                kind.regenerable_note()
-            ),
-            SafetyLevel::SafeToBulk,
+            append_activity_phrase(&base, &phrase),
+            safety,
         ))
+    }
+
+    fn set_threshold(&self, key: &str, value: ThresholdValue) -> Result<(), CoreError> {
+        match key {
+            keys::INACTIVE_AFTER_DAYS => {
+                let days = value.as_u64().ok_or_else(|| {
+                    thresholds::bad_threshold_type(DETECTOR_ID.as_str(), key, "u64")
+                })?;
+                self.activity.set_inactive_after_days(days);
+                Ok(())
+            }
+            _ => Err(thresholds::unknown_threshold(DETECTOR_ID.as_str(), key)),
+        }
+    }
+
+    fn get_threshold(&self, key: &str) -> Option<ThresholdValue> {
+        match key {
+            keys::INACTIVE_AFTER_DAYS => {
+                Some(ThresholdValue::U64(self.activity.inactive_after_days()))
+            }
+            _ => None,
+        }
     }
 }
 
@@ -358,7 +435,11 @@ fn stable_id(path: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::detectors::format::FILETIME_PER_DAY;
     use crate::detectors::{DetectorOrchestrator, DetectorRegistry};
+    use trashradar_domain::candidate::FsTimestamp;
+
+    const NOW: i64 = 50_000 * FILETIME_PER_DAY;
 
     fn rec(id: u64, path: &str, size: u64) -> FileRecord {
         FileRecord {
@@ -475,5 +556,50 @@ mod tests {
             orch.categorize_batch(&[rec(1, r"F:\P\Library\x", 10), rec(2, r"F:\P\Assets\y", 10)]);
         assert_eq!(out.stats.records_updated, 1);
         assert_eq!(out.updated[0].category, CategoryId::DevArtifacts);
+    }
+
+    fn rec_dated(id: u64, path: &str, size: u64, days_ago: u64) -> FileRecord {
+        let mut r = rec(id, path, size);
+        r.modified_at = Some(FsTimestamp(NOW - (days_ago as i64) * FILETIME_PER_DAY));
+        r
+    }
+
+    #[test]
+    fn active_unity_library_not_safe_to_bulk() {
+        let det =
+            UnityArtifactsDetector::from_index_paths([r"C:\U\ProjectSettings\ProjectVersion.txt"])
+                .with_now_filetime(NOW);
+        let records = [
+            rec_dated(1, r"C:\U\Assets\Scripts\Player.cs", 100, 7),
+            rec_dated(2, r"C:\U\ProjectSettings\ProjectVersion.txt", 10, 7),
+            rec_dated(3, r"C:\U\Library\ArtifactDB", 9_000_000, 1),
+        ];
+        det.rebuild_activity(&records);
+        let v = det.evaluate(&records[2]).expect("library");
+        assert_eq!(v.safety, SafetyLevel::ReviewRecommended);
+        assert!(v.explanation.contains("активний"), "{}", v.explanation);
+        // mtimes у Library не роблять проєкт активним самі по собі
+        assert!(
+            !det.activity_index()
+                .get(r"C:\U")
+                .is_active(NOW, det.inactive_after_days())
+                || det.activity_index().get(r"C:\U").age_days(NOW) == Some(7)
+        );
+    }
+
+    #[test]
+    fn inactive_unity_library_safe_to_bulk() {
+        let det = UnityArtifactsDetector::from_index_paths([
+            r"C:\OldU\ProjectSettings\ProjectVersion.txt",
+        ])
+        .with_now_filetime(NOW);
+        let records = [
+            rec_dated(1, r"C:\OldU\Assets\x.cs", 10, 400),
+            rec_dated(2, r"C:\OldU\Library\ArtifactDB", 1000, 1),
+        ];
+        det.rebuild_activity(&records);
+        let v = det.evaluate(&records[1]).expect("library");
+        assert_eq!(v.safety, SafetyLevel::SafeToBulk);
+        assert!(v.explanation.contains("неактивний"), "{}", v.explanation);
     }
 }

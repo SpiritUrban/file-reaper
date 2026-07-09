@@ -14,6 +14,10 @@ pub mod keys {
     /// Мінімальний вік у днях: файл «старший за N днів» (OldFiles, ForgottenVideos).
     /// Приклад DoD T-038: 180 (6 міс) → 90 (3 міс).
     pub const MIN_AGE_DAYS: &str = "min_age_days";
+    /// Після скількох днів без правок джерел проєкт вважається **неактивним**
+    /// (T-052, structural / DevArtifacts). Дефолт 90 (3 міс., product.md Сценарій C).
+    /// Активний проєкт → артефакти `ReviewRecommended`, не safe-to-bulk.
+    pub const INACTIVE_AFTER_DAYS: &str = "inactive_after_days";
 }
 
 /// Значення порога, яке UI/IPC передає детектору.

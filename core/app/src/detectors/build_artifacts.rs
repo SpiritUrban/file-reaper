@@ -1,7 +1,8 @@
-//! Розпізнавання build/dist/target/obj за маркерами екосистем (T-050).
+//! Розпізнавання build/dist/target/obj за маркерами екосистем (T-050) +
+//! активність проєкту (T-052).
 //!
-//! DoD: кожен патерн підтверджується **маркерним файлом**, а не лише іменем
-//! папки (architecture.md §6.1 — структурні детектори).
+//! DoD T-050: кожен патерн підтверджується **маркерним файлом**, а не лише
+//! іменем папки (architecture.md §6.1 — структурні детектори).
 //!
 //! | Папка   | Маркери в parent |
 //! |---------|------------------|
@@ -10,7 +11,9 @@
 //! | build   | package.json, CMakeLists.txt, build.gradle(.kts), pom.xml |
 //! | obj     | *.csproj, *.sln (.NET) |
 //!
-//! Без I/O: маркери збираються з шляхів індексу.
+//! DoD T-052: свіжі джерела поза артефактами → ReviewRecommended.
+//!
+//! Без I/O: маркери й дати з індексу.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -19,11 +22,14 @@ use std::sync::RwLock;
 use super::contract::{Detector, DetectorId};
 use super::format::{app_cache_unit_explanation, format_bytes_as_gb};
 use super::node_modules::{file_name, normalize_path, parent_dir};
+use super::project_activity::{append_activity_phrase, ProjectActivityIndex};
+use super::thresholds::{self, keys, ThresholdValue};
 use trashradar_domain::candidate::{
     ByteSize, CandidateId, CandidateUnit, Decision, FileAttributes, FileKind, FileRecord,
     SafetyLevel, Verdict,
 };
 use trashradar_domain::category::CategoryId;
+use trashradar_domain::error::CoreError;
 
 /// Стабільний id детектора.
 pub const DETECTOR_ID: DetectorId = DetectorId::new("dev.build_artifacts");
@@ -123,6 +129,8 @@ pub struct BuildArtifactsDetector {
     enabled: AtomicBool,
     /// project root (parent of build folder) → markers present.
     markers: RwLock<HashMap<String, MarkerFlags>>,
+    /// Активність за датами поза артефактами (T-052).
+    activity: ProjectActivityIndex,
 }
 
 impl BuildArtifactsDetector {
@@ -130,6 +138,7 @@ impl BuildArtifactsDetector {
         Self {
             enabled: AtomicBool::new(true),
             markers: RwLock::new(HashMap::new()),
+            activity: ProjectActivityIndex::new(),
         }
     }
 
@@ -143,6 +152,23 @@ impl BuildArtifactsDetector {
         self.enabled.store(enabled, Ordering::Relaxed);
     }
 
+    pub fn with_now_filetime(self, now: i64) -> Self {
+        self.activity.set_now_filetime(Some(now));
+        self
+    }
+
+    pub fn set_now_filetime(&self, now: Option<i64>) {
+        self.activity.set_now_filetime(now);
+    }
+
+    pub fn inactive_after_days(&self) -> u64 {
+        self.activity.inactive_after_days()
+    }
+
+    pub fn activity_index(&self) -> &ProjectActivityIndex {
+        &self.activity
+    }
+
     pub fn ingest_paths<'a>(&self, paths: impl IntoIterator<Item = &'a str>) {
         let mut map = self.markers.write().expect("markers lock");
         for p in paths {
@@ -154,10 +180,24 @@ impl BuildArtifactsDetector {
 
     pub fn clear_markers(&self) {
         self.markers.write().expect("markers lock").clear();
+        self.activity.clear();
     }
 
     pub fn project_marker_count(&self) -> usize {
         self.markers.read().expect("markers lock").len()
+    }
+
+    /// Перерахувати активність для коренів із маркерами (T-052).
+    pub fn rebuild_activity(&self, records: &[FileRecord]) {
+        let roots: Vec<String> = self
+            .markers
+            .read()
+            .expect("markers lock")
+            .keys()
+            .cloned()
+            .collect();
+        self.activity
+            .rebuild_for_roots(roots.iter().map(|s| s.as_str()), records);
     }
 
     fn project_confirms(&self, project_root: &str, kind: BuildFolderKind) -> bool {
@@ -177,8 +217,21 @@ impl BuildArtifactsDetector {
         }
     }
 
-    /// Згорнути файли в одиниці-папки (T-053 prep).
+    fn safety_and_phrase(&self, artifact_root: &str) -> (SafetyLevel, String) {
+        let project = match parent_dir(artifact_root) {
+            Some(p) => p,
+            None => return (SafetyLevel::SafeToBulk, String::new()),
+        };
+        (
+            self.activity.safety_for(&project),
+            self.activity.explanation_phrase(&project),
+        )
+    }
+
+    /// Згорнути файли в одиниці-папки (T-053 prep). Оновлює активність (T-052).
     pub fn aggregate_units(&self, records: &[FileRecord]) -> Vec<FileRecord> {
+        self.rebuild_activity(records);
+
         #[derive(Default)]
         struct Acc {
             bytes: u64,
@@ -205,7 +258,9 @@ impl BuildArtifactsDetector {
             .filter_map(|(path, acc)| {
                 let kind = acc.kind?;
                 let label = kind.as_str();
-                let explanation = app_cache_unit_explanation(label, acc.bytes, acc.count);
+                let (safety, phrase) = self.safety_and_phrase(&path);
+                let base = app_cache_unit_explanation(label, acc.bytes, acc.count);
+                let explanation = append_activity_phrase(&base, &phrase);
                 Some(FileRecord {
                     candidate_id: CandidateId(stable_id(&path)),
                     path,
@@ -216,7 +271,7 @@ impl BuildArtifactsDetector {
                     kind: FileKind::Other,
                     unit: CandidateUnit::Folder,
                     category: CategoryId::DevArtifacts,
-                    safety: SafetyLevel::SafeToBulk,
+                    safety,
                     decision: Decision::Undecided,
                     detector_id: DETECTOR_ID.as_str().to_string(),
                     explanation,
@@ -250,33 +305,58 @@ impl Detector for BuildArtifactsDetector {
 
     fn evaluate(&self, record: &FileRecord) -> Option<Verdict> {
         let (root, kind) = self.confirmed_root(&record.path)?;
+        let (safety, phrase) = self.safety_and_phrase(&root);
         if record.unit == CandidateUnit::Folder {
             if normalize_path(&record.path) != normalize_path(&root) {
                 return None;
             }
+            let base = format!(
+                "{} · {} (артефакт збірки)",
+                kind.as_str(),
+                format_bytes_as_gb(record.size.0)
+            );
             return Some(Verdict::new(
                 CategoryId::DevArtifacts,
-                format!(
-                    "{} · {} (артефакт збірки)",
-                    kind.as_str(),
-                    format_bytes_as_gb(record.size.0)
-                ),
-                SafetyLevel::SafeToBulk,
+                append_activity_phrase(&base, &phrase),
+                safety,
             ));
         }
         if record.unit != CandidateUnit::File {
             return None;
         }
+        let base = format!(
+            "{} · {} · {}",
+            kind.as_str(),
+            format_bytes_as_gb(record.size.0),
+            root
+        );
         Some(Verdict::new(
             CategoryId::DevArtifacts,
-            format!(
-                "{} · {} · {}",
-                kind.as_str(),
-                format_bytes_as_gb(record.size.0),
-                root
-            ),
-            SafetyLevel::SafeToBulk,
+            append_activity_phrase(&base, &phrase),
+            safety,
         ))
+    }
+
+    fn set_threshold(&self, key: &str, value: ThresholdValue) -> Result<(), CoreError> {
+        match key {
+            keys::INACTIVE_AFTER_DAYS => {
+                let days = value.as_u64().ok_or_else(|| {
+                    thresholds::bad_threshold_type(DETECTOR_ID.as_str(), key, "u64")
+                })?;
+                self.activity.set_inactive_after_days(days);
+                Ok(())
+            }
+            _ => Err(thresholds::unknown_threshold(DETECTOR_ID.as_str(), key)),
+        }
+    }
+
+    fn get_threshold(&self, key: &str) -> Option<ThresholdValue> {
+        match key {
+            keys::INACTIVE_AFTER_DAYS => {
+                Some(ThresholdValue::U64(self.activity.inactive_after_days()))
+            }
+            _ => None,
+        }
     }
 }
 
@@ -330,7 +410,11 @@ fn stable_id(path: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::detectors::format::FILETIME_PER_DAY;
     use crate::detectors::{DetectorOrchestrator, DetectorRegistry};
+    use trashradar_domain::candidate::FsTimestamp;
+
+    const NOW: i64 = 50_000 * FILETIME_PER_DAY;
 
     fn rec(id: u64, path: &str, size: u64) -> FileRecord {
         FileRecord {
@@ -458,5 +542,26 @@ mod tests {
         ]);
         assert_eq!(out.stats.records_updated, 1);
         assert_eq!(out.updated[0].category, CategoryId::DevArtifacts);
+    }
+
+    fn rec_dated(id: u64, path: &str, size: u64, days_ago: u64) -> FileRecord {
+        let mut r = rec(id, path, size);
+        r.modified_at = Some(FsTimestamp(NOW - (days_ago as i64) * FILETIME_PER_DAY));
+        r
+    }
+
+    #[test]
+    fn active_rust_project_target_not_safe_to_bulk() {
+        let det =
+            BuildArtifactsDetector::from_index_paths([r"C:\rs\Cargo.toml"]).with_now_filetime(NOW);
+        let records = [
+            rec_dated(1, r"C:\rs\src\main.rs", 100, 2),
+            rec_dated(2, r"C:\rs\Cargo.toml", 10, 2),
+            rec_dated(3, r"C:\rs\target\release\app.exe", 50_000, 1),
+        ];
+        det.rebuild_activity(&records);
+        let v = det.evaluate(&records[2]).expect("target");
+        assert_eq!(v.safety, SafetyLevel::ReviewRecommended);
+        assert!(v.explanation.contains("активний"), "{}", v.explanation);
     }
 }

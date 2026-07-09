@@ -98,6 +98,7 @@
 | T-050 build/dist/target/obj | ✅ | 2026-07-09 | local | **`detectors/build_artifacts`:** target←Cargo.toml; dist←package.json; build←pkg/cmake/gradle/pom; obj←csproj/sln; без маркера = 0 hits; `aggregate_units`; dev-artifacts.json patterns. DoD: 8 unit. clippy clean. |
 
 | T-051 Unity Library/Temp/Obj | ✅ | 2026-07-09 | local | **`detectors/unity`:** Unity project via ProjectVersion.txt / ProjectSettings / Assets+PS; Library·Temp·Obj only under confirmed root; explanation «перестворюється…»; Windows\Temp не матчиться; aggregate_units. DoD: 7 unit. clippy clean. |
+| T-052 Активність проєкту | ✅ | 2026-07-09 | local | **`detectors/project_activity`:** max mtime (else atime) файлів під project root **поза** артефактними сегментами (node_modules/target/dist/build/obj/Library/Temp/.git); дефолт `inactive_after_days=90` (product C); активний → `ReviewRecommended`, неактивний → `SafeToBulk`; phrase у explanation. Підключено до node_modules/build/unity (`rebuild_activity`, live threshold). DoD: свіжі джерела ≠ safe-to-bulk. 9+5 unit activity/integration. clippy `-D warnings`; fmt. |
 
 ## Легенда
 
