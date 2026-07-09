@@ -91,6 +91,8 @@
 
 | T-047 Детектор «Тимчасові файли» | ✅ | 2026-07-09 | local | **`detectors/temp_files`:** `TempFilesDetector::from_registry` — prefix-match на expanded `temp_files` roots; завжди `SafeToBulk` + `CategoryId::TempFiles`; rebuild_from_registry; app_caches ігноруються. DoD: 8 unit. clippy `-D warnings`. |
 
+| T-048 Детектор «Кеші програм» | ✅ | 2026-07-09 | local | **`detectors/app_caches`:** `AppCachesDetector` — match `app_caches` roots; `evaluate` для файлів; **`aggregate_units`** → Folder-одиниці з Σ size + «Label · N ГБ · M файлів»; safety з реєстру. DoD: 7 unit. clippy `-D warnings`. |
+
 ## Легенда
 
 ✅ виконано й верифіковано · 🔄 в роботі · ⛔ заблоковано (причина в нотатках)

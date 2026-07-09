@@ -6,6 +6,7 @@
 //!
 //! Конкретні детектори MVP: T-039…T-053.
 
+pub mod app_caches;
 pub mod archives;
 mod contract;
 pub mod forgotten_videos;
@@ -18,6 +19,7 @@ mod registry;
 pub mod temp_files;
 pub mod thresholds;
 
+pub use app_caches::{AppCachesDetector, DETECTOR_ID as APP_CACHES_ID};
 pub use archives::{ArchivesDetector, DETECTOR_ID as ARCHIVES_ID};
 pub use contract::{Detector, DetectorHit, DetectorId};
 pub use forgotten_videos::{ForgottenVideosDetector, DETECTOR_ID as FORGOTTEN_VIDEOS_ID};

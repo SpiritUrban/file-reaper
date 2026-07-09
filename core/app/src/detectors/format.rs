@@ -55,6 +55,17 @@ pub fn archive_explanation(bytes: u64) -> String {
     format!("архів {}", format_bytes_as_gb(bytes))
 }
 
+/// Пояснення T-048: одиниця-каталог кешу з сумарним розміром.
+/// «Chrome Cache · 1.20 ГБ · 44000 файлів»
+pub fn app_cache_unit_explanation(label: &str, bytes: u64, file_count: u64) -> String {
+    format!(
+        "{} · {} · {} файлів",
+        label,
+        format_bytes_as_gb(bytes),
+        file_count
+    )
+}
+
 /// Пояснення T-043: інсталятор у Downloads-подібній теці.
 pub fn installer_explanation(bytes: u64) -> String {
     format!(
