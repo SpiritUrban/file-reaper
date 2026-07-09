@@ -148,8 +148,8 @@ impl AppCachesDetector {
         }
 
         let mut units: Vec<FileRecord> = by_root
-            .into_iter()
-            .filter_map(|(_, acc)| {
+            .into_values()
+            .filter_map(|acc| {
                 let root = acc.root?;
                 if acc.count == 0 {
                     return None;
@@ -225,7 +225,11 @@ impl Detector for AppCachesDetector {
                 let expl = if hit.explanation.is_empty() {
                     format!("кеш {} · {}", hit.label, format_bytes_as_gb(record.size.0))
                 } else {
-                    format!("{} · {}", hit.explanation, format_bytes_as_gb(record.size.0))
+                    format!(
+                        "{} · {}",
+                        hit.explanation,
+                        format_bytes_as_gb(record.size.0)
+                    )
                 };
                 Some(Verdict::new(CategoryId::AppCaches, expl, hit.safety))
             }
@@ -303,17 +307,9 @@ mod tests {
         assert_eq!(u.category, CategoryId::AppCaches);
         assert_eq!(u.safety, SafetyLevel::SafeToBulk);
         assert_eq!(u.size.0, 150 * MIB);
-        assert!(
-            u.explanation.contains("Chrome Cache"),
-            "{}",
-            u.explanation
-        );
+        assert!(u.explanation.contains("Chrome Cache"), "{}", u.explanation);
         assert!(u.explanation.contains("ГБ"), "{}", u.explanation);
-        assert!(
-            u.explanation.contains("2 файлів"),
-            "{}",
-            u.explanation
-        );
+        assert!(u.explanation.contains("2 файлів"), "{}", u.explanation);
         assert_eq!(
             u.path,
             r"C:\Users\Ada\AppData\Local\Google\Chrome\User Data\Default\Cache"

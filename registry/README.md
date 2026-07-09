@@ -105,6 +105,12 @@ API: `KnownLocationsRegistry::load_default()` / `load_from_file` / `from_json_st
 
 ---
 
-## `dev-artifacts.json`
+## `dev-artifacts.json` (T-049+)
 
-Каркас для структурних детекторів (T-049+). Схема v1 фіксується разом з T-049.
+Схема v1 — структурні патерни. Поточний запис:
+
+| id | folder | markers | nested_policy |
+|---|---|---|---|
+| `node_modules` | `node_modules` | `package.json` у parent | `outermost_only` |
+
+Реалізація: `trashradar_app::detectors::node_modules` (маркери з шляхів індексу).

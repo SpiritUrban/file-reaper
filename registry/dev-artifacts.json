@@ -1,5 +1,16 @@
 {
-  "$comment": "Каркас (T-001). Схема і наповнення — T-044/T-049…T-051.",
-  "schema_version": 0,
-  "patterns": []
+  "$comment": "Структурні патерни dev-артефактів (T-049+). schema v1: folder + markers. Логіка node_modules — trashradar_app::detectors::node_modules (маркер package.json у батьківській теці; outermost only).",
+  "schema_version": 1,
+  "patterns": [
+    {
+      "id": "node_modules",
+      "folder_name": "node_modules",
+      "markers": ["package.json"],
+      "marker_relation": "parent_directory",
+      "category": "dev_artifacts",
+      "safety": "safe_to_bulk",
+      "nested_policy": "outermost_only",
+      "explanation": "node_modules (перестворюється npm/yarn/pnpm)"
+    }
+  ]
 }
