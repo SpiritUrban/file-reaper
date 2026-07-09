@@ -20,6 +20,7 @@ mod orchestrator;
 mod registry;
 pub mod temp_files;
 pub mod thresholds;
+pub mod unity;
 
 pub use app_caches::{AppCachesDetector, DETECTOR_ID as APP_CACHES_ID};
 pub use archives::{ArchivesDetector, DETECTOR_ID as ARCHIVES_ID};
@@ -37,6 +38,7 @@ pub use orchestrator::{
 pub use registry::DetectorRegistry;
 pub use temp_files::{TempFilesDetector, DETECTOR_ID as TEMP_FILES_ID};
 pub use thresholds::ThresholdValue;
+pub use unity::{UnityArtifactsDetector, DETECTOR_ID as UNITY_ID};
 
 #[cfg(test)]
 mod tests {

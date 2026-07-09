@@ -1,5 +1,5 @@
 {
-  "$comment": "Структурні патерни dev-артефактів. T-049 node_modules; T-050 build/dist/target/obj. Реалізація: detectors::node_modules, detectors::build_artifacts.",
+  "$comment": "Структурні патерни dev-артефактів. T-049 node_modules; T-050 build/*; T-051 Unity. Реалізація: detectors::node_modules, build_artifacts, unity.",
   "schema_version": 1,
   "patterns": [
     {
@@ -58,6 +58,36 @@
       "safety": "safe_to_bulk",
       "nested_policy": "outermost_only",
       "explanation": ".NET obj/ (msbuild intermediate)"
+    },
+    {
+      "id": "unity_library",
+      "folder_name": "Library",
+      "markers": ["ProjectSettings/ProjectVersion.txt", "ProjectSettings/*", "Assets/+ProjectSettings"],
+      "marker_relation": "project_root",
+      "category": "dev_artifacts",
+      "safety": "safe_to_bulk",
+      "nested_policy": "outermost_only",
+      "explanation": "Unity Library (перестворюється при відкритті проєкту)"
+    },
+    {
+      "id": "unity_temp",
+      "folder_name": "Temp",
+      "markers": ["ProjectSettings/ProjectVersion.txt"],
+      "marker_relation": "project_root",
+      "category": "dev_artifacts",
+      "safety": "safe_to_bulk",
+      "nested_policy": "outermost_only",
+      "explanation": "Unity Temp (тимчасові файли редактора)"
+    },
+    {
+      "id": "unity_obj",
+      "folder_name": "Obj",
+      "markers": ["ProjectSettings/ProjectVersion.txt"],
+      "marker_relation": "project_root",
+      "category": "dev_artifacts",
+      "safety": "safe_to_bulk",
+      "nested_policy": "outermost_only",
+      "explanation": "Unity Obj (проміжні файли)"
     }
   ]
 }

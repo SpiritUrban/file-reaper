@@ -116,5 +116,7 @@ API: `KnownLocationsRegistry::load_default()` / `load_from_file` / `from_json_st
 | `js_dist` | `dist` | `package.json` | `outermost_only` |
 | `generic_build` | `build` | package.json / CMake / Gradle / pom | `outermost_only` |
 | `dotnet_obj` | `obj` | `*.csproj` / `*.sln` | `outermost_only` |
+| `unity_library` | `Library` | ProjectSettings / ProjectVersion.txt | `outermost_only` |
+| `unity_temp` / `unity_obj` | `Temp` / `Obj` | той самий Unity project root | `outermost_only` |
 
-Реалізація: `detectors::node_modules`, `detectors::build_artifacts` (маркери з шляхів індексу).
+Реалізація: `detectors::node_modules`, `build_artifacts`, `unity` (маркери з шляхів індексу).
