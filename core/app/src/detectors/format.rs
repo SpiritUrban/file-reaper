@@ -50,6 +50,11 @@ pub fn large_file_explanation(bytes: u64) -> String {
     format_size_gb(bytes)
 }
 
+/// Пояснення T-042: «архів N ГБ».
+pub fn archive_explanation(bytes: u64) -> String {
+    format!("архів {}", format_bytes_as_gb(bytes))
+}
+
 /// Стислий вік українською: «14 дн.», «3 міс.», «2 р.».
 pub fn format_age_uk(days: u64) -> String {
     if days >= 365 {

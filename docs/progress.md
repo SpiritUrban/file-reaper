@@ -79,6 +79,8 @@
 
 | T-041 Детектор «Забуті відео» | ✅ | 2026-07-09 | local | **`detectors/forgotten_videos`:** `ForgottenVideosDetector` — Video ∧ size≥`min_size_bytes` (дефолт 100 МіБ) ∧ age≥`min_age_days` (дефолт 180); explanation «відео N ГБ, останній доступ …» (`forgotten_video_explanation`); обидва пороги live. DoD: 7 unit. clippy `-D warnings`. |
 
+| T-042 Детектор «Архіви» | ✅ | 2026-07-09 | local | **`detectors/archives`:** `ArchivesDetector` — FileKind::Archive ∧ size≥`min_size_bytes` (дефолт **50 МіБ**); explanation «архів N ГБ»; zip/rar/7z/tar/gz + live поріг. DoD: 6 unit. clippy `-D warnings`. |
+
 ## Легенда
 
 ✅ виконано й верифіковано · 🔄 в роботі · ⛔ заблоковано (причина в нотатках)
