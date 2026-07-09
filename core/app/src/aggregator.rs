@@ -60,6 +60,80 @@ impl Aggregator {
     }
 }
 
+/// Живі тотали під час скану: інкрементально ковтає батчі hits (T-055).
+///
+/// DoD: цифри ростуть із батчами; `unique_bytes` збігається з
+/// [`Aggregator::from_primary_records`] по тому ж індексі (той самий набір
+/// reclaimable-файлів, 1× кожен).
+#[derive(Debug, Default, Clone)]
+pub struct LiveTotals {
+    by_candidate: HashMap<u64, CandidateContribution>,
+}
+
+impl LiveTotals {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn clear(&mut self) {
+        self.by_candidate.clear();
+    }
+
+    pub fn candidate_count(&self) -> usize {
+        self.by_candidate.len()
+    }
+
+    /// Злити hits батча (multi-category) у живий стан.
+    pub fn ingest_hits(&mut self, hits: &[DetectorHit], records: &[FileRecord]) {
+        let by_id = index_records(records);
+        for c in contributions_from_hits(hits, &by_id) {
+            self.upsert_contribution(c);
+        }
+    }
+
+    /// Злити вже категоризовані primary-записи (без multi-hit).
+    pub fn ingest_primary(&mut self, records: &[FileRecord]) {
+        for r in records {
+            if r.category == CategoryId::Uncategorized {
+                continue;
+            }
+            self.upsert_contribution(CandidateContribution::new(
+                r.candidate_id,
+                r.size,
+                r.decision,
+                [r.category],
+            ));
+        }
+    }
+
+    fn upsert_contribution(&mut self, c: CandidateContribution) {
+        let id = c.candidate_id.0;
+        if let Some(existing) = self.by_candidate.get_mut(&id) {
+            existing.size = c.size;
+            existing.decision = c.decision;
+            for cat in c.categories {
+                if !existing.categories.contains(&cat) {
+                    existing.categories.push(cat);
+                }
+            }
+        } else {
+            self.by_candidate.insert(id, c);
+        }
+    }
+
+    pub fn summary(&self) -> FreeableSummary {
+        summarize_unique(self.by_candidate.values().cloned())
+    }
+
+    /// DoD T-055: unique-підсумок збігається з перерахунком primary-індексу.
+    pub fn unique_matches_index(&self, index_records: &[FileRecord]) -> bool {
+        let from_live = self.summary();
+        let from_index = Aggregator::from_primary_records(index_records);
+        from_live.unique_bytes == from_index.unique_bytes
+            && from_live.unique_files == from_index.unique_files
+    }
+}
+
 fn index_records(records: &[FileRecord]) -> HashMap<CandidateId, &FileRecord> {
     let mut map = HashMap::with_capacity(records.len());
     for r in records {
@@ -259,5 +333,61 @@ mod tests {
         let summary = Aggregator::from_primary_records(&[a, b]);
         assert_eq!(summary.unique_bytes.0, 30);
         assert_eq!(summary.category_sum_bytes.0, 30);
+    }
+
+    #[test]
+    fn live_totals_grow_across_batches_and_match_index() {
+        // DoD T-055: цифри ростуть під час «скану»; unique = індекс.
+        let mut live = LiveTotals::new();
+        let mut index: Vec<FileRecord> = Vec::new();
+
+        let batch1 = [rec(1, 1000), rec(2, 2000)];
+        let mut reg = DetectorRegistry::new();
+        reg.register(AlwaysHit {
+            id: DetectorId::new("lf"),
+            category: CategoryId::LargeFiles,
+        });
+        let orch = DetectorOrchestrator::new(&reg);
+        let out1 = orch.categorize_batch(&batch1);
+        live.ingest_hits(&out1.hits, &batch1);
+        for r in &out1.updated {
+            index.push(r.clone());
+        }
+        let s1 = live.summary();
+        assert_eq!(s1.unique_bytes.0, 3000);
+        assert!(live.unique_matches_index(&index));
+
+        let batch2 = [rec(3, 500)];
+        let out2 = orch.categorize_batch(&batch2);
+        live.ingest_hits(&out2.hits, &batch2);
+        for r in &out2.updated {
+            index.push(r.clone());
+        }
+        let s2 = live.summary();
+        assert_eq!(s2.unique_bytes.0, 3500);
+        assert_eq!(s2.unique_files, 3);
+        assert!(s2.unique_bytes.0 > s1.unique_bytes.0);
+        assert!(live.unique_matches_index(&index));
+    }
+
+    #[test]
+    fn live_multi_category_still_unique_once() {
+        let mut live = LiveTotals::new();
+        let records = [rec(1, 100)];
+        let hits = [
+            DetectorHit {
+                candidate_id: CandidateId(1),
+                detector_id: DetectorId::new("a"),
+                verdict: Verdict::new(CategoryId::LargeFiles, "a", SafetyLevel::ReviewRecommended),
+            },
+            DetectorHit {
+                candidate_id: CandidateId(1),
+                detector_id: DetectorId::new("b"),
+                verdict: Verdict::new(CategoryId::OldFiles, "b", SafetyLevel::ReviewRecommended),
+            },
+        ];
+        live.ingest_hits(&hits, &records);
+        assert_eq!(live.summary().unique_bytes.0, 100);
+        assert_eq!(live.summary().category_sum_bytes.0, 200);
     }
 }

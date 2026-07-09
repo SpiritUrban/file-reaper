@@ -3,17 +3,20 @@
 //! Бізнес-логіка сесії — `trashradar_app::scan_control`; тут лише
 //! Tauri State, фоновий потік і адаптери MFT/walk.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Runtime, State};
+use trashradar_app::detectors::DetectorOrchestrator;
 use trashradar_app::ports::{HotIndex, ScanEnvironment};
 use trashradar_app::scan_control::{
     run_scan_session, CancellableVolumeScanner, ScanController, ScanProgress, VolumeScanOutcome,
 };
 use trashradar_app::scan_strategy::{choose_scan_strategy, VolumeCapabilities};
 use trashradar_app::workers::CancellationToken;
+use trashradar_app::{mvp_predicate_registry, LiveTotals};
 use trashradar_domain::candidate::{
     CandidateId, CandidateUnit, Decision, FileKind, FileRecord, SafetyLevel,
 };
@@ -31,6 +34,8 @@ use crate::ipc::{record_command, record_command_error};
 pub struct ScanRuntime {
     pub controller: Arc<ScanController>,
     pub index: Arc<InMemoryIndex>,
+    /// Останній live-підсумок (T-055) — для health/діагностики.
+    pub last_totals: Arc<Mutex<LiveTotals>>,
 }
 
 impl ScanRuntime {
@@ -38,6 +43,7 @@ impl ScanRuntime {
         Self {
             controller: Arc::new(ScanController::new()),
             index: Arc::new(InMemoryIndex::new()),
+            last_totals: Arc::new(Mutex::new(LiveTotals::new())),
         }
     }
 }
@@ -332,11 +338,23 @@ pub async fn scan_start<R: Runtime>(
 
     let controller = Arc::clone(&state.controller);
     let index = Arc::clone(&state.index);
+    let last_totals = Arc::clone(&state.last_totals);
     let app2 = app.clone();
 
     if let Err(e) = thread::Builder::new()
         .name("trashradar-scan".into())
         .spawn(move || {
+            // Свіжий live-стан на старті сесії (T-055).
+            if let Ok(mut live) = last_totals.lock() {
+                live.clear();
+            }
+            let farm = mvp_predicate_registry();
+            let orch = DetectorOrchestrator::new(&farm);
+            let mut throttle = events::AggregateThrottle::new_at(
+                Duration::from_millis(100), // ≤10/с (T-006)
+                Instant::now(),
+            );
+
             let scanner = AutoVolumeScanner;
             let result = run_scan_session(
                 &volumes,
@@ -344,8 +362,41 @@ pub async fn scan_start<R: Runtime>(
                 &scanner,
                 &token,
                 |p| emit_progress(&app2, &p),
-                |_vol, batch| index.insert_batch(batch),
+                |_vol, batch| {
+                    // 1) сирі записи в індекс
+                    index.insert_batch(batch.clone())?;
+                    // 2) детектори → primary + hits
+                    let cat = orch.categorize_batch(&batch);
+                    if !cat.updated.is_empty() {
+                        index.upsert_batch(cat.updated)?;
+                    }
+                    // 3) live totals + throttled UI events (≤10/с)
+                    if let Ok(mut live) = last_totals.lock() {
+                        live.ingest_hits(&cat.hits, &batch);
+                        let summary = live.summary();
+                        if let Some(snap) = throttle.observe(Instant::now(), summary) {
+                            events::emit_cleanup_totals(&app2, &snap);
+                        }
+                    }
+                    Ok(())
+                },
             );
+            // Фінальний snapshot без втрати підсумку (T-055 / T-006 flush).
+            let _ = throttle.flush(Instant::now());
+            if let Ok(live) = last_totals.lock() {
+                let summary = live.summary();
+                events::emit_cleanup_totals(&app2, &summary);
+                // InMemoryIndex::get_all — inherent Vec; trait HotIndex returns Result.
+                let all = index.get_all();
+                let matches = live.unique_matches_index(&all);
+                tracing::info!(
+                    reclaimable = summary.unique_bytes.0,
+                    unique_files = summary.unique_files,
+                    matches_index = matches,
+                    "live totals після скану"
+                );
+                debug_assert!(matches, "T-055: live unique має збігатися з індексом");
+            }
             match &result {
                 Ok(summary) => tracing::info!(
                     files = summary.files_indexed,

@@ -14,6 +14,7 @@ pub mod change_monitor;
 pub mod detectors;
 pub mod elevation;
 pub mod location_registry;
+pub mod mvp_farm;
 pub mod ports;
 pub mod scan_control;
 pub mod scan_strategy;
@@ -21,5 +22,6 @@ pub mod usn_apply;
 pub mod usn_fallback;
 pub mod workers;
 
-pub use aggregator::Aggregator;
+pub use aggregator::{Aggregator, LiveTotals};
+pub use mvp_farm::mvp_predicate_registry;
 pub use trashradar_domain::aggregate::{CandidateContribution, CategoryRollup, FreeableSummary};

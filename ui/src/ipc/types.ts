@@ -57,12 +57,17 @@ export interface CategorySummary {
   countUnit: "files" | "groups" | "folders";
 }
 
-/** Головна цифра продукту + розбивка (подія cleanup.total_updated). */
+/** Головна цифра продукту + розбивка (подія cleanup.total_updated, T-055). */
 export interface CleanupTotal {
   /** Сума УНІКАЛЬНИХ кандидатів — чесна цифра (T-054). */
   reclaimableBytes: number;
+  /** Кількість унікальних reclaimable-файлів. */
+  uniqueFiles: number;
   categories: CategorySummary[];
 }
+
+/** Подія category.updated (T-055) — один рядок Sidebar. */
+export type CategoryUpdatedEvent = CategorySummary;
 
 export interface ScanProgress {
   volume: string;

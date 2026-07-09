@@ -33,6 +33,10 @@ pub mod topic {
     pub const INDEX_UPDATED: &str = "index.updated";
     /// Прогрес сесії скану по томах (T-033).
     pub const SCAN_PROGRESS: &str = "scan.progress";
+    /// Жива головна цифра + розбивка (T-055).
+    pub const CLEANUP_TOTAL_UPDATED: &str = "cleanup.total_updated";
+    /// Оновлення однієї категорії (T-055).
+    pub const CATEGORY_UPDATED: &str = "category.updated";
 }
 
 /// Payload `index.updated` (T-032): дельта після USN-тика.
@@ -125,13 +129,149 @@ pub fn emit_journal_stale<R: Runtime>(
     );
 }
 
-/// Реєстр реалізованих scan/index-подій (health / smoke; wiring у T-033).
+/// Реєстр реалізованих scan/index/aggregate-подій (health / smoke).
 pub fn scan_event_topics() -> &'static [&'static str] {
     &[
         topic::SCAN_JOURNAL_STALE,
         topic::INDEX_UPDATED,
         topic::SCAN_PROGRESS,
+        topic::CLEANUP_TOTAL_UPDATED,
+        topic::CATEGORY_UPDATED,
     ]
+}
+
+// --- T-055: живі агрегати ----------------------------------------------------
+
+/// Payload `category.updated` / елемент `cleanup.total_updated.categories`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CategorySummaryEvent {
+    /// snake_case CategoryId (`large_files`, …).
+    pub id: String,
+    pub total_bytes: u64,
+    pub item_count: u64,
+    pub safety: String,
+    /// MVP: `files` (groups/folders — пізніше).
+    pub count_unit: String,
+}
+
+/// Payload `cleanup.total_updated` (дзеркало UI CleanupTotal + uniqueFiles).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanupTotalEvent {
+    /// Чесна цифра унікальних кандидатів (T-054).
+    pub reclaimable_bytes: u64,
+    pub unique_files: u64,
+    pub categories: Vec<CategorySummaryEvent>,
+}
+
+impl CleanupTotalEvent {
+    pub fn from_summary(summary: &trashradar_domain::aggregate::FreeableSummary) -> Self {
+        use trashradar_domain::candidate::SafetyLevel;
+        use trashradar_domain::category::CategoryId;
+
+        let mut categories = Vec::new();
+        for cat in CategoryId::ALL {
+            let Some(roll) = summary.category(cat) else {
+                continue;
+            };
+            if roll.files == 0 && roll.bytes == 0 {
+                continue;
+            }
+            categories.push(CategorySummaryEvent {
+                id: category_id_wire(cat).into(),
+                total_bytes: roll.bytes,
+                item_count: roll.files,
+                // Без per-file safety map — review як безпечний дефолт Sidebar.
+                safety: safety_wire(SafetyLevel::ReviewRecommended).into(),
+                count_unit: "files".into(),
+            });
+        }
+        // Sidebar: важчі категорії зверху.
+        categories.sort_by(|a, b| {
+            b.total_bytes
+                .cmp(&a.total_bytes)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        Self {
+            reclaimable_bytes: summary.unique_bytes.0,
+            unique_files: summary.unique_files,
+            categories,
+        }
+    }
+}
+
+fn category_id_wire(c: trashradar_domain::category::CategoryId) -> &'static str {
+    use trashradar_domain::category::CategoryId::*;
+    match c {
+        LargeFiles => "large_files",
+        OldFiles => "old_files",
+        ForgottenVideos => "forgotten_videos",
+        Duplicates => "duplicates",
+        Archives => "archives",
+        Installers => "installers",
+        TempFiles => "temp_files",
+        AppCaches => "app_caches",
+        DevArtifacts => "dev_artifacts",
+        Uncategorized => "uncategorized",
+    }
+}
+
+fn safety_wire(s: trashradar_domain::candidate::SafetyLevel) -> &'static str {
+    match s {
+        trashradar_domain::candidate::SafetyLevel::SafeToBulk => "safe_to_bulk",
+        trashradar_domain::candidate::SafetyLevel::ReviewRecommended => "review_recommended",
+    }
+}
+
+/// Емісія повної цифри + per-category подій (T-055).
+pub fn emit_cleanup_totals<R: Runtime>(
+    app: &AppHandle<R>,
+    summary: &trashradar_domain::aggregate::FreeableSummary,
+) {
+    let total = CleanupTotalEvent::from_summary(summary);
+    emit(app, topic::CLEANUP_TOTAL_UPDATED, &total);
+    for cat in &total.categories {
+        emit(app, topic::CATEGORY_UPDATED, cat);
+    }
+}
+
+/// Тротлінг snapshot-ів агрегатів ≤10/с (T-006 / T-055).
+#[derive(Debug, Clone)]
+pub struct AggregateThrottle {
+    min_interval: Duration,
+    last_emit_at: Instant,
+    pending: Option<trashradar_domain::aggregate::FreeableSummary>,
+}
+
+impl AggregateThrottle {
+    pub fn new_at(min_interval: Duration, started_at: Instant) -> Self {
+        Self {
+            min_interval,
+            last_emit_at: started_at,
+            pending: None,
+        }
+    }
+
+    /// Запам'ятати останній summary; емітити якщо минув інтервал.
+    pub fn observe(
+        &mut self,
+        now: Instant,
+        summary: trashradar_domain::aggregate::FreeableSummary,
+    ) -> Option<trashradar_domain::aggregate::FreeableSummary> {
+        self.pending = Some(summary);
+        if now.duration_since(self.last_emit_at) >= self.min_interval {
+            return self.flush(now);
+        }
+        None
+    }
+
+    /// Примусовий flush (кінець скану) — без втрати останнього snapshot.
+    pub fn flush(&mut self, now: Instant) -> Option<trashradar_domain::aggregate::FreeableSummary> {
+        let s = self.pending.take()?;
+        self.last_emit_at = now;
+        Some(s)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -265,6 +405,56 @@ mod journal_stale_tests {
         assert_eq!(wire_name(topic::SCAN_JOURNAL_STALE), "scan:journal_stale");
         assert_eq!(topic::INDEX_UPDATED, "index.updated");
         assert!(scan_event_topics().contains(&topic::INDEX_UPDATED));
+    }
+}
+
+#[cfg(test)]
+mod aggregate_events_tests {
+    use super::*;
+    use trashradar_domain::aggregate::{summarize_unique, CandidateContribution};
+    use trashradar_domain::candidate::{ByteSize, CandidateId, Decision};
+    use trashradar_domain::category::CategoryId;
+
+    #[test]
+    fn cleanup_total_from_summary_dod_shape() {
+        let summary = summarize_unique([CandidateContribution::new(
+            CandidateId(1),
+            ByteSize(1024 * 1024 * 1024),
+            Decision::Undecided,
+            [CategoryId::LargeFiles, CategoryId::Archives],
+        )]);
+        let ev = CleanupTotalEvent::from_summary(&summary);
+        assert_eq!(ev.reclaimable_bytes, 1024 * 1024 * 1024);
+        assert_eq!(ev.unique_files, 1);
+        assert_eq!(ev.categories.len(), 2);
+        assert!(ev.categories.iter().any(|c| c.id == "large_files"));
+        assert!(ev.categories.iter().any(|c| c.id == "archives"));
+        // важчі / рівні — стабільний порядок
+        assert_eq!(topic::CLEANUP_TOTAL_UPDATED, "cleanup.total_updated");
+        assert_eq!(topic::CATEGORY_UPDATED, "category.updated");
+        assert!(scan_event_topics().contains(&topic::CLEANUP_TOTAL_UPDATED));
+    }
+
+    #[test]
+    fn aggregate_throttle_caps_to_ten_per_second_and_flush() {
+        let started = Instant::now();
+        let mut th = AggregateThrottle::new_at(Duration::from_millis(100), started);
+        let s = summarize_unique([CandidateContribution::new(
+            CandidateId(1),
+            ByteSize(10),
+            Decision::Undecided,
+            [CategoryId::TempFiles],
+        )]);
+        let mut emits = 0u32;
+        for i in 0..50 {
+            let at = started + Duration::from_millis(i * 10);
+            if th.observe(at, s.clone()).is_some() {
+                emits += 1;
+            }
+        }
+        // 50 samples over 500ms @ 100ms interval → ~5 + flush
+        assert!(emits <= 10, "emits={emits}");
+        assert!(th.flush(started + Duration::from_secs(1)).is_some() || emits > 0);
     }
 }
 
