@@ -240,11 +240,63 @@ pub struct VideoMetadata {
     pub height: u32,
 }
 
+/// Рекомендована кількість кадрів скраб-смуги (architecture.md §5.2: 10–20).
+pub const DEFAULT_SCRUB_FRAME_COUNT: u32 = 16;
+
+/// Скраб-смуга кадрів відео (T-072): `frame_count` кадрів, рівномірно
+/// розподілених по таймлайну (кадр `i` ≈ момент `duration * i / frame_count`),
+/// одним суцільним буфером BGRA — кадри складені послідовно, зріз кадру `i`:
+/// `bgra[i * frame_bytes() .. (i + 1) * frame_bytes()]`.
+///
+/// Скраб у UI (T-120/T-124) лише гортає готові зрізи — відео на льоту
+/// не декодується.
+#[derive(Clone)]
+pub struct ScrubStrip {
+    /// Ширина одного кадру в пікселях.
+    pub frame_width: u32,
+    /// Висота одного кадру в пікселях.
+    pub frame_height: u32,
+    /// Фактична кількість кадрів у смузі (може бути меншою за запитану
+    /// для дуже коротких відео).
+    pub frame_count: u32,
+    /// Пікселі BGRA всіх кадрів послідовно, `frame_count * frame_bytes()` байтів.
+    pub bgra: Vec<u8>,
+}
+
+impl ScrubStrip {
+    /// Розмір одного кадру в байтах.
+    pub fn frame_bytes(&self) -> usize {
+        (self.frame_width as usize) * (self.frame_height as usize) * 4
+    }
+
+    /// Зріз пікселів кадру `index` (`None` поза межами смуги).
+    pub fn frame_slice(&self, index: u32) -> Option<&[u8]> {
+        if index >= self.frame_count {
+            return None;
+        }
+        let size = self.frame_bytes();
+        let start = (index as usize) * size;
+        self.bgra.get(start..start + size)
+    }
+}
+
+impl std::fmt::Debug for ScrubStrip {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Не друкуємо мегабайти пікселів — лише геометрію смуги.
+        f.debug_struct("ScrubStrip")
+            .field("frame_width", &self.frame_width)
+            .field("frame_height", &self.frame_height)
+            .field("frame_count", &self.frame_count)
+            .field("bytes", &self.bgra.len())
+            .finish()
+    }
+}
+
 /// Джерело кадрів відео — ланка ланцюжка превью для відеофайлів
 /// (architecture.md §5.2: «відео — витяг ключових кадрів»).
 ///
-/// Реалізація: `preview` (T-071, ffmpeg-функціональність). Порт
-/// платформонезалежний; скраб-смуга 10–20 кадрів — розширення T-072.
+/// Реалізація: `preview` (T-071 кадр/тривалість, T-072 скраб-смуга;
+/// ffmpeg-функціональність). Порт платформонезалежний.
 ///
 /// Контракт `Ok(None)` — як у [`ThumbnailSource`]: файл не розпізнано
 /// як відео або декодер недоступний → викликач рендерить типізовану
@@ -256,6 +308,15 @@ pub trait VideoFrameSource: Send + Sync {
     /// Ключовий кадр для мініатюри плитки, вписаний у квадрат `max_edge`
     /// зі збереженням пропорцій (лише даунскейл).
     fn key_frame(&self, path: &str, max_edge: u32) -> Result<Option<RawThumbnail>, CoreError>;
+
+    /// Скраб-смуга з `frames` кадрів по таймлайну, кожен вписаний у квадрат
+    /// `max_edge` (DoD T-072: генерується одним проходом декодування).
+    fn scrub_strip(
+        &self,
+        path: &str,
+        max_edge: u32,
+        frames: u32,
+    ) -> Result<Option<ScrubStrip>, CoreError>;
 }
 
 /// Єдиний шлюз деструктивних операцій з FS (move/restore/purge).

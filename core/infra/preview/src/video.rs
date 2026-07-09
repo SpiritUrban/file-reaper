@@ -17,7 +17,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use trashradar_app::ports::{RawThumbnail, VideoFrameSource, VideoMetadata};
+use trashradar_app::ports::{RawThumbnail, ScrubStrip, VideoFrameSource, VideoMetadata};
 use trashradar_domain::error::CoreError;
 
 use crate::image::fit_within;
@@ -111,6 +111,63 @@ impl VideoFrameSource for FfmpegVideoFrameSource {
             }
         }
         Ok(None)
+    }
+
+    fn scrub_strip(
+        &self,
+        path: &str,
+        max_edge: u32,
+        frames: u32,
+    ) -> Result<Option<ScrubStrip>, CoreError> {
+        if path.is_empty() {
+            return Err(CoreError::invalid_argument("Порожній шлях до відеофайла."));
+        }
+        let edge = max_edge.max(1);
+        let frames = clamp_scrub_frames(frames);
+        let Some(meta) = self.probe(path)? else {
+            return Ok(None);
+        };
+        let (out_w, out_h) = fit_within(meta.width, meta.height, edge);
+
+        // Один прохід декодування (DoD T-072): один запуск ffmpeg без seek —
+        // фільтр `fps=frames/duration` семплить кадри рівномірно по таймлайну
+        // (кадр i ≈ момент duration·i/frames), `-frames:v` — стеля кількості.
+        let filter = build_scrub_filter(frames, meta.duration_ms, out_w, out_h);
+        let frames_arg = frames.to_string();
+        let output = self.run(&[
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            path,
+            "-an",
+            "-sn",
+            "-frames:v",
+            &frames_arg,
+            "-vf",
+            &filter,
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "bgra",
+            "pipe:1",
+        ]);
+        let Some(output) = output else {
+            return Ok(None);
+        };
+
+        let frame_bytes = (out_w as usize) * (out_h as usize) * 4;
+        let len = output.stdout.len();
+        // Строгий контракт буфера: лише цілі кадри, хоча б один.
+        if !output.status.success() || len == 0 || len % frame_bytes != 0 {
+            return Ok(None);
+        }
+        Ok(Some(ScrubStrip {
+            frame_width: out_w,
+            frame_height: out_h,
+            frame_count: (len / frame_bytes) as u32,
+            bgra: output.stdout,
+        }))
     }
 }
 
@@ -248,6 +305,21 @@ fn format_seek(ms: u64) -> String {
     format!("{}.{:03}", ms / 1000, ms % 1000)
 }
 
+/// Межі кількості кадрів скраб-смуги (architecture.md §5.2: 10–20;
+/// нижня межа 2 — щоб «смуга» завжди мала рух таймлайну).
+fn clamp_scrub_frames(frames: u32) -> u32 {
+    frames.clamp(2, 20)
+}
+
+/// Фільтр одного проходу для смуги: рівномірний семплінг `frames` кадрів
+/// по всій тривалості + даунскейл. Частота — цілим дробом `frames*1000 / ms`
+/// (без плаваючої коми в аргументах ffmpeg).
+fn build_scrub_filter(frames: u32, duration_ms: u64, out_w: u32, out_h: u32) -> String {
+    let num = (frames as u64) * 1000;
+    let den = duration_ms.max(1);
+    format!("fps={num}/{den},scale={out_w}:{out_h}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -329,6 +401,41 @@ Input #0, mp3, from 'song.mp3':
             .key_frame("whatever.mp4", 96)
             .expect("no error")
             .is_none());
+        assert!(src
+            .scrub_strip("whatever.mp4", 96, 12)
+            .expect("no error")
+            .is_none());
+    }
+
+    #[test]
+    fn scrub_frames_clamped_to_spec_range() {
+        assert_eq!(clamp_scrub_frames(0), 2);
+        assert_eq!(clamp_scrub_frames(16), 16);
+        assert_eq!(clamp_scrub_frames(100), 20);
+    }
+
+    #[test]
+    fn scrub_filter_samples_uniformly_without_floats() {
+        assert_eq!(
+            build_scrub_filter(12, 4_000, 96, 72),
+            "fps=12000/4000,scale=96:72"
+        );
+        // Нульова тривалість не дає ділення на нуль.
+        assert_eq!(build_scrub_filter(16, 0, 64, 36), "fps=16000/1,scale=64:36");
+    }
+
+    #[test]
+    fn scrub_strip_frame_slicing() {
+        let strip = ScrubStrip {
+            frame_width: 2,
+            frame_height: 1,
+            frame_count: 3,
+            bgra: (0..24).collect(),
+        };
+        assert_eq!(strip.frame_bytes(), 8);
+        assert_eq!(strip.frame_slice(0).unwrap(), &[0, 1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(strip.frame_slice(2).unwrap()[0], 16);
+        assert!(strip.frame_slice(3).is_none());
     }
 
     /// DoD T-071 (потребує реального ffmpeg: `TRASHRADAR_FFMPEG` або PATH):
@@ -411,6 +518,67 @@ Input #0, mp3, from 'song.mp3':
             .probe(&bogus.to_string_lossy())
             .expect("probe call")
             .is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// DoD T-072 (потребує реального ffmpeg): смуга 10–20 кадрів по
+    /// таймлайну генерується **одним** запуском ffmpeg (один прохід
+    /// декодування, без per-frame seek); кадри покривають таймлайн.
+    #[test]
+    #[ignore = "DoD: потребує бінарника ffmpeg (TRASHRADAR_FFMPEG або PATH)"]
+    fn real_video_scrub_strip_in_single_pass() {
+        let src = FfmpegVideoFrameSource::new();
+        assert!(
+            src.is_available(),
+            "встановіть ffmpeg або вкажіть TRASHRADAR_FFMPEG"
+        );
+
+        let dir = std::env::temp_dir().join("tr_t072_scrub");
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("clip.mp4");
+        let out_str = out.to_string_lossy().to_string();
+        let status = src
+            .run(&[
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=duration=4:size=320x240:rate=10",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:v",
+                "libx264",
+                &out_str,
+            ])
+            .expect("ffmpeg run");
+        assert!(status.status.success(), "генерація не вдалася");
+
+        let strip = src
+            .scrub_strip(&out_str, 96, 12)
+            .expect("scrub call")
+            .expect("очікували смугу кадрів");
+
+        // Геометрія: 12 кадрів 96×72 (даунскейл 320×240 → fit 96).
+        assert_eq!((strip.frame_width, strip.frame_height), (96, 72));
+        assert_eq!(strip.frame_count, 12, "12 кадрів у межах 10–20 за §5.2");
+        assert_eq!(
+            strip.bgra.len(),
+            strip.frame_bytes() * strip.frame_count as usize,
+            "буфер — рівно цілі кадри"
+        );
+
+        // Кадри покривають таймлайн, а не один задубльований кадр:
+        // testsrc має рухомий лічильник — перший і останній кадри різняться.
+        let first = strip.frame_slice(0).unwrap();
+        let last = strip.frame_slice(strip.frame_count - 1).unwrap();
+        assert_ne!(first, last, "кадри мають відрізнятися вздовж таймлайну");
+
+        // Запит поза межами → None, без панік.
+        assert!(strip.frame_slice(strip.frame_count).is_none());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
