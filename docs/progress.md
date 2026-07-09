@@ -111,6 +111,7 @@
 | T-062 Кеш хешів size+mtime | ✅ | 2026-07-09 | local | **Domain:** `FileHashCacheEntry` + validity size+mtime + path normalize. **App:** порт `HashCache`; `MemoryHashCache`/`CountingHasher`; stage2/3 `*_cached` + disk_reads/cache_hits; cascade `with_cache`. **index-sqlite v3:** `file_hash_cache` + `ThreadSafeHashCache` (Mutex). DoD: 2-й прогін cascade partial/full disk_reads=0 (лічильник). clippy; fmt. |
 | T-063 Ліміт I/O на том | ✅ | 2026-07-09 | local | **App `volume_limit`:** `VolumeIoGate` (семафор per drive letter, дефолт 2); `volume_from_path` (C:\ / \\?\C:\); RAII permit. **stage2/3:** disk-read під gate (`*_gated`). DoD: same volume peak ≤ ceiling; C+D limit=1 → both peak=1 (parallel). 4 unit + 1 stage3. clippy; fmt. |
 | T-064 Пріоритет груп за reclaim | ✅ | 2026-07-09 | local | **Domain:** `prioritize_partial_groups` / `prioritize_exact_size_groups` / `reclaim_order_of_partial_groups`. **stage2:** size-групи сортуються перед partial. **stage3:** partial-групи сортуються перед full; `FullHashStageResult.group_queue_order` = reclaim desc (DoD «логи»). Test: unsorted input → `[2000,100,10]`. clippy; fmt. |
+| T-065 Keep policy ✓/╳ | ✅ | 2026-07-09 | local | **Domain:** `KeepPolicy` (oldest/newest/outside Downloads/shortest path), `DuplicateRole` ✓/╳, `MarkedDuplicateGroup` + `mark_duplicate_members` / `mark_content_hash_group`. **App:** `mark_confirmed_groups` з FileRecord. **UI types:** KeepPolicy/MarkedDuplicate*. DoD: рівно 1 Keep; Downloads програє поза; markup symbols. clippy; fmt. |
 
 ## Легенда
 

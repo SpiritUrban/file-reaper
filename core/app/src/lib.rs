@@ -32,15 +32,18 @@ pub use decisions::{
 };
 pub use disk_forecast::{marked_unique_bytes, DiskForecast, QuarantineHeld};
 pub use duplicates::{
-    default_file_workers, estimated_partial_read, hash_targets_from_records, run_duplicate_cascade,
-    run_duplicate_cascade_default, run_duplicate_cascade_with_cache, run_full_hash_stage,
-    run_full_hash_stage_cached, run_full_hash_stage_gated, run_partial_hash_stage,
-    run_partial_hash_stage_cached, run_partial_hash_stage_gated, run_size_stage,
-    run_size_stage_from_index, spawn_duplicate_cascade, spawn_full_hash_stage,
-    spawn_partial_hash_stage, volume_from_path, CascadeResult, CountingHasher, FullHashStageResult,
-    HashTarget, MapHasher, MemoryHashCache, PartialHashStageResult, SizeStageResult, VolumeIoGate,
-    DEFAULT_MAX_CONCURRENT_READS_PER_VOLUME,
+    default_file_workers, estimated_partial_read, hash_targets_from_records, mark_confirmed_groups,
+    mark_group_with_records, run_duplicate_cascade, run_duplicate_cascade_default,
+    run_duplicate_cascade_with_cache, run_full_hash_stage, run_full_hash_stage_cached,
+    run_full_hash_stage_gated, run_partial_hash_stage, run_partial_hash_stage_cached,
+    run_partial_hash_stage_gated, run_size_stage, run_size_stage_from_index,
+    spawn_duplicate_cascade, spawn_full_hash_stage, spawn_partial_hash_stage, volume_from_path,
+    CascadeResult, CountingHasher, FullHashStageResult, HashTarget, MapHasher, MemoryHashCache,
+    PartialHashStageResult, SizeStageResult, VolumeIoGate, DEFAULT_MAX_CONCURRENT_READS_PER_VOLUME,
 };
 pub use mvp_farm::mvp_predicate_registry;
 pub use trashradar_domain::aggregate::{CandidateContribution, CategoryRollup, FreeableSummary};
+pub use trashradar_domain::duplicates::{
+    DuplicateRole, KeepPolicy, MarkedDuplicateGroup, MarkedDuplicateMember,
+};
 pub use trashradar_domain::forecast::{CleanupForecast, ForecastInputs, VolumeUsage};

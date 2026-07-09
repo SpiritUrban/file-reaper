@@ -69,6 +69,35 @@ export interface CleanupTotal {
 /** Подія category.updated (T-055) — один рядок Sidebar. */
 export type CategoryUpdatedEvent = CategorySummary;
 
+/** Політика «який залишити» у групі дублікатів (T-065). */
+export type KeepPolicy =
+  | "prefer_oldest_modified"
+  | "prefer_newest_modified"
+  | "prefer_outside_downloads"
+  | "prefer_shortest_path";
+
+/** Роль екземпляра: ✓ keep / ╳ reap (T-065 / T-126). */
+export type DuplicateRole = "keep" | "reap";
+
+/** Член групи з готовою розміткою з Core. */
+export interface MarkedDuplicateMember {
+  candidateId: number;
+  path: string;
+  role: DuplicateRole;
+  /** true = ✓, false = ╳ */
+  keep: boolean;
+}
+
+/** Підтверджена група дублікатів з дефолтною розміткою (T-065). */
+export interface MarkedDuplicateGroup {
+  size: number;
+  contentHash: string;
+  members: MarkedDuplicateMember[];
+  keepId: number;
+  policy: KeepPolicy;
+  potentialReclaimBytes: number;
+}
+
 /**
  * Подія duplicates.cascade_updated (T-061).
  * Після stage 2: confidence=preliminary, refining=true («уточнюється»).

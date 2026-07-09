@@ -443,6 +443,257 @@ pub struct DuplicatesCategoryState {
     pub cancelled: bool,
 }
 
+// ─── Політика «який залишити» (T-065) ────────────────────────────────────────
+
+/// Налаштовувана політика дефолтного Keep у групі дублікатів (architecture.md §4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum KeepPolicy {
+    /// Найстаріший `modified_at` (немає дати → гірший); тай-брейк — шлях.
+    #[default]
+    PreferOldestModified,
+    /// Найсвіжіший `modified_at`.
+    PreferNewestModified,
+    /// Поза Downloads/Завантаження, інакше як [`PreferOldestModified`].
+    PreferOutsideDownloads,
+    /// Найкоротший повний шлях (часто «кореневе» розташування).
+    PreferShortestPath,
+}
+
+/// Роль екземпляра в групі: UI ✓ / ╳ (T-065 / T-126).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DuplicateRole {
+    /// Залишити (✓).
+    Keep,
+    /// Кандидат на reap (╳).
+    Reap,
+}
+
+impl DuplicateRole {
+    /// Символ розмітки для UI/логів.
+    pub fn mark_symbol(self) -> char {
+        match self {
+            DuplicateRole::Keep => '✓',
+            DuplicateRole::Reap => '╳',
+        }
+    }
+
+    pub fn is_keep(self) -> bool {
+        matches!(self, DuplicateRole::Keep)
+    }
+}
+
+/// Член групи з контекстом для політики (шлях + mtime).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DuplicateMemberRef {
+    pub candidate_id: CandidateId,
+    pub path: String,
+    pub modified_at: Option<FsTimestamp>,
+}
+
+/// Член після застосування політики — готова розмітка ✓/╳.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarkedDuplicateMember {
+    pub candidate_id: CandidateId,
+    pub path: String,
+    pub role: DuplicateRole,
+    /// `true` = ✓, `false` = ╳ (зручно для UI без enum).
+    pub keep: bool,
+}
+
+/// Підтверджена група з дефолтною розміткою Keep/Reap.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarkedDuplicateGroup {
+    pub size: ByteSize,
+    pub content_hash: ContentHash,
+    pub members: Vec<MarkedDuplicateMember>,
+    pub keep_id: CandidateId,
+    pub policy: KeepPolicy,
+    pub potential_reclaim_bytes: u64,
+}
+
+impl MarkedDuplicateGroup {
+    /// Рядок розмітки «✓ path / ╳ path …» (логи / debug UI).
+    pub fn markup_line(&self) -> String {
+        self.members
+            .iter()
+            .map(|m| format!("{} {}", m.role.mark_symbol(), m.path))
+            .collect::<Vec<_>>()
+            .join(" · ")
+    }
+}
+
+/// Downloads-подібний сегмент шляху (як installers detector).
+pub fn is_downloads_like_path(path: &str) -> bool {
+    let lower = path.replace('/', "\\").to_ascii_lowercase();
+    lower
+        .split('\\')
+        .any(|seg| matches!(seg, "downloads" | "download" | "завантаження" | "загрузки"))
+}
+
+/// Обрати `candidate_id`, який Keep за політикою. Інваріант: ≥1 член.
+pub fn choose_keep_member(members: &[DuplicateMemberRef], policy: KeepPolicy) -> CandidateId {
+    assert!(
+        !members.is_empty(),
+        "duplicate group must have at least one member"
+    );
+    if members.len() == 1 {
+        return members[0].candidate_id;
+    }
+
+    let mut best = &members[0];
+    for m in &members[1..] {
+        if member_better(m, best, policy) {
+            best = m;
+        }
+    }
+    best.candidate_id
+}
+
+fn member_better(a: &DuplicateMemberRef, b: &DuplicateMemberRef, policy: KeepPolicy) -> bool {
+    match policy {
+        KeepPolicy::PreferOldestModified => cmp_oldest_modified(a, b),
+        KeepPolicy::PreferNewestModified => cmp_newest_modified(a, b),
+        KeepPolicy::PreferOutsideDownloads => {
+            let a_dl = is_downloads_like_path(&a.path);
+            let b_dl = is_downloads_like_path(&b.path);
+            match (a_dl, b_dl) {
+                (false, true) => true, // a outside, b in Downloads → a better
+                (true, false) => false,
+                _ => cmp_oldest_modified(a, b),
+            }
+        }
+        KeepPolicy::PreferShortestPath => {
+            let al = a.path.len();
+            let bl = b.path.len();
+            if al != bl {
+                return al < bl;
+            }
+            path_tie_break(a, b)
+        }
+    }
+}
+
+/// true якщо `a` старіший/кращий за `b` для PreferOldestModified.
+fn cmp_oldest_modified(a: &DuplicateMemberRef, b: &DuplicateMemberRef) -> bool {
+    match (a.modified_at, b.modified_at) {
+        (Some(am), Some(bm)) if am != bm => am < bm,
+        (Some(_), None) => true, // known age beats unknown
+        (None, Some(_)) => false,
+        _ => path_tie_break(a, b),
+    }
+}
+
+fn cmp_newest_modified(a: &DuplicateMemberRef, b: &DuplicateMemberRef) -> bool {
+    match (a.modified_at, b.modified_at) {
+        (Some(am), Some(bm)) if am != bm => am > bm,
+        (Some(_), None) => true,
+        (None, Some(_)) => false,
+        _ => path_tie_break(a, b),
+    }
+}
+
+fn path_tie_break(a: &DuplicateMemberRef, b: &DuplicateMemberRef) -> bool {
+    let ap = a.path.to_ascii_lowercase();
+    let bp = b.path.to_ascii_lowercase();
+    match ap.cmp(&bp) {
+        std::cmp::Ordering::Less => true,
+        std::cmp::Ordering::Greater => false,
+        std::cmp::Ordering::Equal => a.candidate_id.0 < b.candidate_id.0,
+    }
+}
+
+/// Застосувати політику: рівно один ✓, решта ╳.
+pub fn mark_duplicate_members(
+    members: &[DuplicateMemberRef],
+    policy: KeepPolicy,
+) -> Vec<MarkedDuplicateMember> {
+    let keep_id = choose_keep_member(members, policy);
+    let mut out: Vec<_> = members
+        .iter()
+        .map(|m| {
+            let keep = m.candidate_id == keep_id;
+            MarkedDuplicateMember {
+                candidate_id: m.candidate_id,
+                path: m.path.clone(),
+                role: if keep {
+                    DuplicateRole::Keep
+                } else {
+                    DuplicateRole::Reap
+                },
+                keep,
+            }
+        })
+        .collect();
+    // Стабільний порядок: Keep першим, далі path (зручно для UI-ряду).
+    out.sort_by(|a, b| {
+        b.keep
+            .cmp(&a.keep)
+            .then_with(|| {
+                a.path
+                    .to_ascii_lowercase()
+                    .cmp(&b.path.to_ascii_lowercase())
+            })
+            .then_with(|| a.candidate_id.0.cmp(&b.candidate_id.0))
+    });
+    out
+}
+
+/// Розмітити підтверджену content-групу (потрібні path/mtime для членів).
+pub fn mark_content_hash_group(
+    group: &ContentHashGroup,
+    members: &[DuplicateMemberRef],
+    policy: KeepPolicy,
+) -> MarkedDuplicateGroup {
+    // Лише члени групи (фільтр на випадок зайвих refs).
+    let set: std::collections::HashSet<u64> = group.members.iter().map(|id| id.0).collect();
+    let filtered: Vec<_> = members
+        .iter()
+        .filter(|m| set.contains(&m.candidate_id.0))
+        .cloned()
+        .collect();
+    // Якщо path не передали — fallback лише id (шлях = id string).
+    let resolved = if filtered.len() == group.members.len() {
+        filtered
+    } else {
+        group
+            .members
+            .iter()
+            .map(|id| {
+                filtered
+                    .iter()
+                    .find(|m| m.candidate_id == *id)
+                    .cloned()
+                    .unwrap_or(DuplicateMemberRef {
+                        candidate_id: *id,
+                        path: format!("#{}", id.0),
+                        modified_at: None,
+                    })
+            })
+            .collect()
+    };
+
+    let marked = mark_duplicate_members(&resolved, policy);
+    let keep_id = marked
+        .iter()
+        .find(|m| m.keep)
+        .map(|m| m.candidate_id)
+        .unwrap_or(group.members[0]);
+
+    MarkedDuplicateGroup {
+        size: group.size,
+        content_hash: group.content_hash,
+        members: marked,
+        keep_id,
+        policy,
+        potential_reclaim_bytes: group.potential_reclaim_bytes(),
+    }
+}
+
 // ─── Пріоритезація груп (T-064) ──────────────────────────────────────────────
 
 /// Порядок підтвердження: більший potential reclaim першим (architecture.md §4).
@@ -810,6 +1061,30 @@ mod tests {
         assert!(!e.is_valid_for(ByteSize(100), Some(FsTimestamp(8))));
         assert!(!e.is_valid_for(ByteSize(100), None));
         assert_eq!(normalize_hash_cache_path(r"C:/A/F.BIN"), r"c:\a\f.bin");
+    }
+
+    #[test]
+    fn keep_policy_outside_downloads_and_markup() {
+        let members = [
+            DuplicateMemberRef {
+                candidate_id: CandidateId(1),
+                path: r"C:\Users\Ada\Downloads\vid.mp4".into(),
+                modified_at: Some(FsTimestamp(1)),
+            },
+            DuplicateMemberRef {
+                candidate_id: CandidateId(2),
+                path: r"C:\Videos\vid.mp4".into(),
+                modified_at: Some(FsTimestamp(99)),
+            },
+        ];
+        let marked = mark_duplicate_members(&members, KeepPolicy::PreferOutsideDownloads);
+        assert_eq!(marked.iter().filter(|m| m.keep).count(), 1);
+        assert_eq!(
+            marked.iter().find(|m| m.keep).unwrap().candidate_id,
+            CandidateId(2)
+        );
+        assert_eq!(DuplicateRole::Keep.mark_symbol(), '✓');
+        assert_eq!(DuplicateRole::Reap.mark_symbol(), '╳');
     }
 
     #[test]

@@ -19,12 +19,14 @@ pub mod scan;
 
 pub use aggregate::{summarize_unique, CandidateContribution, CategoryRollup, FreeableSummary};
 pub use duplicates::{
-    group_by_content_hash, group_by_exact_size, group_by_partial_hash, normalize_hash_cache_path,
-    prioritize_exact_size_groups, prioritize_partial_groups, reclaim_order_of_partial_groups,
-    CascadePhase, ContentHash, ContentHashGroup, ContentHashKey, ContentHashStageStats,
-    DuplicateConfidence, DuplicatesCategoryState, ExactSizeGroup, FileHashCacheEntry, PartialHash,
-    PartialHashGroup, PartialHashKey, PartialHashStageStats, SizeKey, SizeStageStats,
-    PARTIAL_HASH_CHUNK_BYTES, PARTIAL_HASH_MAX_READ_BYTES,
+    choose_keep_member, group_by_content_hash, group_by_exact_size, group_by_partial_hash,
+    is_downloads_like_path, mark_content_hash_group, mark_duplicate_members,
+    normalize_hash_cache_path, prioritize_exact_size_groups, prioritize_partial_groups,
+    reclaim_order_of_partial_groups, CascadePhase, ContentHash, ContentHashGroup, ContentHashKey,
+    ContentHashStageStats, DuplicateConfidence, DuplicateMemberRef, DuplicateRole,
+    DuplicatesCategoryState, ExactSizeGroup, FileHashCacheEntry, KeepPolicy, MarkedDuplicateGroup,
+    MarkedDuplicateMember, PartialHash, PartialHashGroup, PartialHashKey, PartialHashStageStats,
+    SizeKey, SizeStageStats, PARTIAL_HASH_CHUNK_BYTES, PARTIAL_HASH_MAX_READ_BYTES,
 };
 pub use forecast::{
     compute_cleanup_forecast, percent_of, CleanupForecast, ForecastInputs, VolumeUsage,
