@@ -1,11 +1,16 @@
-//! Контракт детектора (T-036).
+//! Контракт детектора (T-036 / T-038).
 //!
 //! architecture.md §6.1–6.2: детектор отримує записи індексу й повертає
 //! вердикт «кандидат / ні» з **категорією**, **поясненням** і **рівнем
 //! безпечності**. Жодного I/O — лише чиста логіка над [`FileRecord`].
+//!
+//! T-038: пороги змінюються через [`Detector::set_threshold`] (interior
+//! mutability); оркестратор потім перераховує індекс без рескану.
 
+use super::thresholds::ThresholdValue;
 use trashradar_domain::candidate::{CandidateId, FileRecord, Verdict};
 use trashradar_domain::category::CategoryId;
+use trashradar_domain::error::CoreError;
 
 /// Стабільний ідентифікатор детектора (машиночитаний, snake / dotted).
 ///
@@ -64,4 +69,24 @@ pub trait Detector: Send + Sync {
     ///
     /// `category` у вердикті має збігатися з [`Detector::category`].
     fn evaluate(&self, record: &FileRecord) -> Option<Verdict>;
+
+    /// Змінити поріг «на льоту» (T-038). Дефолт — детектор неконфігурований.
+    ///
+    /// Реалізації предикатних детекторів тримають пороги в `Atomic*` /
+    /// `Mutex`, щоб `set_threshold` працював через `&self` (спільний
+    /// `Arc` у реєстрі та воркерах).
+    fn set_threshold(&self, key: &str, value: ThresholdValue) -> Result<(), CoreError> {
+        let _ = (key, value);
+        Err(CoreError::invalid_argument(format!(
+            "Детектор «{}» не має конфігурованих порогів.",
+            self.id()
+        )))
+    }
+
+    /// Прочитати поточне значення порога (для UI / health). `None` — ключ
+    /// невідомий або детектор без порогів.
+    fn get_threshold(&self, key: &str) -> Option<ThresholdValue> {
+        let _ = key;
+        None
+    }
 }

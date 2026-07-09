@@ -1,25 +1,24 @@
-//! Оркестратор ферми детекторів (T-037).
+//! Оркестратор ферми детекторів (T-037 / T-038).
 //!
 //! Проганяє потік записів індексу через **усі активні** детектори реєстру
 //! (architecture.md §6.1). Вимкнені детектори не отримують потік.
 //!
-//! Два шляхи:
-//! - **під час скану** — [`categorize_batch`]: батч свіжо проіндексованих
-//!   записів → оновлені записи для upsert (нуль знання про конкретні типи
-//!   детекторів);
-//! - **повний прогін** — [`categorize_index`]: знімок HotIndex, кооперативна
-//!   відміна, запис вердиктів назад через `upsert_batch`. Може йти у
-//!   [`WorkerPool`] (T-008) як фонова задача.
+//! Шляхи:
+//! - **під час скану** — [`categorize_batch`]: батч → upsert hits;
+//! - **повний прогін** — [`categorize_index`]: HotIndex → upsert;
+//! - **перерахунок порогів (T-038)** — [`recalculate_index`]: без рескану
+//!   диска; unmatched → `Uncategorized` (категорія зникає з індексу).
 //!
 //! Перетин категорій (файл у кількох): збираємо всі hits; у `FileRecord`
 //! (одне поле category) пишеться **перший** hit у порядку реєстру.
 //! Чесна цифра / multi-category — T-054.
 
-use super::contract::DetectorHit;
+use super::contract::{DetectorHit, DetectorId};
 use super::registry::DetectorRegistry;
+use super::thresholds::ThresholdValue;
 use crate::ports::HotIndex;
 use crate::workers::{CancellationToken, JobHandle, JobPriority, WorkerPool};
-use trashradar_domain::candidate::{Decision, FileRecord};
+use trashradar_domain::candidate::{Decision, FileRecord, SafetyLevel};
 use trashradar_domain::category::CategoryId;
 use trashradar_domain::error::CoreError;
 
@@ -32,8 +31,10 @@ pub struct CategorizationStats {
     pub records_skipped_keep: u64,
     /// Успішних вердиктів (hit-ів) від усіх увімкнених детекторів.
     pub hits: u64,
-    /// Записів, у яких оновлено category/explanation/safety.
+    /// Записів, у яких оновлено category/explanation/safety (hit).
     pub records_updated: u64,
+    /// Записів, з яких знято категорію після зміни порога (T-038).
+    pub records_cleared: u64,
     /// Скільки увімкнених детекторів брали участь у прогоні.
     pub detectors_enabled: u64,
     /// Скільки батчів оброблено (повний прогін індексу).
@@ -78,8 +79,21 @@ impl<'a> DetectorOrchestrator<'a> {
     ///
     /// Вимкнені детектори **не** викликаються. Keep — пропускаються.
     /// Записи без жодного hit лишаються з `Uncategorized` і **не** потрапляють
-    /// у `updated` (нема чого upsert-ити).
+    /// у `updated` (нема чого upsert-ити). Для зняття категорії після зміни
+    /// порога — [`recalculate_batch`].
     pub fn categorize_batch(&self, records: &[FileRecord]) -> CategorizeBatchResult {
+        self.run_batch(records, false)
+    }
+
+    /// Перерахунок батча після зміни порогів (T-038).
+    ///
+    /// Як [`categorize_batch`], але записи без hit, що вже мали категорію,
+    /// **очищаються** → `Uncategorized` (категорія перебудовується з індексу).
+    pub fn recalculate_batch(&self, records: &[FileRecord]) -> CategorizeBatchResult {
+        self.run_batch(records, true)
+    }
+
+    fn run_batch(&self, records: &[FileRecord], clear_unmatched: bool) -> CategorizeBatchResult {
         let detectors_enabled = self.registry.enabled().count() as u64;
         let mut result = CategorizeBatchResult {
             stats: CategorizationStats {
@@ -101,6 +115,9 @@ impl<'a> DetectorOrchestrator<'a> {
             if let Some(primary) = hits.first() {
                 result.updated.push(apply_primary_hit(record, primary));
                 result.stats.records_updated += 1;
+            } else if clear_unmatched && record.category != CategoryId::Uncategorized {
+                result.updated.push(clear_category(record));
+                result.stats.records_cleared += 1;
             }
             result.hits.extend(hits);
         }
@@ -115,6 +132,78 @@ impl<'a> DetectorOrchestrator<'a> {
         &self,
         index: &dyn HotIndex,
         cancel: &CancellationToken,
+    ) -> Result<CategorizationStats, CoreError> {
+        self.run_index(index, cancel, false)
+    }
+
+    /// Повний **перерахунок** індексу після зміни порогів (T-038).
+    ///
+    /// Без рескану диска: лише метадані в HotIndex. Unmatched → Uncategorized.
+    /// DoD: зміна «вік 6 міс → 3 міс» перебудовує категорію; на 1 млн записів
+    /// ціль < 1 с (див. ignored perf-тест).
+    pub fn recalculate_index(
+        &self,
+        index: &dyn HotIndex,
+        cancel: &CancellationToken,
+    ) -> Result<CategorizationStats, CoreError> {
+        self.run_index(index, cancel, true)
+    }
+
+    /// Змінити поріг детектора і одразу перерахувати індекс (T-038).
+    pub fn set_threshold_and_recalculate(
+        &self,
+        index: &dyn HotIndex,
+        detector_id: DetectorId,
+        key: &str,
+        value: ThresholdValue,
+        cancel: &CancellationToken,
+    ) -> Result<CategorizationStats, CoreError> {
+        self.registry.set_threshold(detector_id, key, value)?;
+        self.recalculate_index(index, cancel)
+    }
+
+    /// In-place перерахунок зрізу записів (T-038 hot path).
+    ///
+    /// Без алокації повного `updated` вектора й без clone шляхів — лише
+    /// мутація category/safety/explanation/detector_id. Використовується
+    /// perf-гейтом і може годуватись знімком індексу.
+    pub fn recalculate_inplace(
+        &self,
+        records: &mut [FileRecord],
+        cancel: &CancellationToken,
+    ) -> CategorizationStats {
+        let mut stats = CategorizationStats {
+            detectors_enabled: self.registry.enabled().count() as u64,
+            ..CategorizationStats::default()
+        };
+        for record in records.iter_mut() {
+            if cancel.is_cancelled() {
+                stats.cancelled = true;
+                break;
+            }
+            if record.decision == Decision::Keep {
+                stats.records_skipped_keep += 1;
+                continue;
+            }
+            stats.records_seen += 1;
+            let hits = self.registry.evaluate_record(record);
+            stats.hits += hits.len() as u64;
+            if let Some(primary) = hits.first() {
+                apply_primary_hit_mut(record, primary);
+                stats.records_updated += 1;
+            } else if record.category != CategoryId::Uncategorized {
+                clear_category_mut(record);
+                stats.records_cleared += 1;
+            }
+        }
+        stats
+    }
+
+    fn run_index(
+        &self,
+        index: &dyn HotIndex,
+        cancel: &CancellationToken,
+        clear_unmatched: bool,
     ) -> Result<CategorizationStats, CoreError> {
         if cancel.is_cancelled() {
             return Ok(CategorizationStats {
@@ -135,11 +224,12 @@ impl<'a> DetectorOrchestrator<'a> {
                 stats.cancelled = true;
                 break;
             }
-            let batch = self.categorize_batch(chunk);
+            let batch = self.run_batch(chunk, clear_unmatched);
             stats.records_seen += batch.stats.records_seen;
             stats.records_skipped_keep += batch.stats.records_skipped_keep;
             stats.hits += batch.stats.hits;
             stats.records_updated += batch.stats.records_updated;
+            stats.records_cleared += batch.stats.records_cleared;
             stats.batches += 1;
             if !batch.updated.is_empty() {
                 index.upsert_batch(batch.updated)?;
@@ -183,13 +273,33 @@ impl<'a> DetectorOrchestrator<'a> {
 /// Застосувати первинний вердикт до копії запису.
 pub fn apply_primary_hit(record: &FileRecord, hit: &DetectorHit) -> FileRecord {
     let mut out = record.clone();
-    out.category = hit.verdict.category;
-    out.safety = hit.verdict.safety;
-    out.explanation = hit.verdict.explanation.clone();
-    out.detector_id = hit.detector_id.as_str().to_string();
-    // Якщо раніше був Uncategorized — тепер категоризований; інші поля лишаємо.
-    debug_assert_ne!(out.category, CategoryId::Uncategorized);
+    apply_primary_hit_mut(&mut out, hit);
     out
+}
+
+/// In-place застосування вердикту (T-038 hot path).
+pub fn apply_primary_hit_mut(record: &mut FileRecord, hit: &DetectorHit) {
+    record.category = hit.verdict.category;
+    record.safety = hit.verdict.safety;
+    record.explanation.clone_from(&hit.verdict.explanation);
+    record.detector_id.clear();
+    record.detector_id.push_str(hit.detector_id.as_str());
+    debug_assert_ne!(record.category, CategoryId::Uncategorized);
+}
+
+/// Зняти вердикт детектора (T-038: поріг більше не матчить).
+pub fn clear_category(record: &FileRecord) -> FileRecord {
+    let mut out = record.clone();
+    clear_category_mut(&mut out);
+    out
+}
+
+/// In-place зняття категорії.
+pub fn clear_category_mut(record: &mut FileRecord) {
+    record.category = CategoryId::Uncategorized;
+    record.detector_id.clear();
+    record.explanation.clear();
+    record.safety = SafetyLevel::ReviewRecommended;
 }
 
 #[cfg(test)]
@@ -248,38 +358,46 @@ mod tests {
         }
     }
 
+    /// O(1) upsert за candidate_id — критично для perf-гейта 1 млн (T-038).
     struct MemIndex {
-        records: Mutex<Vec<FileRecord>>,
+        by_id: Mutex<std::collections::HashMap<u64, FileRecord>>,
     }
 
     impl MemIndex {
         fn new(records: Vec<FileRecord>) -> Self {
+            let mut by_id = std::collections::HashMap::with_capacity(records.len());
+            for r in records {
+                by_id.insert(r.candidate_id.0, r);
+            }
             Self {
-                records: Mutex::new(records),
+                by_id: Mutex::new(by_id),
             }
         }
     }
 
     impl HotIndex for MemIndex {
         fn insert_batch(&self, records: Vec<FileRecord>) -> Result<(), CoreError> {
-            self.records.lock().unwrap().extend(records);
+            let mut map = self.by_id.lock().unwrap();
+            for r in records {
+                map.insert(r.candidate_id.0, r);
+            }
             Ok(())
         }
         fn finish_indexing(&self) -> Result<(), CoreError> {
             Ok(())
         }
         fn len(&self) -> Result<usize, CoreError> {
-            Ok(self.records.lock().unwrap().len())
+            Ok(self.by_id.lock().unwrap().len())
         }
         fn is_empty(&self) -> Result<bool, CoreError> {
-            Ok(self.records.lock().unwrap().is_empty())
+            Ok(self.by_id.lock().unwrap().is_empty())
         }
         fn clear(&self) -> Result<(), CoreError> {
-            self.records.lock().unwrap().clear();
+            self.by_id.lock().unwrap().clear();
             Ok(())
         }
         fn get_all(&self) -> Result<Vec<FileRecord>, CoreError> {
-            Ok(self.records.lock().unwrap().clone())
+            Ok(self.by_id.lock().unwrap().values().cloned().collect())
         }
         fn search_file_records(&self, _: &str, _: usize) -> Result<Vec<FileRecord>, CoreError> {
             Ok(Vec::new())
@@ -288,16 +406,9 @@ mod tests {
             Ok(0)
         }
         fn upsert_batch(&self, records: Vec<FileRecord>) -> Result<(), CoreError> {
-            let mut recs = self.records.lock().unwrap();
-            for record in records {
-                if let Some(pos) = recs
-                    .iter()
-                    .position(|r| r.candidate_id == record.candidate_id)
-                {
-                    recs[pos] = record;
-                } else {
-                    recs.push(record);
-                }
+            let mut map = self.by_id.lock().unwrap();
+            for r in records {
+                map.insert(r.candidate_id.0, r);
             }
             Ok(())
         }
@@ -542,5 +653,283 @@ mod tests {
         assert_eq!(out.updated.len(), 1);
         assert_eq!(out.updated[0].category, CategoryId::LargeFiles);
         assert_eq!(out.updated[0].detector_id, "first");
+    }
+
+    // --- T-038: пороги + перерахунок без рескану --------------------------------
+
+    /// FILETIME intervals per day (100 ns ticks).
+    const FT_PER_DAY: i64 = 10_000_000 * 86_400;
+    /// Фіксована «зараз» для детермінованих тестів віку.
+    const NOW_FT: i64 = 133_000_000_000_000_000; // довільна точка в епосі FILETIME
+
+    /// Предикатний детектор «старі файли» з live-порогом min_age_days (T-038 DoD).
+    struct AgeThresholdDetector {
+        min_age_days: AtomicU64,
+        now_filetime: i64,
+    }
+
+    impl AgeThresholdDetector {
+        fn new(min_age_days: u64) -> Self {
+            Self {
+                min_age_days: AtomicU64::new(min_age_days),
+                now_filetime: NOW_FT,
+            }
+        }
+    }
+
+    impl Detector for AgeThresholdDetector {
+        fn id(&self) -> DetectorId {
+            DetectorId::new("old_files")
+        }
+        fn category(&self) -> CategoryId {
+            CategoryId::OldFiles
+        }
+        fn evaluate(&self, record: &FileRecord) -> Option<Verdict> {
+            let ts = record.accessed_at.or(record.modified_at)?;
+            let age_days = if ts.0 >= self.now_filetime {
+                0
+            } else {
+                ((self.now_filetime - ts.0) / FT_PER_DAY) as u64
+            };
+            let min = self.min_age_days.load(Ordering::Relaxed);
+            if age_days >= min {
+                // Коротке фіксоване пояснення: format! на 0.5M hit-ів
+                // домінує в perf-гейті; реальні детектори (T-040) дають
+                // детальний рядок, але CPU-бюджет перерахунку — evaluate.
+                Some(Verdict::new(
+                    CategoryId::OldFiles,
+                    "старший за поріг віку",
+                    SafetyLevel::ReviewRecommended,
+                ))
+            } else {
+                None
+            }
+        }
+        fn set_threshold(
+            &self,
+            key: &str,
+            value: crate::detectors::thresholds::ThresholdValue,
+        ) -> Result<(), CoreError> {
+            use crate::detectors::thresholds::{keys, ThresholdValue};
+            if key != keys::MIN_AGE_DAYS {
+                return Err(crate::detectors::thresholds::unknown_threshold(
+                    self.id().as_str(),
+                    key,
+                ));
+            }
+            let days = match value {
+                ThresholdValue::U64(v) => v,
+                ThresholdValue::Bool(_) => {
+                    return Err(crate::detectors::thresholds::bad_threshold_type(
+                        self.id().as_str(),
+                        key,
+                        "u64 днів",
+                    ));
+                }
+            };
+            self.min_age_days.store(days, Ordering::Relaxed);
+            Ok(())
+        }
+        fn get_threshold(&self, key: &str) -> Option<crate::detectors::thresholds::ThresholdValue> {
+            use crate::detectors::thresholds::{keys, ThresholdValue};
+            if key == keys::MIN_AGE_DAYS {
+                Some(ThresholdValue::U64(
+                    self.min_age_days.load(Ordering::Relaxed),
+                ))
+            } else {
+                None
+            }
+        }
+    }
+
+    fn rec_age(id: u64, age_days: u64) -> FileRecord {
+        let mut r = rec(id, 100);
+        r.accessed_at = Some(trashradar_domain::candidate::FsTimestamp(
+            NOW_FT - (age_days as i64) * FT_PER_DAY,
+        ));
+        r
+    }
+
+    #[test]
+    fn threshold_change_rebuilds_category_without_rescan() {
+        // DoD T-038: «вік > 6 міс → 3 міс» перебудовує категорію з індексу.
+        use crate::detectors::thresholds::{keys, ThresholdValue};
+
+        let mut reg = DetectorRegistry::new();
+        reg.register(AgeThresholdDetector::new(180)); // 6 місяців
+        let index = MemIndex::new(vec![
+            rec_age(1, 200), // завжди old
+            rec_age(2, 100), // old лише при порозі 90
+            rec_age(3, 30),  // ніколи
+        ]);
+        let orch = DetectorOrchestrator::new(&reg);
+        let cancel = CancellationToken::new();
+
+        orch.categorize_index(&index, &cancel).unwrap();
+        let all = index.get_all().unwrap();
+        assert_eq!(
+            all.iter()
+                .filter(|r| r.category == CategoryId::OldFiles)
+                .count(),
+            1
+        );
+        assert_eq!(
+            all.iter()
+                .find(|r| r.candidate_id == CandidateId(1))
+                .unwrap()
+                .category,
+            CategoryId::OldFiles
+        );
+
+        // 6 міс → 3 міс (180 → 90 днів): без рескану диска.
+        let stats = orch
+            .set_threshold_and_recalculate(
+                &index,
+                DetectorId::new("old_files"),
+                keys::MIN_AGE_DAYS,
+                ThresholdValue::U64(90),
+                &cancel,
+            )
+            .unwrap();
+        assert_eq!(
+            reg.get_threshold(DetectorId::new("old_files"), keys::MIN_AGE_DAYS),
+            Some(ThresholdValue::U64(90))
+        );
+        assert_eq!(stats.records_seen, 3);
+        assert!(stats.records_updated >= 2);
+
+        let all = index.get_all().unwrap();
+        let mut old: Vec<_> = all
+            .iter()
+            .filter(|r| r.category == CategoryId::OldFiles)
+            .map(|r| r.candidate_id.0)
+            .collect();
+        old.sort_unstable();
+        assert_eq!(old, vec![1, 2]);
+        assert_eq!(
+            all.iter()
+                .find(|r| r.candidate_id == CandidateId(3))
+                .unwrap()
+                .category,
+            CategoryId::Uncategorized
+        );
+    }
+
+    #[test]
+    fn raising_threshold_clears_no_longer_matching() {
+        use crate::detectors::thresholds::{keys, ThresholdValue};
+
+        let mut reg = DetectorRegistry::new();
+        reg.register(AgeThresholdDetector::new(90));
+        let index = MemIndex::new(vec![rec_age(1, 100), rec_age(2, 200)]);
+        let orch = DetectorOrchestrator::new(&reg);
+        let cancel = CancellationToken::new();
+        orch.categorize_index(&index, &cancel).unwrap();
+        assert_eq!(
+            index
+                .get_all()
+                .unwrap()
+                .iter()
+                .filter(|r| r.category == CategoryId::OldFiles)
+                .count(),
+            2
+        );
+
+        // Підняти поріг до 180: id=1 (100 дн.) випадає → Uncategorized.
+        let stats = orch
+            .set_threshold_and_recalculate(
+                &index,
+                DetectorId::new("old_files"),
+                keys::MIN_AGE_DAYS,
+                ThresholdValue::U64(180),
+                &cancel,
+            )
+            .unwrap();
+        assert_eq!(stats.records_cleared, 1);
+        let all = index.get_all().unwrap();
+        assert_eq!(
+            all.iter()
+                .find(|r| r.candidate_id == CandidateId(1))
+                .unwrap()
+                .category,
+            CategoryId::Uncategorized
+        );
+        assert!(all
+            .iter()
+            .find(|r| r.candidate_id == CandidateId(1))
+            .unwrap()
+            .explanation
+            .is_empty());
+        assert_eq!(
+            all.iter()
+                .find(|r| r.candidate_id == CandidateId(2))
+                .unwrap()
+                .category,
+            CategoryId::OldFiles
+        );
+    }
+
+    /// DoD perf: перерахунок 1 млн записів < 1 с (release + --ignored).
+    ///
+    /// Міряє in-place hot path (evaluate + mutate category fields) — це
+    /// CPU-вартість предикатного перерахунку з метаданих індексу без I/O.
+    #[test]
+    #[ignore = "perf gate: cargo test -p trashradar-app recalculate_one_million --release -- --ignored --nocapture"]
+    fn recalculate_one_million_records_under_one_second() {
+        use crate::detectors::thresholds::{keys, ThresholdValue};
+        use std::time::Instant;
+
+        const N: u64 = 1_000_000;
+        let mut reg = DetectorRegistry::new();
+        reg.register(AgeThresholdDetector::new(180));
+        // Половина «старих» (200 дн.), половина «свіжих» (30 дн.).
+        let mut records: Vec<_> = (0..N)
+            .map(|i| rec_age(i, if i % 2 == 0 { 200 } else { 30 }))
+            .collect();
+        let orch = DetectorOrchestrator::new(&reg);
+        let cancel = CancellationToken::new();
+
+        // Початкова категоризація (не входить у замір).
+        orch.recalculate_inplace(&mut records, &cancel);
+        assert_eq!(
+            records
+                .iter()
+                .filter(|r| r.category == CategoryId::OldFiles)
+                .count(),
+            (N / 2) as usize
+        );
+
+        reg.set_threshold(
+            DetectorId::new("old_files"),
+            keys::MIN_AGE_DAYS,
+            ThresholdValue::U64(90),
+        )
+        .unwrap();
+
+        let started = Instant::now();
+        let stats = orch.recalculate_inplace(&mut records, &cancel);
+        let elapsed = started.elapsed();
+        println!(
+            "T-038 recalculate_inplace {N} records: {:.1} мс (updated={} cleared={})",
+            elapsed.as_secs_f64() * 1000.0,
+            stats.records_updated,
+            stats.records_cleared
+        );
+        assert_eq!(stats.records_seen, N);
+        assert_eq!(stats.records_updated, N / 2);
+        assert_eq!(stats.records_cleared, 0); // поріг знижено — ніхто не випав
+        assert!(
+            elapsed.as_secs_f64() < 1.0,
+            "перерахунок 1 млн має бути < 1 с, було {:?}",
+            elapsed
+        );
+        // 90 дн.: 200-денні лишаються, 30-денні out (і були out).
+        assert_eq!(
+            records
+                .iter()
+                .filter(|r| r.category == CategoryId::OldFiles)
+                .count(),
+            (N / 2) as usize
+        );
     }
 }

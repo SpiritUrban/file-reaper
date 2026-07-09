@@ -9,12 +9,15 @@
 mod contract;
 mod orchestrator;
 mod registry;
+pub mod thresholds;
 
 pub use contract::{Detector, DetectorHit, DetectorId};
 pub use orchestrator::{
-    apply_primary_hit, CategorizationStats, CategorizeBatchResult, DetectorOrchestrator,
+    apply_primary_hit, apply_primary_hit_mut, clear_category, clear_category_mut,
+    CategorizationStats, CategorizeBatchResult, DetectorOrchestrator,
 };
 pub use registry::DetectorRegistry;
+pub use thresholds::ThresholdValue;
 
 #[cfg(test)]
 mod tests {

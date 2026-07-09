@@ -1,10 +1,12 @@
-//! Реєстр детекторів (T-036).
+//! Реєстр детекторів (T-036 / T-038).
 //!
 //! Склад ферми — дані: додавання детектора не вимагає змін у коді прогону
-//! (evaluate_record / evaluate_stream). Оркестратор T-037 лише ітерує реєстр.
+//! (evaluate_record / evaluate_stream). Оркестратор T-037/T-038 лише ітерує реєстр.
 
 use super::contract::{Detector, DetectorHit, DetectorId};
+use super::thresholds::ThresholdValue;
 use trashradar_domain::candidate::FileRecord;
+use trashradar_domain::error::CoreError;
 
 /// Реєстр активних детекторів сесії / застосунку.
 #[derive(Default)]
@@ -61,6 +63,25 @@ impl DetectorRegistry {
             .iter()
             .find(|d| d.id() == id)
             .map(|d| d.as_ref())
+    }
+
+    /// Змінити поріг детектора за id (T-038). Без рескану диска — лише
+    /// стан детектора; перерахунок індексу — [`crate::detectors::DetectorOrchestrator::recalculate_index`].
+    pub fn set_threshold(
+        &self,
+        id: DetectorId,
+        key: &str,
+        value: ThresholdValue,
+    ) -> Result<(), CoreError> {
+        let det = self.get(id).ok_or_else(|| {
+            CoreError::invalid_argument(format!("Детектор «{id}» не зареєстрований."))
+        })?;
+        det.set_threshold(key, value)
+    }
+
+    /// Поточне значення порога або `None`.
+    pub fn get_threshold(&self, id: DetectorId, key: &str) -> Option<ThresholdValue> {
+        self.get(id).and_then(|d| d.get_threshold(key))
     }
 
     /// Прогнати **один** запис через усі увімкнені детектори.

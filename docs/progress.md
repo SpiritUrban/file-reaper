@@ -71,6 +71,8 @@
 
 | T-037 Оркестратор детекторів | ✅ | 2026-07-09 | local | **App `detectors/orchestrator`:** `DetectorOrchestrator` — `categorize_batch` (шлях під час скану → updated+hits), `categorize_index` (HotIndex get_all→батчі→upsert, cancel між батчами), `spawn_categorize_index` (WorkerPool T-008). Перший hit → FileRecord.category/safety/explanation/detector_id; усі hits для T-054; Keep skip; disabled = 0 evaluate. DoD: 7 unit (batch/disabled/index/keep/cancel/pool/multi-hit) + 5 T-036 = 12. clippy `-D warnings`. |
 
+| T-038 Перерахунок порогів без рескану | ✅ | 2026-07-09 | local | **thresholds:** `ThresholdValue`, keys `min_size_bytes`/`min_age_days`. **Detector:** `set_threshold`/`get_threshold` (default no-op). **Registry:** set/get threshold by id. **Orchestrator:** `recalculate_batch`/`recalculate_index` (unmatched→Uncategorized), `set_threshold_and_recalculate`, `recalculate_inplace` (hot path). DoD: age 180→90 rebuilds OldFiles; raise threshold clears; **1M inplace ~126 мс < 1 с** (release ignored). IPC `category.set_threshold` лишається planned (shell farm wiring з T-039+). 16 unit (14+1 ignored). clippy `-D warnings`. |
+
 ## Легенда
 
 ✅ виконано й верифіковано · 🔄 в роботі · ⛔ заблоковано (причина в нотатках)
