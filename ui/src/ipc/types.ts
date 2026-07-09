@@ -69,6 +69,28 @@ export interface CleanupTotal {
 /** Подія category.updated (T-055) — один рядок Sidebar. */
 export type CategoryUpdatedEvent = CategorySummary;
 
+/**
+ * Подія duplicates.cascade_updated (T-061).
+ * Після stage 2: confidence=preliminary, refining=true («уточнюється»).
+ * Після stage 3: confidence=confirmed, refining=false.
+ */
+export interface DuplicatesCascadeEvent {
+  phase:
+    | "idle"
+    | "size_grouping"
+    | "partial_hashing"
+    | "full_hashing"
+    | "complete"
+    | "cancelled";
+  confidence: "preliminary" | "confirmed";
+  /** Маркер «уточнюється» до завершення повного хешу. */
+  refining: boolean;
+  reclaimableBytes: number;
+  groupCount: number;
+  filesInGroups: number;
+  cancelled: boolean;
+}
+
 export interface ScanProgress {
   volume: string;
   strategy: "mft" | "directory_walk" | "usn_delta";
@@ -234,6 +256,7 @@ export type EventName =
   | "scan.progress"
   | "cleanup.total_updated"
   | "category.updated"
+  | "duplicates.cascade_updated"
   | "preview.ready"
   | "quarantine.changed"
   | "quarantine.entry_expired"

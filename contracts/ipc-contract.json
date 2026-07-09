@@ -98,6 +98,11 @@
       "task": "T-055",
       "$comment": "Per-category rollup (same shape as CleanupTotal.categories[]); emitted with cleanup.total_updated flush"
     },
+    "duplicates.cascade_updated": {
+      "status": "implemented",
+      "task": "T-061",
+      "$comment": "Duplicate cascade progress: {phase, confidence: preliminary|confirmed, refining, reclaimableBytes, groupCount, filesInGroups, cancelled}. After stage 2: preliminary+refining; after stage 3: confirmed, refining=false"
+    },
     "preview.ready": { "status": "planned", "task": "T-067" },
     "quarantine.changed": { "status": "planned", "task": "T-082" },
     "quarantine.entry_expired": { "status": "planned", "task": "T-082" },

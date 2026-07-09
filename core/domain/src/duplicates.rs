@@ -398,6 +398,93 @@ impl ContentHashStageStats {
     }
 }
 
+// ─── Оркестрація каскаду: preliminary / confirmed (T-061) ────────────────────
+
+/// Рівень довіри до цифри категорії «Дублікати» (architecture.md §4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DuplicateConfidence {
+    /// Після щабля 2 (partial) — UI: «уточнюється».
+    #[default]
+    Preliminary,
+    /// Після щабля 3 (full BLAKE3) — підтверджено.
+    Confirmed,
+}
+
+/// Фаза каскаду (для прогресу / логів).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CascadePhase {
+    #[default]
+    Idle,
+    SizeGrouping,
+    PartialHashing,
+    /// Щабель 3 триває — `refining == true`.
+    FullHashing,
+    Complete,
+    Cancelled,
+}
+
+/// Знімок категорії «Дублікати» для UI / LiveTotals (T-061).
+///
+/// DoD: після stage 2 — `confidence = preliminary`, `refining = true`
+/// (якщо є групи для stage 3); після stage 3 — `confirmed`, `refining = false`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DuplicatesCategoryState {
+    pub phase: CascadePhase,
+    pub confidence: DuplicateConfidence,
+    /// true від кінця stage 2 до кінця stage 3 (маркер «уточнюється»).
+    pub refining: bool,
+    /// Потенційне звільнення: Σ size×(n−1) по поточних групах.
+    pub reclaimable_bytes: u64,
+    pub group_count: u64,
+    pub files_in_groups: u64,
+    pub cancelled: bool,
+}
+
+impl DuplicatesCategoryState {
+    pub fn idle() -> Self {
+        Self::default()
+    }
+
+    /// Попередня цифра після щабля 2.
+    pub fn preliminary_from_partial(stats: &PartialHashStageStats) -> Self {
+        let has_work = stats.group_count > 0;
+        Self {
+            phase: if has_work {
+                CascadePhase::FullHashing
+            } else {
+                CascadePhase::Complete
+            },
+            confidence: DuplicateConfidence::Preliminary,
+            // Немає груп → нічого уточнювати.
+            refining: has_work,
+            reclaimable_bytes: stats.potential_reclaim_bytes,
+            group_count: stats.group_count,
+            files_in_groups: stats.files_in_groups,
+            cancelled: stats.cancelled,
+        }
+    }
+
+    /// Підтверджена цифра після щабля 3.
+    pub fn confirmed_from_full(stats: &ContentHashStageStats) -> Self {
+        Self {
+            phase: if stats.cancelled {
+                CascadePhase::Cancelled
+            } else {
+                CascadePhase::Complete
+            },
+            confidence: DuplicateConfidence::Confirmed,
+            refining: false,
+            reclaimable_bytes: stats.potential_reclaim_bytes,
+            group_count: stats.group_count,
+            files_in_groups: stats.files_in_groups,
+            cancelled: stats.cancelled,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -594,5 +681,53 @@ mod tests {
     fn content_hash_hex_stable() {
         assert_eq!(chash(0xAB).to_hex().len(), 64);
         assert!(chash(0xAB).to_hex().starts_with("ab"));
+    }
+
+    #[test]
+    fn preliminary_state_marks_refining_when_groups_exist() {
+        let stats = PartialHashStageStats {
+            files_hashed: 4,
+            files_failed: 0,
+            files_unique_partial: 0,
+            files_in_groups: 4,
+            group_count: 2,
+            potential_reclaim_bytes: 1000,
+            bytes_read: 400,
+            cancelled: false,
+        };
+        let s = DuplicatesCategoryState::preliminary_from_partial(&stats);
+        assert_eq!(s.confidence, DuplicateConfidence::Preliminary);
+        assert!(s.refining);
+        assert_eq!(s.reclaimable_bytes, 1000);
+        assert_eq!(s.phase, CascadePhase::FullHashing);
+    }
+
+    #[test]
+    fn preliminary_empty_is_not_refining() {
+        let s =
+            DuplicatesCategoryState::preliminary_from_partial(&PartialHashStageStats::default());
+        assert!(!s.refining);
+        assert_eq!(s.phase, CascadePhase::Complete);
+        assert_eq!(s.confidence, DuplicateConfidence::Preliminary);
+    }
+
+    #[test]
+    fn confirmed_clears_refining() {
+        let stats = ContentHashStageStats {
+            files_hashed: 4,
+            files_failed: 0,
+            files_unique_content: 0,
+            files_in_groups: 4,
+            group_count: 1,
+            potential_reclaim_bytes: 500,
+            bytes_read: 2000,
+            cancelled: false,
+            file_workers: 2,
+        };
+        let s = DuplicatesCategoryState::confirmed_from_full(&stats);
+        assert_eq!(s.confidence, DuplicateConfidence::Confirmed);
+        assert!(!s.refining);
+        assert_eq!(s.reclaimable_bytes, 500);
+        assert_eq!(s.phase, CascadePhase::Complete);
     }
 }

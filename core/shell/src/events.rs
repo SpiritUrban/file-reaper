@@ -37,6 +37,8 @@ pub mod topic {
     pub const CLEANUP_TOTAL_UPDATED: &str = "cleanup.total_updated";
     /// Оновлення однієї категорії (T-055).
     pub const CATEGORY_UPDATED: &str = "category.updated";
+    /// Каскад дублікатів: preliminary / confirmed + refining (T-061).
+    pub const DUPLICATES_CASCADE_UPDATED: &str = "duplicates.cascade_updated";
 }
 
 /// Payload `index.updated` (T-032): дельта після USN-тика.
@@ -137,6 +139,7 @@ pub fn scan_event_topics() -> &'static [&'static str] {
         topic::SCAN_PROGRESS,
         topic::CLEANUP_TOTAL_UPDATED,
         topic::CATEGORY_UPDATED,
+        topic::DUPLICATES_CASCADE_UPDATED,
     ]
 }
 
@@ -234,6 +237,63 @@ pub fn emit_cleanup_totals<R: Runtime>(
     for cat in &total.categories {
         emit(app, topic::CATEGORY_UPDATED, cat);
     }
+}
+
+// --- T-061: каскад дублікатів -------------------------------------------------
+// Емісія з scan_runtime / post-scan worker — коли UI підхопить цифру (T-110/T-126).
+
+/// Payload `duplicates.cascade_updated` (дзеркало domain `DuplicatesCategoryState`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)] // emit: post-scan cascade wiring (T-061 API ready)
+pub struct DuplicatesCascadeEvent {
+    pub phase: String,
+    pub confidence: String,
+    pub refining: bool,
+    pub reclaimable_bytes: u64,
+    pub group_count: u64,
+    pub files_in_groups: u64,
+    pub cancelled: bool,
+}
+
+impl DuplicatesCascadeEvent {
+    pub fn from_state(state: &trashradar_domain::DuplicatesCategoryState) -> Self {
+        use trashradar_domain::{CascadePhase, DuplicateConfidence};
+        Self {
+            phase: match state.phase {
+                CascadePhase::Idle => "idle",
+                CascadePhase::SizeGrouping => "size_grouping",
+                CascadePhase::PartialHashing => "partial_hashing",
+                CascadePhase::FullHashing => "full_hashing",
+                CascadePhase::Complete => "complete",
+                CascadePhase::Cancelled => "cancelled",
+            }
+            .into(),
+            confidence: match state.confidence {
+                DuplicateConfidence::Preliminary => "preliminary",
+                DuplicateConfidence::Confirmed => "confirmed",
+            }
+            .into(),
+            refining: state.refining,
+            reclaimable_bytes: state.reclaimable_bytes,
+            group_count: state.group_count,
+            files_in_groups: state.files_in_groups,
+            cancelled: state.cancelled,
+        }
+    }
+}
+
+/// Емісія прогресу каскаду дублікатів (T-061).
+#[allow(dead_code)] // post-scan cascade wiring
+pub fn emit_duplicates_cascade<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &trashradar_domain::DuplicatesCategoryState,
+) {
+    emit(
+        app,
+        topic::DUPLICATES_CASCADE_UPDATED,
+        &DuplicatesCascadeEvent::from_state(state),
+    );
 }
 
 /// Тротлінг snapshot-ів агрегатів ≤10/с (T-006 / T-055).
@@ -433,6 +493,36 @@ mod aggregate_events_tests {
         assert_eq!(topic::CLEANUP_TOTAL_UPDATED, "cleanup.total_updated");
         assert_eq!(topic::CATEGORY_UPDATED, "category.updated");
         assert!(scan_event_topics().contains(&topic::CLEANUP_TOTAL_UPDATED));
+    }
+
+    #[test]
+    fn duplicates_cascade_event_from_preliminary_state() {
+        use trashradar_domain::duplicates::{
+            CascadePhase, DuplicateConfidence, DuplicatesCategoryState,
+        };
+        let state = DuplicatesCategoryState {
+            phase: CascadePhase::FullHashing,
+            confidence: DuplicateConfidence::Preliminary,
+            refining: true,
+            reclaimable_bytes: 27 * 1024 * 1024 * 1024,
+            group_count: 12,
+            files_in_groups: 40,
+            cancelled: false,
+        };
+        let ev = DuplicatesCascadeEvent::from_state(&state);
+        assert_eq!(ev.phase, "full_hashing");
+        assert_eq!(ev.confidence, "preliminary");
+        assert!(ev.refining);
+        assert_eq!(ev.reclaimable_bytes, 27 * 1024 * 1024 * 1024);
+        assert_eq!(
+            topic::DUPLICATES_CASCADE_UPDATED,
+            "duplicates.cascade_updated"
+        );
+        assert_eq!(
+            wire_name(topic::DUPLICATES_CASCADE_UPDATED),
+            "duplicates:cascade_updated"
+        );
+        assert!(scan_event_topics().contains(&topic::DUPLICATES_CASCADE_UPDATED));
     }
 
     #[test]

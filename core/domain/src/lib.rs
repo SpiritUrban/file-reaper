@@ -19,10 +19,11 @@ pub mod scan;
 
 pub use aggregate::{summarize_unique, CandidateContribution, CategoryRollup, FreeableSummary};
 pub use duplicates::{
-    group_by_content_hash, group_by_exact_size, group_by_partial_hash, ContentHash,
-    ContentHashGroup, ContentHashKey, ContentHashStageStats, ExactSizeGroup, PartialHash,
-    PartialHashGroup, PartialHashKey, PartialHashStageStats, SizeKey, SizeStageStats,
-    PARTIAL_HASH_CHUNK_BYTES, PARTIAL_HASH_MAX_READ_BYTES,
+    group_by_content_hash, group_by_exact_size, group_by_partial_hash, CascadePhase, ContentHash,
+    ContentHashGroup, ContentHashKey, ContentHashStageStats, DuplicateConfidence,
+    DuplicatesCategoryState, ExactSizeGroup, PartialHash, PartialHashGroup, PartialHashKey,
+    PartialHashStageStats, SizeKey, SizeStageStats, PARTIAL_HASH_CHUNK_BYTES,
+    PARTIAL_HASH_MAX_READ_BYTES,
 };
 pub use forecast::{
     compute_cleanup_forecast, percent_of, CleanupForecast, ForecastInputs, VolumeUsage,
