@@ -62,10 +62,11 @@ pub enum UsnReadOutcome {
 }
 
 use trashradar_domain::{
-    candidate::{FileRecord, FileRecordSort},
+    candidate::{ByteSize, FileRecord, FileRecordSort},
     category::CategoryId,
     error::CoreError,
     scan::{ScanEntry, UsnChange, UsnCursor, UsnJournalInfo},
+    PartialHash,
 };
 
 /// Persistent-індекс кандидатів і журнал Quarantine.
@@ -142,7 +143,16 @@ pub trait PreviewStore {}
 pub trait QuarantineFs {}
 
 /// Хешування для каскаду дублікатів. Реалізація: `hash` (T-059/T-060).
-pub trait Hasher {}
+///
+/// T-059: partial fingerprint (перші+останні 64 КіБ, ≤ 128 КіБ читання).
+/// T-060: повний потоковий BLAKE3.
+pub trait Hasher: Send + Sync {
+    /// Частковий відбиток файла. `size` — з індексу (уникаємо зайвого stat).
+    ///
+    /// Інваріант DoD T-059: адаптер читає з диска **не більше**
+    /// [`PARTIAL_HASH_MAX_READ_BYTES`](trashradar_domain::PARTIAL_HASH_MAX_READ_BYTES).
+    fn partial_hash(&self, path: &str, size: ByteSize) -> Result<PartialHash, CoreError>;
+}
 
 /// Джерело часу — для тестованості TTL і «віку» файлів.
 pub trait Clock {}

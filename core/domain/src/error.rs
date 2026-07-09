@@ -82,6 +82,10 @@ impl CoreError {
             format!("Операцію «{operation}» скасовано."),
         )
     }
+
+    pub fn io(message: impl Into<String>) -> Self {
+        Self::new(ErrorCode::Io, message)
+    }
 }
 
 impl fmt::Display for CoreError {

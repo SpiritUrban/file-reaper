@@ -1,18 +1,27 @@
-//! Каскад пошуку дублікатів — щабель 1: точний розмір (T-058).
+//! Каскад пошуку дублікатів (architecture.md §4).
 //!
-//! architecture.md §4:
 //! ```text
 //! УСІ ФАЙЛИ (індекс, 0 I/O)
-//!   │  щабель 1: групування за точним розміром
+//!   │  щабель 1: групування за точним розміром          (T-058)
 //!   ▼     унікальний розмір → НЕ дублікат (~95%)
-//! ГРУПИ ОДНАКОВОГО РОЗМІРУ → щабель 2…
+//! ГРУПИ ОДНАКОВОГО РОЗМІРУ
+//!   │  щабель 2: частковий хеш (перші+останні 64 КБ)  (T-059)
+//!   ▼     різний partial → НЕ дублікат
+//! ГРУПИ-КАНДИДАТИ → щабель 3…
 //! ```
 //!
-//! DoD T-058: файли з унікальним розміром відкинуті; 1 млн записів < 1 с.
+//! DoD T-058: унікальний розмір відкинутий; 1 млн < 1 с.
+//! DoD T-059: групи з різними partial-хешами розділяються; ≤ 128 КБ/файл (I/O у infra).
 
 use serde::{Deserialize, Serialize};
 
 use crate::candidate::{ByteSize, CandidateId};
+
+/// Розмір одного «кінця» файла для щабля 2 (architecture.md §4).
+pub const PARTIAL_HASH_CHUNK_BYTES: u64 = 64 * 1024;
+
+/// Максимум байтів, які дозволено прочитати з диска на файл у щаблі 2.
+pub const PARTIAL_HASH_MAX_READ_BYTES: u64 = PARTIAL_HASH_CHUNK_BYTES * 2;
 
 /// Вхід щабля 1: ідентичність + розмір (без шляху — економія).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -107,6 +116,145 @@ impl SizeStageStats {
             files_in_groups,
             group_count: groups.len() as u64,
             potential_reclaim_bytes,
+        }
+    }
+}
+
+// ─── Щабель 2: частковий хеш (T-059) ─────────────────────────────────────────
+
+/// 32-байтний відбиток (BLAKE3 від head‖tail) — без I/O у domain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PartialHash(pub [u8; 32]);
+
+impl PartialHash {
+    pub const ZERO: Self = Self([0u8; 32]);
+
+    /// Стабільний hex (64 символи) для логів / IPC.
+    pub fn to_hex(self) -> String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut out = String::with_capacity(64);
+        for b in self.0 {
+            out.push(HEX[(b >> 4) as usize] as char);
+            out.push(HEX[(b & 0xf) as usize] as char);
+        }
+        out
+    }
+}
+
+/// Вхід щабля 2: id + розмір + partial fingerprint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PartialHashKey {
+    pub candidate_id: CandidateId,
+    pub size: ByteSize,
+    pub partial_hash: PartialHash,
+}
+
+/// Група однакового розміру **і** partial-хешу (≥ 2) — кандидати на щабель 3.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PartialHashGroup {
+    pub size: ByteSize,
+    pub partial_hash: PartialHash,
+    pub members: Vec<CandidateId>,
+}
+
+impl PartialHashGroup {
+    pub fn potential_reclaim_bytes(&self) -> u64 {
+        let n = self.members.len() as u64;
+        self.size.0.saturating_mul(n.saturating_sub(1))
+    }
+
+    pub fn member_count(&self) -> usize {
+        self.members.len()
+    }
+}
+
+/// Згрупувати за (size, partial_hash); синглтони відкинути.
+///
+/// DoD T-059: файли з **різними** partial-хешами (навіть при однаковому size)
+/// потрапляють у **різні** групи або відсіюються, якщо лишились самі.
+pub fn group_by_partial_hash(
+    files: impl IntoIterator<Item = PartialHashKey>,
+) -> Vec<PartialHashGroup> {
+    use std::collections::HashMap;
+
+    // (size, hash) → members
+    let mut buckets: HashMap<(u64, [u8; 32]), Vec<CandidateId>> = HashMap::new();
+    for f in files {
+        if f.size.0 == 0 {
+            continue;
+        }
+        buckets
+            .entry((f.size.0, f.partial_hash.0))
+            .or_default()
+            .push(f.candidate_id);
+    }
+
+    let mut groups: Vec<PartialHashGroup> = buckets
+        .into_iter()
+        .filter_map(|((size, hash), mut members)| {
+            if members.len() < 2 {
+                return None;
+            }
+            members.sort_unstable_by_key(|id| id.0);
+            members.dedup();
+            if members.len() < 2 {
+                return None;
+            }
+            Some(PartialHashGroup {
+                size: ByteSize(size),
+                partial_hash: PartialHash(hash),
+                members,
+            })
+        })
+        .collect();
+
+    groups.sort_unstable_by(|a, b| {
+        b.potential_reclaim_bytes()
+            .cmp(&a.potential_reclaim_bytes())
+            .then_with(|| b.size.0.cmp(&a.size.0))
+            .then_with(|| a.partial_hash.0.cmp(&b.partial_hash.0))
+            .then_with(|| a.members[0].0.cmp(&b.members[0].0))
+    });
+    groups
+}
+
+/// Підсумок щабля 2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PartialHashStageStats {
+    /// Файли, для яких обчислено partial (або спроба).
+    pub files_hashed: u64,
+    /// Не вдалося прочитати / хешувати (пропуск).
+    pub files_failed: u64,
+    /// Після групування: синглтони (унікальний partial у size-групі).
+    pub files_unique_partial: u64,
+    pub files_in_groups: u64,
+    pub group_count: u64,
+    pub potential_reclaim_bytes: u64,
+    /// Сума фактично прочитаних байтів (≤ 128 КіБ × files_hashed).
+    pub bytes_read: u64,
+    pub cancelled: bool,
+}
+
+impl PartialHashStageStats {
+    pub fn from_groups(
+        files_hashed: u64,
+        files_failed: u64,
+        bytes_read: u64,
+        cancelled: bool,
+        groups: &[PartialHashGroup],
+    ) -> Self {
+        let files_in_groups: u64 = groups.iter().map(|g| g.member_count() as u64).sum();
+        let potential_reclaim_bytes = groups.iter().map(|g| g.potential_reclaim_bytes()).sum();
+        Self {
+            files_hashed,
+            files_failed,
+            files_unique_partial: files_hashed.saturating_sub(files_in_groups),
+            files_in_groups,
+            group_count: groups.len() as u64,
+            potential_reclaim_bytes,
+            bytes_read,
+            cancelled,
         }
     }
 }
@@ -218,5 +366,60 @@ mod tests {
             "1M exact-size group took {elapsed:?} (DoD < 1s)"
         );
         eprintln!("T-058 group_by_exact_size 1M: {elapsed:?}");
+    }
+
+    fn phash(byte: u8) -> PartialHash {
+        let mut a = [0u8; 32];
+        a[0] = byte;
+        PartialHash(a)
+    }
+
+    fn pkey(id: u64, size: u64, h: u8) -> PartialHashKey {
+        PartialHashKey {
+            candidate_id: CandidateId(id),
+            size: ByteSize(size),
+            partial_hash: phash(h),
+        }
+    }
+
+    #[test]
+    fn different_partial_hashes_split_same_size_group() {
+        // DoD T-059: однаковий size, різний partial → різні групи / відсів.
+        let groups = group_by_partial_hash([
+            pkey(1, 1000, 0xAA),
+            pkey(2, 1000, 0xAA), // пара AA
+            pkey(3, 1000, 0xBB), // інший partial — синглтон
+            pkey(4, 1000, 0xBB),
+            pkey(5, 1000, 0xBB), // трійка BB
+        ]);
+        assert_eq!(groups.len(), 2);
+        let aa = groups
+            .iter()
+            .find(|g| g.partial_hash == phash(0xAA))
+            .unwrap();
+        let bb = groups
+            .iter()
+            .find(|g| g.partial_hash == phash(0xBB))
+            .unwrap();
+        assert_eq!(aa.members.len(), 2);
+        assert_eq!(bb.members.len(), 3);
+        assert_eq!(bb.potential_reclaim_bytes(), 2000); // 1000 * 2
+    }
+
+    #[test]
+    fn unique_partial_discarded() {
+        let groups = group_by_partial_hash([
+            pkey(1, 50, 1),
+            pkey(2, 50, 1),
+            pkey(3, 50, 9), // alone
+        ]);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].members, vec![CandidateId(1), CandidateId(2)]);
+    }
+
+    #[test]
+    fn partial_chunk_constants_match_architecture() {
+        assert_eq!(PARTIAL_HASH_CHUNK_BYTES, 64 * 1024);
+        assert_eq!(PARTIAL_HASH_MAX_READ_BYTES, 128 * 1024);
     }
 }
