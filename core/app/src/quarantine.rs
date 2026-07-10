@@ -2,6 +2,7 @@
 //! restore на оригінальний шлях із суфіксом при конфлікті (T-080) —
 //! architecture.md §7.3.
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -202,6 +203,83 @@ pub struct SweepResult {
     pub purged_bytes: u64,
     pub held_bytes: u64,
     pub threshold_exceeded: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ManualPurgeSelection {
+    Entries(Vec<QuarantineEntryId>),
+    All,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManualPurgeResult {
+    pub purged: Vec<QuarantineEntry>,
+    pub purged_bytes: u64,
+}
+
+pub struct ManualPurger<'a, F: QuarantineFs, M: QuarantineManifest> {
+    filesystem: &'a F,
+    manifest: &'a M,
+}
+
+impl<'a, F: QuarantineFs, M: QuarantineManifest> ManualPurger<'a, F, M> {
+    pub fn new(filesystem: &'a F, manifest: &'a M) -> Self {
+        Self {
+            filesystem,
+            manifest,
+        }
+    }
+
+    pub fn purge(
+        &self,
+        selection: ManualPurgeSelection,
+        mut surrogate_path: impl FnMut(&QuarantineEntry) -> Result<String, CoreError>,
+    ) -> Result<ManualPurgeResult, CoreError> {
+        let entries = self.manifest.list_entries()?;
+        let selected_ids = match selection {
+            ManualPurgeSelection::Entries(ids) => {
+                if ids.is_empty() {
+                    return Err(CoreError::invalid_argument(
+                        "Вибірковий purge потребує хоча б один entry ID.",
+                    ));
+                }
+                Some(ids.into_iter().collect::<HashSet<_>>())
+            }
+            ManualPurgeSelection::All => None,
+        };
+        let mut targets: Vec<_> = entries
+            .into_iter()
+            .filter(|entry| {
+                entry.status == QuarantineStatus::Quarantined
+                    && selected_ids
+                        .as_ref()
+                        .is_none_or(|ids| ids.contains(&entry.id))
+            })
+            .collect();
+        if let Some(ids) = &selected_ids {
+            if targets.len() != ids.len() {
+                return Err(CoreError::invalid_argument(
+                    "Ручний purge дозволений лише для наявних quarantined-записів.",
+                ));
+            }
+        }
+        targets.sort_by_key(|entry| entry.id.0);
+        let mut purged = Vec::with_capacity(targets.len());
+        let mut purged_bytes = 0u64;
+        for mut entry in targets {
+            self.filesystem
+                .purge_from_quarantine(&surrogate_path(&entry)?)?;
+            self.manifest
+                .update_status(entry.id, QuarantineStatus::Purged)?;
+            purged_bytes = purged_bytes.saturating_add(entry.size.0);
+            entry.status = QuarantineStatus::Purged;
+            purged.push(entry);
+        }
+        Ok(ManualPurgeResult {
+            purged,
+            purged_bytes,
+        })
+    }
 }
 
 /// Фоновий TTL-sweeper Quarantine (T-082).
@@ -653,6 +731,78 @@ mod tests {
             QuarantineStatus::Purged
         );
         assert!(fs.files.lock().unwrap().contains(&path(&future)));
+    }
+
+    #[test]
+    fn manual_purge_supports_selection_then_empty_all() {
+        let mut entries = [request(1).entry, request(2).entry, request(3).entry];
+        for entry in &mut entries {
+            entry.status = QuarantineStatus::Quarantined;
+        }
+        let path = |entry: &QuarantineEntry| {
+            format!(r"C:\.trashradar\quarantine\{}", entry.surrogate_name)
+        };
+        let crash = Arc::new(CrashControl {
+            phase: CrashPhase::AfterMove,
+            crash_call: usize::MAX,
+            inserts: Mutex::new(0),
+            moves: Mutex::new(0),
+            updates: Mutex::new(0),
+        });
+        let fs = FakeFs {
+            files: Arc::new(Mutex::new(entries.iter().map(path).collect())),
+            crash: Arc::clone(&crash),
+        };
+        let manifest = FakeManifest {
+            entries: Arc::new(Mutex::new(
+                entries.iter().map(|e| (e.id.0, e.clone())).collect(),
+            )),
+            crash,
+        };
+        let purger = ManualPurger::new(&fs, &manifest);
+        let selected = purger
+            .purge(
+                ManualPurgeSelection::Entries(vec![QuarantineEntryId(2)]),
+                |entry| Ok(path(entry)),
+            )
+            .unwrap();
+        assert_eq!(
+            selected.purged.iter().map(|e| e.id.0).collect::<Vec<_>>(),
+            vec![2]
+        );
+        assert_eq!(selected.purged_bytes, entries[1].size.0);
+
+        let all = purger
+            .purge(ManualPurgeSelection::All, |entry| Ok(path(entry)))
+            .unwrap();
+        assert_eq!(
+            all.purged.iter().map(|e| e.id.0).collect::<Vec<_>>(),
+            vec![1, 3]
+        );
+        assert!(fs.files.lock().unwrap().is_empty());
+        assert!(manifest
+            .entries
+            .lock()
+            .unwrap()
+            .values()
+            .all(|entry| entry.status == QuarantineStatus::Purged));
+    }
+
+    #[test]
+    fn manual_purge_rejects_missing_or_non_quarantined_selection() {
+        use trashradar_domain::error::ErrorCode;
+        let (fs, manifest, _, _) = restore_fixture(QuarantineStatus::Restored, &[]);
+        let purger = ManualPurger::new(&fs, &manifest);
+        for ids in [
+            vec![],
+            vec![QuarantineEntryId(1)],
+            vec![QuarantineEntryId(99)],
+        ] {
+            let error = purger
+                .purge(ManualPurgeSelection::Entries(ids), |_| Ok(String::new()))
+                .unwrap_err();
+            assert_eq!(error.code, ErrorCode::InvalidArgument);
+        }
     }
 
     #[test]
