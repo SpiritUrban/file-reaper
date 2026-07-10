@@ -1361,4 +1361,77 @@ mod tests {
         assert_eq!(metrics.scheduled, 3);
         let _ = std::fs::remove_dir_all(temp_dir);
     }
+
+    // --- T-076: автоматичні гейти латентності P0/P1 --------------------
+
+    #[test]
+    fn p0_cached_preview_latency_under_100ms() {
+        let fx = two_stage_fixture("latency_p0_cache", vec![]);
+        let source = r"C:\media\cached.png";
+        let size = ByteSize(42);
+        let mtime = Some(FsTimestamp(7));
+        fx.cache
+            .save_preview(source, PreviewKind::Large, size, mtime, b"sharp")
+            .unwrap();
+
+        let (callback, _log, _rx) = delivery_recorder();
+        let started = Instant::now();
+        let outcome = fx
+            .previewer
+            .request_large_preview(source, size, mtime, 512, callback)
+            .unwrap();
+        let elapsed = started.elapsed();
+
+        assert_eq!(outcome, TwoStageOutcome::SharpFromCache);
+        assert!(
+            elapsed < Duration::from_millis(100),
+            "P0 cache latency {:?} exceeded architecture.md §15 ceiling 100ms",
+            elapsed
+        );
+        let _ = std::fs::remove_dir_all(&fx.temp_dir);
+    }
+
+    #[test]
+    fn p0_generated_preview_latency_under_600ms() {
+        let fx = two_stage_fixture("latency_p0_generation", vec![]);
+        let (callback, _log, rx) = delivery_recorder();
+        let started = Instant::now();
+        fx.previewer
+            .request_large_preview(
+                r"C:\media\cold.png",
+                ByteSize(43),
+                Some(FsTimestamp(8)),
+                512,
+                callback,
+            )
+            .unwrap();
+        assert_eq!(
+            rx.recv_timeout(Duration::from_millis(600)).unwrap(),
+            PreviewQuality::Sharp
+        );
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(600),
+            "P0 generation latency {:?} exceeded architecture.md §15 ceiling 600ms",
+            elapsed
+        );
+        let _ = std::fs::remove_dir_all(&fx.temp_dir);
+    }
+
+    #[test]
+    fn p1_visible_tile_dispatch_latency_under_500ms() {
+        let scheduler = PreviewScheduler::new(1, 0.0);
+        let (tx, rx) = mpsc::channel();
+        let started = Instant::now();
+        scheduler.submit("visible-tile".to_string(), PreviewPriority::P1, move |_| {
+            tx.send(()).unwrap();
+        });
+        rx.recv_timeout(Duration::from_millis(500)).unwrap();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "P1 dispatch latency {:?} exceeded architecture.md §5.1 ceiling 500ms",
+            elapsed
+        );
+    }
 }
