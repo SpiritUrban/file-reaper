@@ -65,6 +65,31 @@ pub fn volume_file_system(volume: char) -> Result<Option<String>, CoreError> {
     }
 }
 
+/// Додати Windows-атрибут `HIDDEN`, зберігши решту атрибутів (T-077).
+pub fn set_hidden(path: &std::path::Path) -> Result<(), CoreError> {
+    #[cfg(windows)]
+    {
+        windows::set_hidden(path)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        Ok(())
+    }
+}
+
+/// Перевірити Windows-атрибут `HIDDEN` (діагностика й тести T-077).
+pub fn is_hidden(path: &std::path::Path) -> Result<bool, CoreError> {
+    #[cfg(windows)]
+    {
+        windows::is_hidden(path)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        Ok(false)
+    }
+}
 /// Літери томів, придатних до скану (fixed + removable, готові).
 pub fn list_drive_letters() -> Vec<char> {
     #[cfg(windows)]
@@ -139,6 +164,8 @@ mod windows {
         fn GetLogicalDrives() -> u32;
         fn GetDriveTypeW(root_path_name: *const u16) -> u32;
         fn GetLastError() -> u32;
+        fn GetFileAttributesW(file_name: *const u16) -> u32;
+        fn SetFileAttributesW(file_name: *const u16, file_attributes: u32) -> i32;
     }
 
     #[link(name = "advapi32")]
@@ -162,6 +189,8 @@ mod windows {
         fn ShellExecuteExW(info: *mut ShellExecuteInfoW) -> i32;
     }
 
+    const FILE_ATTRIBUTE_HIDDEN: u32 = 0x0000_0002;
+    const INVALID_FILE_ATTRIBUTES: u32 = 0xFFFF_FFFF;
     const TOKEN_QUERY: u32 = 0x0008;
     const TOKEN_ELEVATION_CLASS: u32 = 20; // TokenElevation
     const DRIVE_REMOVABLE: u32 = 2;
@@ -204,6 +233,49 @@ mod windows {
             .collect()
     }
 
+    fn wide_path(path: &std::path::Path) -> Vec<u16> {
+        use std::os::windows::ffi::OsStrExt;
+        path.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    }
+
+    pub fn set_hidden(path: &std::path::Path) -> Result<(), CoreError> {
+        let wide = wide_path(path);
+        let attributes = unsafe { GetFileAttributesW(wide.as_ptr()) };
+        if attributes == INVALID_FILE_ATTRIBUTES {
+            return Err(CoreError::io(format!(
+                "Не вдалося прочитати атрибути {} (Win32 {}).",
+                path.display(),
+                unsafe { GetLastError() }
+            )));
+        }
+        if attributes & FILE_ATTRIBUTE_HIDDEN != 0 {
+            return Ok(());
+        }
+        if unsafe { SetFileAttributesW(wide.as_ptr(), attributes | FILE_ATTRIBUTE_HIDDEN) } == 0 {
+            return Err(CoreError::io(format!(
+                "Не вдалося приховати {} (Win32 {}).",
+                path.display(),
+                unsafe { GetLastError() }
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn is_hidden(path: &std::path::Path) -> Result<bool, CoreError> {
+        let wide = wide_path(path);
+        let attributes = unsafe { GetFileAttributesW(wide.as_ptr()) };
+        if attributes == INVALID_FILE_ATTRIBUTES {
+            return Err(CoreError::io(format!(
+                "Не вдалося прочитати атрибути {} (Win32 {}).",
+                path.display(),
+                unsafe { GetLastError() }
+            )));
+        }
+        Ok(attributes & FILE_ATTRIBUTE_HIDDEN != 0)
+    }
     pub fn is_process_elevated() -> bool {
         unsafe {
             let mut token: *mut c_void = std::ptr::null_mut();

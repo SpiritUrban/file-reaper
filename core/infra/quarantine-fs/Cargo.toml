@@ -7,3 +7,4 @@ edition.workspace = true
 [dependencies]
 trashradar-domain = { path = "../../domain" }
 trashradar-app = { path = "../../app" }
+trashradar-platform-win = { path = "../platform-win" }
