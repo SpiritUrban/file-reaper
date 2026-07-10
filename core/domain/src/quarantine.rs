@@ -5,6 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::candidate::ByteSize;
+
 /// Ідентифікатор запису журналу Quarantine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct QuarantineEntryId(pub u64);
@@ -22,4 +24,16 @@ pub enum QuarantineStatus {
     Quarantined,
     Restored,
     Purged,
+}
+/// Persistent-запис manifest (T-078, architecture.md §7.2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuarantineEntry {
+    pub id: QuarantineEntryId,
+    pub batch_id: Option<BatchId>,
+    pub original_path: String,
+    pub surrogate_name: String,
+    pub size: ByteSize,
+    pub quarantined_at_unix: i64,
+    pub expires_at_unix: i64,
+    pub status: QuarantineStatus,
 }

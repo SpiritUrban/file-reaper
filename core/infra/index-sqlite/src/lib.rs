@@ -20,6 +20,7 @@ use trashradar_domain::{
     },
     category::CategoryId,
     duplicates::{normalize_hash_cache_path, ContentHash, FileHashCacheEntry, PartialHash},
+    quarantine::{BatchId, QuarantineEntry, QuarantineEntryId, QuarantineStatus},
     scan::UsnCursor,
 };
 
@@ -30,7 +31,8 @@ const SCHEMA_VERSION_V2: i64 = 2;
 const SCHEMA_VERSION_V3: i64 = 3;
 const SCHEMA_VERSION_V4: i64 = 4;
 const SCHEMA_VERSION_V5: i64 = 5;
-const LATEST_SCHEMA_VERSION: i64 = SCHEMA_VERSION_V5;
+const SCHEMA_VERSION_V6: i64 = 6;
+const LATEST_SCHEMA_VERSION: i64 = SCHEMA_VERSION_V6;
 const WRITER_QUEUE_CHANNEL_CLOSED: &str = "sqlite index writer queue is closed";
 
 /// Migration v1 creates the persistent file-record layer used by scanner output and
@@ -146,6 +148,25 @@ CREATE TABLE preview_cache (
 PRAGMA user_version = 5;
 "#;
 
+/// T-078: транзакційний manifest Quarantine (architecture.md §7.2).
+const SCHEMA_V6_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS quarantine_manifest (
+    entry_id INTEGER PRIMARY KEY,
+    batch_id INTEGER,
+    original_path TEXT NOT NULL,
+    surrogate_name TEXT NOT NULL UNIQUE,
+    size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+    quarantined_at_unix INTEGER NOT NULL,
+    expires_at_unix INTEGER NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('in_flight', 'quarantined', 'restored', 'purged'))
+);
+CREATE INDEX IF NOT EXISTS idx_quarantine_manifest_status_expiry
+    ON quarantine_manifest (status, expires_at_unix, entry_id);
+CREATE INDEX IF NOT EXISTS idx_quarantine_manifest_batch
+    ON quarantine_manifest (batch_id, entry_id);
+
+PRAGMA user_version = 6;
+"#;
 const MIGRATIONS: &[Migration] = &[
     Migration {
         version: SCHEMA_VERSION_V1,
@@ -166,6 +187,10 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         version: SCHEMA_VERSION_V5,
         sql: SCHEMA_V5_SQL,
+    },
+    Migration {
+        version: SCHEMA_VERSION_V6,
+        sql: SCHEMA_V6_SQL,
     },
 ];
 
@@ -671,6 +696,70 @@ impl IndexDatabase {
     // --- T-062: file_hash_cache ------------------------------------------------
 
     /// Прочитати запис кешу хешів (без перевірки size+mtime — це app-шар).
+    pub fn insert_quarantine_entry(&self, entry: &QuarantineEntry) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO quarantine_manifest (
+                entry_id, batch_id, original_path, surrogate_name, size_bytes,
+                quarantined_at_unix, expires_at_unix, status
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                sqlite_integer("quarantine entry id", entry.id.0)?,
+                entry
+                    .batch_id
+                    .map(|id| sqlite_integer("batch id", id.0))
+                    .transpose()?,
+                entry.original_path,
+                entry.surrogate_name,
+                sqlite_integer("quarantine size", entry.size.0)?,
+                entry.quarantined_at_unix,
+                entry.expires_at_unix,
+                quarantine_status_name(entry.status),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_quarantine_entry(&self, id: QuarantineEntryId) -> Result<Option<QuarantineEntry>> {
+        let id = sqlite_integer("quarantine entry id", id.0)?;
+        let stored = self
+            .connection
+            .query_row(
+                "SELECT entry_id, batch_id, original_path, surrogate_name, size_bytes,
+                    quarantined_at_unix, expires_at_unix, status
+             FROM quarantine_manifest WHERE entry_id = ?1",
+                [id],
+                stored_quarantine_entry,
+            )
+            .optional()?;
+        stored.map(QuarantineEntry::try_from).transpose()
+    }
+
+    pub fn list_quarantine_entries(&self) -> Result<Vec<QuarantineEntry>> {
+        let mut statement = self.connection.prepare(
+            "SELECT entry_id, batch_id, original_path, surrogate_name, size_bytes,
+                    quarantined_at_unix, expires_at_unix, status
+             FROM quarantine_manifest ORDER BY quarantined_at_unix DESC, entry_id DESC",
+        )?;
+        let stored = statement
+            .query_map([], stored_quarantine_entry)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        stored.into_iter().map(QuarantineEntry::try_from).collect()
+    }
+
+    pub fn update_quarantine_status(
+        &self,
+        id: QuarantineEntryId,
+        status: QuarantineStatus,
+    ) -> Result<()> {
+        self.connection.execute(
+            "UPDATE quarantine_manifest SET status = ?2 WHERE entry_id = ?1",
+            params![
+                sqlite_integer("quarantine entry id", id.0)?,
+                quarantine_status_name(status),
+            ],
+        )?;
+        Ok(())
+    }
     pub fn get_hash_cache_entry(&self, path: &str) -> Result<Option<FileHashCacheEntry>> {
         let key = normalize_hash_cache_path(path);
         type HashCacheRow = (i64, i64, Option<Vec<u8>>, Option<Vec<u8>>);
@@ -927,6 +1016,39 @@ impl trashradar_app::ports::IndexStore for IndexDatabase {
     }
 }
 
+impl trashradar_app::ports::QuarantineManifest for IndexDatabase {
+    fn insert_entry(
+        &self,
+        entry: &QuarantineEntry,
+    ) -> std::result::Result<(), trashradar_domain::error::CoreError> {
+        self.insert_quarantine_entry(entry)
+            .map_err(|error| trashradar_domain::error::CoreError::internal(error.to_string()))
+    }
+
+    fn get_entry(
+        &self,
+        id: QuarantineEntryId,
+    ) -> std::result::Result<Option<QuarantineEntry>, trashradar_domain::error::CoreError> {
+        self.get_quarantine_entry(id)
+            .map_err(|error| trashradar_domain::error::CoreError::internal(error.to_string()))
+    }
+
+    fn list_entries(
+        &self,
+    ) -> std::result::Result<Vec<QuarantineEntry>, trashradar_domain::error::CoreError> {
+        self.list_quarantine_entries()
+            .map_err(|error| trashradar_domain::error::CoreError::internal(error.to_string()))
+    }
+
+    fn update_status(
+        &self,
+        id: QuarantineEntryId,
+        status: QuarantineStatus,
+    ) -> std::result::Result<(), trashradar_domain::error::CoreError> {
+        self.update_quarantine_status(id, status)
+            .map_err(|error| trashradar_domain::error::CoreError::internal(error.to_string()))
+    }
+}
 /// Thread-safe обгортка `IndexDatabase` для [`HashCache`] (rusqlite Connection !Sync).
 ///
 /// Один writer-lock на get/put — достатньо для T-062; ліміт I/O на том — T-063.
@@ -1050,6 +1172,72 @@ impl trashradar_app::ports::PreviewCache for ThreadSafePreviewCache {
     }
 }
 
+#[derive(Debug)]
+struct StoredQuarantineEntry {
+    id: i64,
+    batch_id: Option<i64>,
+    original_path: String,
+    surrogate_name: String,
+    size: i64,
+    quarantined_at_unix: i64,
+    expires_at_unix: i64,
+    status: String,
+}
+
+fn stored_quarantine_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredQuarantineEntry> {
+    Ok(StoredQuarantineEntry {
+        id: row.get(0)?,
+        batch_id: row.get(1)?,
+        original_path: row.get(2)?,
+        surrogate_name: row.get(3)?,
+        size: row.get(4)?,
+        quarantined_at_unix: row.get(5)?,
+        expires_at_unix: row.get(6)?,
+        status: row.get(7)?,
+    })
+}
+
+impl TryFrom<StoredQuarantineEntry> for QuarantineEntry {
+    type Error = IndexSqliteError;
+
+    fn try_from(value: StoredQuarantineEntry) -> Result<Self> {
+        Ok(Self {
+            id: QuarantineEntryId(unsigned_integer("quarantine entry id", value.id)?),
+            batch_id: value
+                .batch_id
+                .map(|id| unsigned_integer("batch id", id).map(BatchId))
+                .transpose()?,
+            original_path: value.original_path,
+            surrogate_name: value.surrogate_name,
+            size: ByteSize(unsigned_integer("quarantine size", value.size)?),
+            quarantined_at_unix: value.quarantined_at_unix,
+            expires_at_unix: value.expires_at_unix,
+            status: parse_quarantine_status(&value.status)?,
+        })
+    }
+}
+
+fn quarantine_status_name(status: QuarantineStatus) -> &'static str {
+    match status {
+        QuarantineStatus::InFlight => "in_flight",
+        QuarantineStatus::Quarantined => "quarantined",
+        QuarantineStatus::Restored => "restored",
+        QuarantineStatus::Purged => "purged",
+    }
+}
+
+fn parse_quarantine_status(value: &str) -> Result<QuarantineStatus> {
+    match value {
+        "in_flight" => Ok(QuarantineStatus::InFlight),
+        "quarantined" => Ok(QuarantineStatus::Quarantined),
+        "restored" => Ok(QuarantineStatus::Restored),
+        "purged" => Ok(QuarantineStatus::Purged),
+        other => Err(IndexSqliteError::InvalidEnumValue {
+            field: "quarantine status",
+            value: other.to_string(),
+        }),
+    }
+}
 fn preview_kind_name(kind: trashradar_app::ports::PreviewKind) -> &'static str {
     match kind {
         trashradar_app::ports::PreviewKind::Thumbnail => "thumbnail",
@@ -2294,6 +2482,70 @@ mod tests {
         cleanup(profile_dir);
     }
 
+    #[test]
+    fn quarantine_manifest_roundtrip_status_and_ttl_t078() {
+        let profile_dir = temp_profile_dir("quarantine-manifest");
+        let database = IndexDatabase::open_profile(&profile_dir).unwrap();
+        let entry = QuarantineEntry {
+            id: QuarantineEntryId(41),
+            batch_id: Some(BatchId(7)),
+            original_path: r"C:\Users\Ada\Videos\raw.mov".to_string(),
+            surrogate_name: "00000041-raw.mov".to_string(),
+            size: ByteSize(4_294_967_296),
+            quarantined_at_unix: 1_750_000_000,
+            expires_at_unix: 1_752_592_000,
+            status: QuarantineStatus::InFlight,
+        };
+        database.insert_quarantine_entry(&entry).unwrap();
+        assert_eq!(
+            database.get_quarantine_entry(entry.id).unwrap(),
+            Some(entry.clone())
+        );
+        database
+            .update_quarantine_status(entry.id, QuarantineStatus::Quarantined)
+            .unwrap();
+        let listed = database.list_quarantine_entries().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].status, QuarantineStatus::Quarantined);
+        assert_eq!(listed[0].original_path, entry.original_path);
+        assert_eq!(listed[0].surrogate_name, entry.surrogate_name);
+        assert_eq!(listed[0].size, entry.size);
+        assert_eq!(listed[0].expires_at_unix, entry.expires_at_unix);
+        drop(database);
+        let reopened = IndexDatabase::open_profile(&profile_dir).unwrap();
+        assert_eq!(reopened.list_quarantine_entries().unwrap(), listed);
+        cleanup(profile_dir);
+    }
+
+    #[test]
+    fn migration_v6_adds_manifest_without_losing_v5_cache() {
+        let profile_dir = temp_profile_dir("migration-v6");
+        fs::create_dir_all(&profile_dir).unwrap();
+        let path = profile_dir.join(DATABASE_FILE_NAME);
+        {
+            let connection = Connection::open(&path).unwrap();
+            connection.execute_batch(SCHEMA_V1_SQL).unwrap();
+            connection.execute_batch(SCHEMA_V2_SQL).unwrap();
+            connection.execute_batch(SCHEMA_V3_SQL).unwrap();
+            connection.execute_batch(SCHEMA_V4_SQL).unwrap();
+            connection.execute_batch(SCHEMA_V5_SQL).unwrap();
+            connection.execute("INSERT INTO preview_cache (source_path, preview_kind, size_bytes, modified_at_filetime, preview_path) VALUES (?1, 'large', 1, 2, ?2)", params![r"C:\media\kept.png", r"C:\cache\kept.png"]).unwrap();
+        }
+        let database = IndexDatabase::open(&path).unwrap();
+        assert_eq!(database.schema_version().unwrap(), SCHEMA_VERSION_V6);
+        let count: i64 = database
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM preview_cache WHERE source_path = ?1",
+                [r"C:\media\kept.png"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+        let manifest_exists: i64 = database.connection.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'quarantine_manifest'", [], |row| row.get(0)).unwrap();
+        assert_eq!(manifest_exists, 1);
+        cleanup(profile_dir);
+    }
     fn sample_file_record(id: u64) -> FileRecord {
         FileRecord {
             candidate_id: CandidateId(id),

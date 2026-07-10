@@ -65,6 +65,7 @@ use trashradar_domain::{
     candidate::{ByteSize, FileRecord, FileRecordSort, FsTimestamp},
     category::CategoryId,
     error::CoreError,
+    quarantine::{QuarantineEntry, QuarantineEntryId, QuarantineStatus},
     scan::{ScanEntry, UsnChange, UsnCursor, UsnJournalInfo},
     ContentHash, FileHashCacheEntry, PartialHash,
 };
@@ -102,6 +103,17 @@ pub trait IndexStore {
     fn delete_file_records_by_path(&self, path: &str) -> Result<u64, CoreError>;
 }
 
+/// Persistent manifest Quarantine (T-078). Реалізація: `index-sqlite`.
+pub trait QuarantineManifest {
+    fn insert_entry(&self, entry: &QuarantineEntry) -> Result<(), CoreError>;
+    fn get_entry(&self, id: QuarantineEntryId) -> Result<Option<QuarantineEntry>, CoreError>;
+    fn list_entries(&self) -> Result<Vec<QuarantineEntry>, CoreError>;
+    fn update_status(
+        &self,
+        id: QuarantineEntryId,
+        status: QuarantineStatus,
+    ) -> Result<(), CoreError>;
+}
 /// Гарячий in-memory індекс. Реалізація: `index-memory` (T-015…T-018, T-030).
 pub trait HotIndex {
     /// Додати пакет записів файлів до індексу.
