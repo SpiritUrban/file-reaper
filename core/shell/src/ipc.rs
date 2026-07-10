@@ -12,7 +12,8 @@
 
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Instant;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Runtime};
 use trashradar_app::elevation::{
     elevation_benefit_message, elevation_benefit_summary, evaluate_elevation_prompt,
@@ -78,6 +79,20 @@ pub struct VolumeScanPlan {
     pub elevated: bool,
 }
 
+/// Доступність карантину на томі (T-089) — видно у health; UI ховає
+/// кнопку reap для файлів томів з `available=false` і показує `reason`.
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct VolumeQuarantineInfo {
+    /// Літера тому з двокрапкою, напр. `"C:"`.
+    pub volume: String,
+    /// Службовий каталог створено і він реально записуваний → reap дозволений.
+    pub available: bool,
+    /// Людське пояснення блокування reap (лише коли `available=false`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
 /// Сесійний стан elevation для health/UI (T-034).
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -110,6 +125,8 @@ pub struct HealthInfo {
     pub scan_plans: Vec<VolumeScanPlan>,
     /// Пропозиція / відмова elevation (T-034).
     pub elevation: ElevationInfo,
+    /// Доступність карантину по томах (T-089 DoD: причина видима у UI).
+    pub quarantine_volumes: Vec<VolumeQuarantineInfo>,
 }
 
 /// Відповідь `app.request_elevation` (T-034).
@@ -165,6 +182,80 @@ pub fn build_scan_plans() -> (bool, Vec<VolumeScanPlan>) {
     (elevated, plans)
 }
 
+/// Кеш capability-проб карантину: health политься щосекунди, а проба —
+/// це реальний write-probe на кожному томі (T-077); TTL уникає постійних
+/// записів на диск, лишаючи діагностику достатньо свіжою.
+type QuarantineCapabilitySnapshot = (Instant, Vec<char>, Vec<VolumeQuarantineInfo>);
+static QUARANTINE_CAPABILITY_CACHE: Mutex<Option<QuarantineCapabilitySnapshot>> = Mutex::new(None);
+static QUARANTINE_PROBE_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+const QUARANTINE_CAPABILITY_TTL: Duration = Duration::from_secs(30);
+
+/// Синхронна проба доступності карантину томів (T-089, без кешу).
+///
+/// Успішна проба = каталог `<том>\.trashradar\quarantine` існує/створено
+/// і реально записуваний; інакше `available=false` + людська причина
+/// (read-only том, брак прав тощо) зі стабільним кодом `quarantine_unavailable`.
+pub fn probe_quarantine_volumes(volumes: &[char]) -> Vec<VolumeQuarantineInfo> {
+    use trashradar_quarantine_fs::NativeQuarantineFs;
+
+    volumes
+        .iter()
+        .map(|&volume| {
+            let label = format!("{}:", volume.to_ascii_uppercase());
+            match NativeQuarantineFs.capability_on_volume(volume) {
+                Ok(_) => VolumeQuarantineInfo {
+                    volume: label,
+                    available: true,
+                    reason: None,
+                },
+                Err(error) => {
+                    tracing::warn!(volume = %label, reason = %error.message, "карантин недоступний — reap заблоковано");
+                    VolumeQuarantineInfo {
+                        volume: label,
+                        available: false,
+                        reason: Some(error.message),
+                    }
+                }
+            }
+        })
+        .collect()
+}
+
+/// Доступність карантину для health (T-089), stale-while-revalidate.
+///
+/// Health мусить відповідати миттєво (§14, тест неблокування T-004), а проба —
+/// реальний запис на кожен том, тож команда повертає останній знімок одразу;
+/// протухлий за TTL знімок оновлюється у фоновому потоці. До завершення першої
+/// проби список порожній — UI показує «перевіряється» наступним тіком.
+pub fn build_quarantine_volumes(volumes: &[char]) -> Vec<VolumeQuarantineInfo> {
+    let snapshot = {
+        let cache = QUARANTINE_CAPABILITY_CACHE
+            .lock()
+            .expect("quarantine capability cache mutex poisoned");
+        cache
+            .as_ref()
+            .and_then(|(probed_at, probed_volumes, infos)| {
+                (probed_volumes == volumes).then(|| (probed_at.elapsed(), infos.clone()))
+            })
+    };
+    let (needs_refresh, result) = match snapshot {
+        Some((age, infos)) => (age >= QUARANTINE_CAPABILITY_TTL, infos),
+        None => (true, Vec::new()),
+    };
+    if needs_refresh && !QUARANTINE_PROBE_IN_FLIGHT.swap(true, Ordering::AcqRel) {
+        let volumes = volumes.to_vec();
+        std::thread::spawn(move || {
+            let infos = probe_quarantine_volumes(&volumes);
+            *QUARANTINE_CAPABILITY_CACHE
+                .lock()
+                .expect("quarantine capability cache mutex poisoned") =
+                Some((Instant::now(), volumes, infos));
+            QUARANTINE_PROBE_IN_FLIGHT.store(false, Ordering::Release);
+        });
+    }
+    result
+}
+
 /// Зібрати [`ElevationInfo`] з планів і сесійного стану (T-034).
 pub fn build_elevation_info(elevated: bool, scan_plans: &[VolumeScanPlan]) -> ElevationInfo {
     let ntfs_volume_count = scan_plans
@@ -190,6 +281,19 @@ pub fn app_health() -> HealthInfo {
     let event_metrics = events::metrics();
     let (elevated, scan_plans) = build_scan_plans();
     let elevation = build_elevation_info(elevated, &scan_plans);
+    let volume_letters: Vec<char> = scan_plans
+        .iter()
+        .filter_map(|plan| plan.volume.chars().next())
+        .collect();
+    let quarantine_volumes = build_quarantine_volumes(&volume_letters);
+    // T-089: підсистема карантину «жива», якщо хоч один том готовий до reap.
+    let quarantine_status = if quarantine_volumes.iter().any(|q| q.available) {
+        "online"
+    } else if quarantine_volumes.is_empty() {
+        "planned"
+    } else {
+        "degraded"
+    };
     // T-028: автовибір готовий; деталі стратегії — у scan_plans, не в status.
     HealthInfo {
         app_version: env!("CARGO_PKG_VERSION"),
@@ -222,7 +326,7 @@ pub fn app_health() -> HealthInfo {
             },
             ModuleHealth {
                 name: "quarantine",
-                status: "planned",
+                status: quarantine_status,
             },
         ],
         ipc: IpcMetrics {
@@ -234,6 +338,7 @@ pub fn app_health() -> HealthInfo {
         elevated,
         scan_plans,
         elevation,
+        quarantine_volumes,
     }
 }
 
@@ -495,6 +600,53 @@ mod tests {
             if !plan.elevated {
                 assert_ne!(plan.strategy, "mft");
             }
+        }
+    }
+
+    /// DoD T-089: доступність карантину по томах видима у health (з причиною
+    /// блокування reap для недоступних томів).
+    #[test]
+    fn health_includes_quarantine_capability_t089() {
+        let (_elevated, plans) = build_scan_plans();
+        let letters: Vec<char> = plans
+            .iter()
+            .filter_map(|plan| plan.volume.chars().next())
+            .collect();
+        assert!(!letters.is_empty(), "на Windows є хоча б один том");
+
+        // Синхронна проба: формат записів і людські причини блокування.
+        let infos = probe_quarantine_volumes(&letters);
+        assert_eq!(infos.len(), letters.len());
+        for info in &infos {
+            assert!(
+                info.volume.ends_with(':') && info.volume.len() == 2,
+                "volume format: {}",
+                info.volume
+            );
+            if info.available {
+                assert!(info.reason.is_none(), "доступний том не потребує причини");
+            } else {
+                assert!(
+                    info.reason.as_deref().is_some_and(|r| !r.is_empty()),
+                    "заблокований том мусить мати людське пояснення"
+                );
+            }
+        }
+
+        // Health-шлях (stale-while-revalidate): перший виклик неблокуючий і
+        // стартує фонову пробу; невдовзі health віддає повний знімок.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let cached = build_quarantine_volumes(&letters);
+            if !cached.is_empty() {
+                assert_eq!(cached.len(), letters.len());
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "фонова проба карантину не завершилась за 10 с"
+            );
+            std::thread::sleep(Duration::from_millis(25));
         }
     }
 

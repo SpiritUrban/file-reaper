@@ -47,6 +47,17 @@ impl QuarantineFs for NativeQuarantineFs {
         let destination = Path::new(destination_path);
         self.validate_file_identity(source, expected)?;
         validate_quarantine_destination(destination)?;
+        // T-089: без готового каталогу карантину reap неможливий — типізована
+        // відмова замість generic io від rename (read-only / непідготовлений том).
+        match destination.parent() {
+            Some(quarantine_dir) if quarantine_dir.is_dir() => {}
+            _ => {
+                return Err(CoreError::quarantine_unavailable(format!(
+                    "Том не має каталогу карантину ({}) — безпечне видалення неможливе; reap скасовано.",
+                    destination.display()
+                )));
+            }
+        }
         if let (Some(source_volume), Some(destination_volume)) = (
             windows_volume(source_path),
             windows_volume(destination_path),
@@ -143,6 +154,22 @@ impl NativeQuarantineFs {
             .collect()
     }
 
+    /// T-089: чи можливий reap на томі. Успіх = службовий каталог існує
+    /// (створюється) і реально записуваний; будь-яка відмова (read-only том,
+    /// брак прав, недоступний корінь) → стабільний `quarantine_unavailable`
+    /// з людським поясненням для UI.
+    pub fn capability_on_volume(&self, volume: char) -> Result<QuarantineDirectory, CoreError> {
+        self.ensure_on_volume(volume).map_err(|cause| {
+            quarantine_unavailable_for(&format!("{}:", volume.to_ascii_uppercase()), &cause)
+        })
+    }
+
+    /// Як [`Self::capability_on_volume`], з явним коренем (портативний режим, тести).
+    pub fn capability_at_root(&self, volume_root: &Path) -> Result<QuarantineDirectory, CoreError> {
+        self.ensure_at_root(volume_root)
+            .map_err(|cause| quarantine_unavailable_for(&volume_root.display().to_string(), &cause))
+    }
+
     /// Варіант із явним коренем для портативного режиму та ізольованих тестів.
     pub fn ensure_at_root(&self, volume_root: &Path) -> Result<QuarantineDirectory, CoreError> {
         if !volume_root.is_dir() {
@@ -169,6 +196,14 @@ impl NativeQuarantineFs {
             quarantine_root,
         })
     }
+}
+
+/// Причина недоступності карантину → стабільний код + пояснення для UI (T-089).
+fn quarantine_unavailable_for(volume: &str, cause: &CoreError) -> CoreError {
+    CoreError::quarantine_unavailable(format!(
+        "Том {volume} не підтримує карантин — reap для його файлів заблоковано. Причина: {}",
+        cause.message
+    ))
 }
 
 fn verify_writable(directory: &Path) -> Result<(), CoreError> {
@@ -379,5 +414,65 @@ mod tests {
         let _ = fs::remove_dir_all(&missing);
         assert!(NativeQuarantineFs.ensure_at_root(&missing).is_err());
         assert!(NativeQuarantineFs.ensure_on_volume('1').is_err());
+    }
+
+    /// DoD T-089: reap на томі без каталогу карантину відхиляється зі
+    /// стабільним кодом і поясненням; файл лишається на місці.
+    #[test]
+    fn reap_blocked_without_quarantine_directory() {
+        use trashradar_domain::error::ErrorCode;
+
+        let root = temp_volume("no-quarantine");
+        let source = root.join("candidate.bin");
+        fs::write(&source, b"candidate-data").unwrap();
+        let identity = read_file_identity(&source).unwrap();
+        // Каталог карантину свідомо НЕ створено (том «без можливості карантину»).
+        let destination = root
+            .join(SERVICE_DIRECTORY_NAME)
+            .join(QUARANTINE_DIRECTORY_NAME)
+            .join("00000001.bin");
+
+        let error = NativeQuarantineFs
+            .move_into_quarantine(
+                &source.to_string_lossy(),
+                &destination.to_string_lossy(),
+                identity,
+                &[],
+            )
+            .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::QuarantineUnavailable);
+        assert!(error.message.contains("reap скасовано"));
+        assert!(source.exists(), "файл не переміщено і не втрачено");
+        assert!(!destination.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// T-089: capability-проба дає стабільний код і людську причину для UI;
+    /// на записуваному томі — Ok.
+    #[test]
+    fn capability_probe_reports_unavailable_with_reason() {
+        use trashradar_domain::error::ErrorCode;
+
+        let missing = std::env::temp_dir().join("trashradar-t089-missing-root");
+        let _ = fs::remove_dir_all(&missing);
+        let error = NativeQuarantineFs.capability_at_root(&missing).unwrap_err();
+        assert_eq!(error.code, ErrorCode::QuarantineUnavailable);
+        assert!(error.message.contains("не підтримує карантин"));
+        assert!(error.message.contains("Причина:"));
+
+        let writable = temp_volume("capability-ok");
+        let directory = NativeQuarantineFs.capability_at_root(&writable).unwrap();
+        assert!(directory.quarantine_root.is_dir());
+        fs::remove_dir_all(writable).unwrap();
+
+        // Некоректна літера тому — теж «карантин недоступний», не панік.
+        assert_eq!(
+            NativeQuarantineFs
+                .capability_on_volume('1')
+                .unwrap_err()
+                .code,
+            ErrorCode::QuarantineUnavailable
+        );
     }
 }

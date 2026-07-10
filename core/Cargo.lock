@@ -3805,6 +3805,7 @@ dependencies = [
  "trashradar-domain",
  "trashradar-index-memory",
  "trashradar-platform-win",
+ "trashradar-quarantine-fs",
  "trashradar-scan-mft",
  "trashradar-scan-walk",
 ]

@@ -34,6 +34,8 @@ pub enum ErrorCode {
     PathProtected,
     /// Файл змінився після індексації; деструктивна операція скасована.
     FileChanged,
+    /// Том не має записуваного каталогу карантину — reap заблоковано (T-089).
+    QuarantineUnavailable,
 }
 
 impl ErrorCode {
@@ -47,6 +49,7 @@ impl ErrorCode {
             ErrorCode::Cancelled => "cancelled",
             ErrorCode::PathProtected => "path_protected",
             ErrorCode::FileChanged => "file_changed",
+            ErrorCode::QuarantineUnavailable => "quarantine_unavailable",
         }
     }
 }
@@ -95,6 +98,10 @@ impl CoreError {
 
     pub fn file_changed(message: impl Into<String>) -> Self {
         Self::new(ErrorCode::FileChanged, message)
+    }
+
+    pub fn quarantine_unavailable(message: impl Into<String>) -> Self {
+        Self::new(ErrorCode::QuarantineUnavailable, message)
     }
 
     pub fn io(message: impl Into<String>) -> Self {
@@ -163,6 +170,7 @@ mod tests {
             ErrorCode::Cancelled,
             ErrorCode::PathProtected,
             ErrorCode::FileChanged,
+            ErrorCode::QuarantineUnavailable,
         ] {
             let serialized = serde_json::to_value(code).expect("серіалізація");
             assert_eq!(serialized, code.as_str(), "as_str і serde збігаються");

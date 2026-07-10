@@ -21,6 +21,7 @@ trashradar-platform-win = { path = "../infra/platform-win" }
 trashradar-index-memory = { path = "../infra/index-memory" }
 trashradar-scan-mft = { path = "../infra/scan-mft" }
 trashradar-scan-walk = { path = "../infra/scan-walk" }
+trashradar-quarantine-fs = { path = "../infra/quarantine-fs" }
 
 [dev-dependencies]
 # Mock-рантайм Tauri: наскрізні тести диспетчеризації команд без вікна.

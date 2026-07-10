@@ -149,7 +149,8 @@ export type CoreErrorCode =
   | "io"
   | "cancelled"
   | "path_protected"
-  | "file_changed";
+  | "file_changed"
+  | "quarantine_unavailable";
 
 /** Конверт помилки Core → UI: {"code", "message"}. */
 export interface CoreErrorPayload {
@@ -170,6 +171,18 @@ export interface HealthInfo {
   scanPlans: VolumeScanPlan[];
   /** Пропозиція / відмова elevation (T-034). */
   elevation: ElevationInfo;
+  /** Доступність карантину по томах (T-089): reap блокується з причиною. */
+  quarantineVolumes: VolumeQuarantineInfo[];
+}
+
+/** Доступність карантину на томі (T-089). */
+export interface VolumeQuarantineInfo {
+  /** Літера тому з двокрапкою, напр. "C:". */
+  volume: string;
+  /** true → службовий каталог записуваний, reap дозволений. */
+  available: boolean;
+  /** Людське пояснення блокування reap (лише коли available=false). */
+  reason?: string;
 }
 
 /** Сесійний стан elevation (T-034). */

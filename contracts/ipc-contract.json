@@ -4,13 +4,13 @@
   "error_envelope": {
     "$comment": "T-007: кожна помилка команди — цей конверт. Коди стабільні: додавати можна, змінювати/видаляти — ні. Rust: domain::error::CoreError; TS: ui/src/ipc/types.ts CoreErrorPayload.",
     "shape": { "code": "snake_case ErrorCode", "message": "людський текст, готовий до показу" },
-    "codes": ["internal", "invalid_argument", "not_implemented", "io", "cancelled", "path_protected", "file_changed"]
+    "codes": ["internal", "invalid_argument", "not_implemented", "io", "cancelled", "path_protected", "file_changed", "quarantine_unavailable"]
   },
   "commands": {
     "app.health": {
       "status": "implemented",
       "task": "T-009",
-      "$comment": "Diagnostics: versions, module states, IPC counters (T-009); elevated + scanPlans (T-028); elevation {status,offerPending,message…} (T-034)"
+      "$comment": "Diagnostics: versions, module states, IPC counters (T-009); elevated + scanPlans (T-028); elevation {status,offerPending,message…} (T-034); quarantineVolumes [{volume,available,reason?}] (T-089: reap blocked with visible reason)"
     },
     "app.ping": {
       "status": "implemented",

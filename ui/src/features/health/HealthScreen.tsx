@@ -329,6 +329,54 @@ export function HealthScreen() {
 
       <section>
         <h2 className="text-xs font-semibold uppercase tracking-wider text-ink-dim">
+          Quarantine (T-089)
+        </h2>
+        <p className="mt-1 text-xs text-ink-faint">
+          Том без записуваного каталогу карантину не підтримує reap — причина
+          показується тут і біля файлів
+        </p>
+        <div className="mt-2 flex flex-col gap-2">
+          {(state.data?.quarantineVolumes ?? []).length === 0 ? (
+            <div className="rounded border border-line bg-panel px-3 py-2 text-sm text-ink-dim">
+              Перевірка доступності карантину триває…
+            </div>
+          ) : (
+            (state.data?.quarantineVolumes ?? []).map((volumeInfo) => (
+              <div
+                key={volumeInfo.volume}
+                className="flex items-center justify-between gap-3 rounded border border-line bg-panel px-3 py-2"
+              >
+                <div className="min-w-0">
+                  <div className="font-mono text-sm text-ink">
+                    {volumeInfo.volume}
+                  </div>
+                  {volumeInfo.reason ? (
+                    <div className="text-xs leading-relaxed text-quarantine">
+                      {volumeInfo.reason}
+                    </div>
+                  ) : (
+                    <div className="text-xs text-ink-faint">
+                      Каталог карантину записуваний
+                    </div>
+                  )}
+                </div>
+                <span
+                  className={`shrink-0 rounded border px-2 py-0.5 font-mono text-xs ${
+                    volumeInfo.available
+                      ? "border-keep/40 bg-keep/10 text-keep"
+                      : "border-reap/40 bg-reap/10 text-reap"
+                  }`}
+                >
+                  {volumeInfo.available ? "reap OK" : "reap заблоковано"}
+                </span>
+              </div>
+            ))
+          )}
+        </div>
+      </section>
+
+      <section>
+        <h2 className="text-xs font-semibold uppercase tracking-wider text-ink-dim">
           Modules
         </h2>
         <div className="mt-2 grid grid-cols-3 gap-2">
