@@ -39,6 +39,9 @@ pub mod topic {
     pub const CATEGORY_UPDATED: &str = "category.updated";
     /// Каскад дублікатів: preliminary / confirmed + refining (T-061).
     pub const DUPLICATES_CASCADE_UPDATED: &str = "duplicates.cascade_updated";
+    /// Файл відновлено з карантину; `usedSuffix=true` = попередження про
+    /// зайнятий оригінальний шлях (T-080). Живить тост T-132.
+    pub const QUARANTINE_RESTORED: &str = "quarantine.restored";
 }
 
 /// Payload `index.updated` (T-032): дельта після USN-тика.
@@ -129,6 +132,58 @@ pub fn emit_journal_stale<R: Runtime>(
         message = %payload.message,
         "USN journal stale — full rescan required"
     );
+}
+
+/// Payload `quarantine.restored` (T-080).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)] // emit path: команда quarantine.restore_batch (T-132 wiring)
+pub struct QuarantineRestoredEvent {
+    pub entry_id: u64,
+    pub original_path: String,
+    /// Фактичний шлях після відновлення (може відрізнятись суфіксом).
+    pub restored_path: String,
+    /// Оригінальний шлях був зайнятий → застосовано суфікс (DoD T-080).
+    pub used_suffix: bool,
+    /// Попередження для UI — лише коли used_suffix.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+impl QuarantineRestoredEvent {
+    #[allow(dead_code)] // emit path: T-132 wiring
+    pub fn from_outcome(outcome: &trashradar_app::RestoreOutcome) -> Self {
+        let message = outcome.used_suffix.then(|| {
+            format!(
+                "Оригінальний шлях «{}» був зайнятий — файл відновлено як «{}».",
+                outcome.entry.original_path, outcome.restored_path
+            )
+        });
+        Self {
+            entry_id: outcome.entry.id.0,
+            original_path: outcome.entry.original_path.clone(),
+            restored_path: outcome.restored_path.clone(),
+            used_suffix: outcome.used_suffix,
+            message,
+        }
+    }
+}
+
+/// Емісія результату відновлення (T-080 DoD: подія-попередження при суфіксі).
+#[allow(dead_code)] // wired by quarantine.restore_batch command (T-132)
+pub fn emit_quarantine_restored<R: Runtime>(
+    app: &AppHandle<R>,
+    outcome: &trashradar_app::RestoreOutcome,
+) {
+    let payload = QuarantineRestoredEvent::from_outcome(outcome);
+    if let Some(message) = &payload.message {
+        tracing::warn!(
+            entry_id = payload.entry_id,
+            restored_path = %payload.restored_path,
+            "{message}"
+        );
+    }
+    emit(app, topic::QUARANTINE_RESTORED, &payload);
 }
 
 /// Реєстр реалізованих scan/index/aggregate-подій (health / smoke).
@@ -465,6 +520,56 @@ mod journal_stale_tests {
         assert_eq!(wire_name(topic::SCAN_JOURNAL_STALE), "scan:journal_stale");
         assert_eq!(topic::INDEX_UPDATED, "index.updated");
         assert!(scan_event_topics().contains(&topic::INDEX_UPDATED));
+    }
+}
+
+#[cfg(test)]
+mod quarantine_restored_tests {
+    use super::*;
+    use trashradar_app::RestoreOutcome;
+    use trashradar_domain::candidate::ByteSize;
+    use trashradar_domain::quarantine::{QuarantineEntry, QuarantineEntryId, QuarantineStatus};
+
+    fn outcome(restored_path: &str, used_suffix: bool) -> RestoreOutcome {
+        RestoreOutcome {
+            entry: QuarantineEntry {
+                id: QuarantineEntryId(7),
+                batch_id: None,
+                original_path: r"C:\Users\Ada\Videos\clip.mp4".into(),
+                surrogate_name: "00000007.bin".into(),
+                size: ByteSize(4096),
+                quarantined_at_unix: 1_750_000_000,
+                expires_at_unix: 1_752_592_000,
+                status: QuarantineStatus::Restored,
+            },
+            restored_path: restored_path.into(),
+            used_suffix,
+        }
+    }
+
+    /// DoD T-080: суфікс → подія-попередження з обома шляхами.
+    #[test]
+    fn suffix_restore_carries_warning_message() {
+        let ev = QuarantineRestoredEvent::from_outcome(&outcome(
+            r"C:\Users\Ada\Videos\clip (відновлено).mp4",
+            true,
+        ));
+        assert_eq!(ev.entry_id, 7);
+        assert!(ev.used_suffix);
+        let message = ev.message.expect("попередження при суфіксі");
+        assert!(message.contains(r"C:\Users\Ada\Videos\clip.mp4"));
+        assert!(message.contains("(відновлено)"));
+        assert_eq!(topic::QUARANTINE_RESTORED, "quarantine.restored");
+        assert_eq!(wire_name(topic::QUARANTINE_RESTORED), "quarantine:restored");
+    }
+
+    #[test]
+    fn clean_restore_has_no_warning() {
+        let ev =
+            QuarantineRestoredEvent::from_outcome(&outcome(r"C:\Users\Ada\Videos\clip.mp4", false));
+        assert!(!ev.used_suffix);
+        assert!(ev.message.is_none());
+        assert_eq!(ev.restored_path, ev.original_path);
     }
 }
 

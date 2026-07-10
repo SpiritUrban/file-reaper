@@ -78,6 +78,35 @@ impl FileIdentity {
         )))
     }
 }
+/// Стеля спроб підбору вільного імені при відновленні (T-080).
+pub const RESTORE_SUFFIX_MAX_ATTEMPTS: u32 = 100;
+
+/// Шлях призначення для відновлення з карантину (T-080, чисте правило).
+///
+/// Спроба 0 — оригінальний шлях як є; далі суфікс перед розширенням:
+/// `clip.mp4` → `clip (відновлено).mp4` → `clip (відновлено 2).mp4` → …
+/// Існування шляху перевіряє шлюз (atomic no-replace move), не це правило.
+pub fn restore_destination(original_path: &str, attempt: u32) -> String {
+    if attempt == 0 {
+        return original_path.to_string();
+    }
+    let (directory, name) = match original_path.rfind(['\\', '/']) {
+        Some(separator) => original_path.split_at(separator + 1),
+        None => ("", original_path),
+    };
+    // Остання крапка не на початку імені; dotfile (`.gitignore`) — без розширення.
+    let (stem, extension) = match name.rfind('.') {
+        Some(dot) if dot > 0 => name.split_at(dot),
+        _ => (name, ""),
+    };
+    let suffix = if attempt == 1 {
+        " (відновлено)".to_string()
+    } else {
+        format!(" (відновлено {attempt})")
+    };
+    format!("{directory}{stem}{suffix}{extension}")
+}
+
 /// Причина блокування шляху останньою лінією захисту (T-085).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProtectedPathKind {
@@ -237,6 +266,40 @@ mod tests {
         assert!(!is_under_service_directory(r"C:\Users\Ada\video.mp4"));
         assert!(!is_under_service_directory(r"\\server\.trashradar\x"));
         assert!(!is_under_service_directory(""));
+    }
+
+    #[test]
+    fn restore_destination_suffixes_before_extension() {
+        let original = r"C:\Users\Ada\Videos\clip.mp4";
+        assert_eq!(restore_destination(original, 0), original);
+        assert_eq!(
+            restore_destination(original, 1),
+            r"C:\Users\Ada\Videos\clip (відновлено).mp4"
+        );
+        assert_eq!(
+            restore_destination(original, 2),
+            r"C:\Users\Ada\Videos\clip (відновлено 2).mp4"
+        );
+        // Без розширення — суфікс у кінці.
+        assert_eq!(
+            restore_destination(r"C:\data\archive", 1),
+            r"C:\data\archive (відновлено)"
+        );
+        // Dotfile — крапка на початку не є розширенням.
+        assert_eq!(
+            restore_destination(r"C:\repo\.gitignore", 1),
+            r"C:\repo\.gitignore (відновлено)"
+        );
+        // Multi-dot: суфікс перед останнім розширенням.
+        assert_eq!(
+            restore_destination(r"C:\data\backup.tar.gz", 1),
+            r"C:\data\backup.tar (відновлено).gz"
+        );
+        // Ім'я без каталогу.
+        assert_eq!(
+            restore_destination("clip.mp4", 3),
+            "clip (відновлено 3).mp4"
+        );
     }
 
     #[test]

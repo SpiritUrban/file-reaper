@@ -121,6 +121,44 @@ fn system_time_to_filetime(time: std::time::SystemTime) -> Option<FsTimestamp> {
         }
     }
 }
+/// Результат no-replace move (T-080).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoReplaceMove {
+    Moved,
+    /// Ціль уже існує — джерело НЕ переміщено, ціль НЕ перезаписано.
+    DestinationOccupied,
+}
+
+/// Атомарний move, який ніколи не перезаписує наявну ціль (T-080 restore).
+///
+/// На відміну від `std::fs::rename` (на Windows = `MOVEFILE_REPLACE_EXISTING`,
+/// тобто мовчки затирає ціль), зайнятий шлях повертає `DestinationOccupied` —
+/// викликач підбирає інше ім'я. Захист D4: відновлення не знищує чужий файл.
+pub fn move_file_no_replace(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+) -> Result<NoReplaceMove, CoreError> {
+    #[cfg(windows)]
+    {
+        windows::move_file_no_replace(source, destination)
+    }
+    #[cfg(not(windows))]
+    {
+        if destination.exists() {
+            return Ok(NoReplaceMove::DestinationOccupied);
+        }
+        std::fs::rename(source, destination)
+            .map(|_| NoReplaceMove::Moved)
+            .map_err(|error| {
+                CoreError::io(format!(
+                    "Не вдалося перемістити {} → {}: {error}",
+                    source.display(),
+                    destination.display()
+                ))
+            })
+    }
+}
+
 /// Додати Windows-атрибут `HIDDEN`, зберігши решту атрибутів (T-077).
 pub fn set_hidden(path: &std::path::Path) -> Result<(), CoreError> {
     #[cfg(windows)]
@@ -222,6 +260,7 @@ mod windows {
         fn GetLastError() -> u32;
         fn GetFileAttributesW(file_name: *const u16) -> u32;
         fn SetFileAttributesW(file_name: *const u16, file_attributes: u32) -> i32;
+        fn MoveFileW(existing_file_name: *const u16, new_file_name: *const u16) -> i32;
     }
 
     #[link(name = "advapi32")]
@@ -254,6 +293,9 @@ mod windows {
     const DRIVE_RAMDISK: u32 = 6;
     /// ERROR_CANCELLED — користувач закрив UAC.
     const ERROR_CANCELLED: u32 = 1223;
+    /// Ціль move вже існує (T-080): FILE_EXISTS / ALREADY_EXISTS.
+    const ERROR_FILE_EXISTS: u32 = 80;
+    const ERROR_ALREADY_EXISTS: u32 = 183;
     /// SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI (без зайвих діалогів shell).
     const SEE_MASK_NOCLOSEPROCESS: u32 = 0x0000_0040;
     const SW_SHOWNORMAL: i32 = 1;
@@ -295,6 +337,27 @@ mod windows {
             .encode_wide()
             .chain(std::iter::once(0))
             .collect()
+    }
+
+    /// MoveFileW без replace-прапорців: зайнята ціль → помилка ОС, не перезапис.
+    pub fn move_file_no_replace(
+        source: &std::path::Path,
+        destination: &std::path::Path,
+    ) -> Result<super::NoReplaceMove, CoreError> {
+        let wide_source = wide_path(source);
+        let wide_destination = wide_path(destination);
+        if unsafe { MoveFileW(wide_source.as_ptr(), wide_destination.as_ptr()) } != 0 {
+            return Ok(super::NoReplaceMove::Moved);
+        }
+        let code = unsafe { GetLastError() };
+        if code == ERROR_FILE_EXISTS || code == ERROR_ALREADY_EXISTS {
+            return Ok(super::NoReplaceMove::DestinationOccupied);
+        }
+        Err(CoreError::io(format!(
+            "Не вдалося перемістити {} → {} (Win32 {code}).",
+            source.display(),
+            destination.display()
+        )))
     }
 
     pub fn set_hidden(path: &std::path::Path) -> Result<(), CoreError> {
@@ -526,6 +589,40 @@ mod windows {
             let env = WinScanEnvironment;
             assert_eq!(env.is_elevated(), is_process_elevated());
             assert_eq!(env.list_scan_volumes(), list_drive_letters());
+        }
+
+        /// T-080: move без перезапису — зайнята ціль недоторкана, джерело на місці.
+        #[test]
+        fn move_no_replace_moves_and_never_overwrites() {
+            use super::super::{move_file_no_replace, NoReplaceMove};
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let dir = std::env::temp_dir().join(format!("trashradar-t080-move-{nonce}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            let source = dir.join("source.bin");
+            let destination = dir.join("destination.bin");
+
+            // Вільна ціль → переміщено.
+            std::fs::write(&source, b"payload").unwrap();
+            assert_eq!(
+                move_file_no_replace(&source, &destination).unwrap(),
+                NoReplaceMove::Moved
+            );
+            assert!(!source.exists());
+            assert_eq!(std::fs::read(&destination).unwrap(), b"payload");
+
+            // Зайнята ціль → відмова без перезапису; обидва файли недоторкані.
+            std::fs::write(&source, b"second").unwrap();
+            assert_eq!(
+                move_file_no_replace(&source, &destination).unwrap(),
+                NoReplaceMove::DestinationOccupied
+            );
+            assert_eq!(std::fs::read(&source).unwrap(), b"second");
+            assert_eq!(std::fs::read(&destination).unwrap(), b"payload");
+
+            std::fs::remove_dir_all(dir).unwrap();
         }
 
         /// `relaunch_elevated` при вже elevated — no-op без UAC (не відкриває діалог).

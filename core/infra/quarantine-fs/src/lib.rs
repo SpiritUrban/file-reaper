@@ -9,12 +9,14 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use trashradar_app::ports::QuarantineFs;
+use trashradar_app::ports::{QuarantineFs, RestoreMove};
 use trashradar_domain::{
     error::CoreError,
-    quarantine::{FileIdentity, QuarantineGuard},
+    quarantine::{is_under_service_directory, FileIdentity, QuarantineGuard},
 };
-use trashradar_platform_win::{read_file_identity, set_hidden};
+use trashradar_platform_win::{
+    move_file_no_replace, read_file_identity, set_hidden, NoReplaceMove,
+};
 
 pub use trashradar_domain::quarantine::SERVICE_DIRECTORY_NAME;
 
@@ -74,6 +76,52 @@ impl QuarantineFs for NativeQuarantineFs {
                 source.display()
             ))
         })
+    }
+
+    fn restore_from_quarantine(
+        &self,
+        surrogate_path: &str,
+        destination_path: &str,
+    ) -> Result<RestoreMove, CoreError> {
+        let surrogate = Path::new(surrogate_path);
+        let destination = Path::new(destination_path);
+        // Відновлюємо лише з-під `.trashradar\quarantine` (та сама форма
+        // шляху, що й destination reap-а).
+        validate_quarantine_destination(surrogate).map_err(|_| {
+            CoreError::invalid_argument(
+                "Джерело restore має бути всередині .trashradar\\quarantine.",
+            )
+        })?;
+        // Ціль ніколи не всередині службового каталогу (відновлення «в карантин»
+        // безглузде і небезпечне для журналу).
+        if is_under_service_directory(destination_path) {
+            return Err(CoreError::invalid_argument(
+                "Ціль restore не може бути в службовому каталозі TrashRadar.",
+            ));
+        }
+        if let (Some(source_volume), Some(destination_volume)) = (
+            windows_volume(surrogate_path),
+            windows_volume(destination_path),
+        ) {
+            if source_volume != destination_volume {
+                return Err(CoreError::invalid_argument(
+                    "Restore дозволяє лише atomic move у межах того самого тому.",
+                ));
+            }
+        }
+        // Каталог оригінального шляху міг зникнути після reap — відтворюємо.
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                CoreError::io(format!(
+                    "Не вдалося відтворити каталог для відновлення {}: {error}",
+                    parent.display()
+                ))
+            })?;
+        }
+        match move_file_no_replace(surrogate, destination)? {
+            NoReplaceMove::Moved => Ok(RestoreMove::Restored),
+            NoReplaceMove::DestinationOccupied => Ok(RestoreMove::DestinationOccupied),
+        }
     }
 }
 
@@ -335,6 +383,26 @@ mod tests {
                 .status,
             QuarantineStatus::Quarantined
         );
+
+        // T-080: повний цикл — restore повертає файл, manifest → Restored.
+        use trashradar_app::{QuarantineRestorer, RestoreRequest};
+        let restored = QuarantineRestorer::new(&NativeQuarantineFs, &database)
+            .restore_one(RestoreRequest {
+                entry_id: QuarantineEntryId(77),
+                surrogate_path: destination.to_string_lossy().into_owned(),
+            })
+            .unwrap();
+        assert!(!restored.used_suffix);
+        assert_eq!(fs::read(&source).unwrap(), b"video-data");
+        assert!(!destination.exists());
+        assert_eq!(
+            database
+                .get_quarantine_entry(QuarantineEntryId(77))
+                .unwrap()
+                .unwrap()
+                .status,
+            QuarantineStatus::Restored
+        );
         drop(database);
         fs::remove_dir_all(root).unwrap();
     }
@@ -361,6 +429,91 @@ mod tests {
         assert_eq!(fs::read(&destination).unwrap(), b"candidate-data");
         fs::remove_dir_all(root).unwrap();
     }
+    /// DoD T-080: reap → restore повертає файл на оригінальний шлях (реальна FS),
+    /// включно з відтворенням зниклого батьківського каталогу.
+    #[test]
+    fn restore_roundtrip_returns_file_to_original_path() {
+        let root = temp_volume("restore-roundtrip");
+        let directory = NativeQuarantineFs.ensure_at_root(&root).unwrap();
+        let nested = root.join("projects").join("video");
+        fs::create_dir_all(&nested).unwrap();
+        let source = nested.join("candidate.mp4");
+        fs::write(&source, b"video-data").unwrap();
+        let identity = read_file_identity(&source).unwrap();
+        let surrogate = directory.quarantine_root.join("00000042.bin");
+
+        NativeQuarantineFs
+            .move_into_quarantine(
+                &source.to_string_lossy(),
+                &surrogate.to_string_lossy(),
+                identity,
+                &[],
+            )
+            .unwrap();
+        assert!(!source.exists());
+
+        // Каталог оригіналу зник після reap — restore його відтворює.
+        fs::remove_dir_all(&nested).unwrap();
+
+        let moved = NativeQuarantineFs
+            .restore_from_quarantine(&surrogate.to_string_lossy(), &source.to_string_lossy())
+            .unwrap();
+        assert_eq!(moved, RestoreMove::Restored);
+        assert_eq!(fs::read(&source).unwrap(), b"video-data");
+        assert!(!surrogate.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// DoD T-080: зайнятий оригінальний шлях НЕ перезаписується — шлюз
+    /// повертає DestinationOccupied, обидва файли недоторкані.
+    #[test]
+    fn restore_occupied_destination_is_never_overwritten() {
+        let root = temp_volume("restore-occupied");
+        let directory = NativeQuarantineFs.ensure_at_root(&root).unwrap();
+        let source = root.join("report.pdf");
+        fs::write(&source, b"original").unwrap();
+        let identity = read_file_identity(&source).unwrap();
+        let surrogate = directory.quarantine_root.join("00000007.bin");
+        NativeQuarantineFs
+            .move_into_quarantine(
+                &source.to_string_lossy(),
+                &surrogate.to_string_lossy(),
+                identity,
+                &[],
+            )
+            .unwrap();
+
+        // Користувач створив НОВИЙ файл на тому самому шляху.
+        fs::write(&source, b"users-new-file").unwrap();
+
+        let moved = NativeQuarantineFs
+            .restore_from_quarantine(&surrogate.to_string_lossy(), &source.to_string_lossy())
+            .unwrap();
+        assert_eq!(moved, RestoreMove::DestinationOccupied);
+        assert_eq!(fs::read(&source).unwrap(), b"users-new-file");
+        assert_eq!(fs::read(&surrogate).unwrap(), b"original");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Межі restore: джерело лише з карантину; ціль ніколи не в службовому каталозі.
+    #[test]
+    fn restore_validates_source_and_destination_boundaries() {
+        use trashradar_domain::error::ErrorCode;
+
+        let outside_source = NativeQuarantineFs
+            .restore_from_quarantine(r"C:\Users\Ada\random.bin", r"C:\Users\Ada\target.bin")
+            .unwrap_err();
+        assert_eq!(outside_source.code, ErrorCode::InvalidArgument);
+
+        let into_service = NativeQuarantineFs
+            .restore_from_quarantine(
+                r"C:\.trashradar\quarantine\00000001.bin",
+                r"C:\.trashradar\quarantine\evil.bin",
+            )
+            .unwrap_err();
+        assert_eq!(into_service.code, ErrorCode::InvalidArgument);
+    }
+
     #[test]
     fn changed_file_is_rejected_before_move() {
         use trashradar_domain::error::ErrorCode;

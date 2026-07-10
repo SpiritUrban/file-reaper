@@ -56,7 +56,11 @@
     },
     "reap.execute": { "status": "planned", "task": "T-079" },
     "reap.undo_batch": { "status": "planned", "task": "T-081" },
-    "quarantine.restore_batch": { "status": "planned", "task": "T-080" },
+    "quarantine.restore_batch": {
+      "status": "planned",
+      "task": "T-080",
+      "$comment": "Core use case ready (QuarantineRestorer, T-080); command wiring with manifest DB state — T-081/T-132"
+    },
     "quarantine.purge": { "status": "planned", "task": "T-083" },
     "settings.get": { "status": "planned", "task": "T-092" },
     "settings.set": { "status": "planned", "task": "T-092" },
@@ -104,6 +108,11 @@
       "$comment": "Duplicate cascade progress: {phase, confidence: preliminary|confirmed, refining, reclaimableBytes, groupCount, filesInGroups, cancelled}. After stage 2: preliminary+refining; after stage 3: confirmed, refining=false"
     },
     "preview.ready": { "status": "planned", "task": "T-067" },
+    "quarantine.restored": {
+      "status": "implemented",
+      "task": "T-080",
+      "$comment": "{entryId, originalPath, restoredPath, usedSuffix, message?}; usedSuffix=true → message = warning about occupied original path; feeds restore toast (T-132)"
+    },
     "quarantine.changed": { "status": "planned", "task": "T-082" },
     "quarantine.entry_expired": { "status": "planned", "task": "T-082" },
     "settings.changed": { "status": "planned", "task": "T-093" }

@@ -1,13 +1,18 @@
-//! Application use case транзакційного reap (T-079, architecture.md §7.3).
+//! Application use cases Quarantine: транзакційний reap (T-079) і
+//! restore на оригінальний шлях із суфіксом при конфлікті (T-080) —
+//! architecture.md §7.3.
 
 use std::path::Path;
 
 use trashradar_domain::{
     error::CoreError,
-    quarantine::{FileIdentity, QuarantineEntry, QuarantineStatus},
+    quarantine::{
+        restore_destination, FileIdentity, QuarantineEntry, QuarantineEntryId, QuarantineStatus,
+        RESTORE_SUFFIX_MAX_ATTEMPTS,
+    },
 };
 
-use crate::ports::{QuarantineFs, QuarantineManifest};
+use crate::ports::{QuarantineFs, QuarantineManifest, RestoreMove};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReapRequest {
@@ -63,6 +68,99 @@ impl<'a, F: QuarantineFs, M: QuarantineManifest> TransactionalReaper<'a, F, M> {
         requests
             .into_iter()
             .map(|request| self.reap_one(request))
+            .collect()
+    }
+}
+
+/// Запит на відновлення одного запису журналу (T-080).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestoreRequest {
+    pub entry_id: QuarantineEntryId,
+    /// Повний шлях суррогата у `<том>\.trashradar\quarantine` (резолвиться
+    /// викликачем з `QuarantineDirectory` + `surrogate_name` manifest).
+    pub surrogate_path: String,
+}
+
+/// Підсумок відновлення (T-080).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestoreOutcome {
+    pub entry: QuarantineEntry,
+    /// Фактичний шлях файла після відновлення.
+    pub restored_path: String,
+    /// Оригінальний шлях був зайнятий → застосовано суфікс; UI показує
+    /// подію-попередження (DoD T-080).
+    pub used_suffix: bool,
+}
+
+/// Use case відновлення: зворотний move + перехід manifest у `Restored`.
+pub struct QuarantineRestorer<'a, F: QuarantineFs, M: QuarantineManifest> {
+    filesystem: &'a F,
+    manifest: &'a M,
+}
+
+impl<'a, F: QuarantineFs, M: QuarantineManifest> QuarantineRestorer<'a, F, M> {
+    pub fn new(filesystem: &'a F, manifest: &'a M) -> Self {
+        Self {
+            filesystem,
+            manifest,
+        }
+    }
+
+    /// Відновлює файл на оригінальний шлях; зайнятий шлях → суфікс за
+    /// доменним правилом [`restore_destination`]. Ціль ніколи не
+    /// перезаписується (no-replace move у шлюзі).
+    pub fn restore_one(&self, request: RestoreRequest) -> Result<RestoreOutcome, CoreError> {
+        let mut entry = self.manifest.get_entry(request.entry_id)?.ok_or_else(|| {
+            CoreError::invalid_argument(format!(
+                "Запис карантину {} не знайдено.",
+                request.entry_id.0
+            ))
+        })?;
+        if entry.status != QuarantineStatus::Quarantined {
+            return Err(CoreError::invalid_argument(format!(
+                "Відновити можна лише запис у статусі quarantined (зараз {:?}).",
+                entry.status
+            )));
+        }
+
+        let mut attempt = 0u32;
+        let (restored_path, used_suffix) = loop {
+            let candidate = restore_destination(&entry.original_path, attempt);
+            match self
+                .filesystem
+                .restore_from_quarantine(&request.surrogate_path, &candidate)?
+            {
+                RestoreMove::Restored => break (candidate, attempt > 0),
+                RestoreMove::DestinationOccupied => {
+                    attempt += 1;
+                    if attempt >= RESTORE_SUFFIX_MAX_ATTEMPTS {
+                        return Err(CoreError::io(format!(
+                            "Не вдалося підібрати вільне ім'я для відновлення «{}» ({} спроб).",
+                            entry.original_path, RESTORE_SUFFIX_MAX_ATTEMPTS
+                        )));
+                    }
+                }
+            }
+        };
+
+        self.manifest
+            .update_status(entry.id, QuarantineStatus::Restored)?;
+        entry.status = QuarantineStatus::Restored;
+        Ok(RestoreOutcome {
+            entry,
+            restored_path,
+            used_suffix,
+        })
+    }
+
+    /// Послідовний батч відновлень (основа масового undo T-081).
+    pub fn restore_batch(
+        &self,
+        requests: Vec<RestoreRequest>,
+    ) -> Result<Vec<RestoreOutcome>, CoreError> {
+        requests
+            .into_iter()
+            .map(|request| self.restore_one(request))
             .collect()
     }
 }
@@ -173,6 +271,23 @@ mod tests {
             self.crash.hit(CrashPhase::AfterMove, &self.crash.moves);
             Ok(())
         }
+
+        fn restore_from_quarantine(
+            &self,
+            surrogate_path: &str,
+            destination_path: &str,
+        ) -> Result<RestoreMove, CoreError> {
+            let mut files = self.files.lock().unwrap();
+            if files.contains(destination_path) {
+                return Ok(RestoreMove::DestinationOccupied);
+            }
+            assert!(
+                files.remove(surrogate_path),
+                "surrogate exists exactly once"
+            );
+            assert!(files.insert(destination_path.to_string()));
+            Ok(RestoreMove::Restored)
+        }
     }
 
     fn request(id: u64) -> ReapRequest {
@@ -228,6 +343,104 @@ mod tests {
             entries.lock().unwrap()[&1].status,
             QuarantineStatus::Quarantined
         );
+    }
+
+    /// Пара FakeFs+FakeManifest без crash-інструментації для restore-тестів.
+    fn restore_fixture(
+        entry_status: QuarantineStatus,
+        files: &[&str],
+    ) -> (FakeFs, FakeManifest, RestoreRequest, String) {
+        let quarantined = {
+            let mut entry = request(1).entry;
+            entry.status = entry_status;
+            entry
+        };
+        let original = quarantined.original_path.clone();
+        let surrogate_path = format!(r"C:\.trashradar\quarantine\{}", quarantined.surrogate_name);
+        let crash = Arc::new(CrashControl {
+            phase: CrashPhase::AfterMove,
+            crash_call: usize::MAX,
+            inserts: Mutex::new(0),
+            moves: Mutex::new(0),
+            updates: Mutex::new(0),
+        });
+        let fs = FakeFs {
+            files: Arc::new(Mutex::new(
+                files.iter().map(|f| f.to_string()).collect::<HashSet<_>>(),
+            )),
+            crash: Arc::clone(&crash),
+        };
+        let manifest = FakeManifest {
+            entries: Arc::new(Mutex::new(HashMap::from([(1, quarantined.clone())]))),
+            crash,
+        };
+        let request = RestoreRequest {
+            entry_id: quarantined.id,
+            surrogate_path,
+        };
+        (fs, manifest, request, original)
+    }
+
+    /// DoD T-080: відновлення повертає файл на оригінальний шлях; статус → Restored.
+    #[test]
+    fn restore_returns_file_to_original_path() {
+        let (fs, manifest, request, original) = restore_fixture(QuarantineStatus::Quarantined, &[]);
+        {
+            fs.files
+                .lock()
+                .unwrap()
+                .insert(request.surrogate_path.clone());
+        }
+        let outcome = QuarantineRestorer::new(&fs, &manifest)
+            .restore_one(request.clone())
+            .unwrap();
+        assert_eq!(outcome.restored_path, original);
+        assert!(!outcome.used_suffix);
+        assert_eq!(outcome.entry.status, QuarantineStatus::Restored);
+        assert_eq!(
+            manifest.entries.lock().unwrap()[&1].status,
+            QuarantineStatus::Restored
+        );
+        let files = fs.files.lock().unwrap();
+        assert!(files.contains(&original));
+        assert!(!files.contains(&request.surrogate_path));
+    }
+
+    /// DoD T-080: зайнятий шлях → суфікс; чужий файл на оригінальному шляху
+    /// не перезаписаний.
+    #[test]
+    fn restore_occupied_path_uses_suffix_without_overwrite() {
+        let (fs, manifest, request, original) = restore_fixture(QuarantineStatus::Quarantined, &[]);
+        {
+            let mut files = fs.files.lock().unwrap();
+            files.insert(request.surrogate_path.clone());
+            files.insert(original.clone()); // хтось уже зайняв оригінальний шлях
+        }
+        let outcome = QuarantineRestorer::new(&fs, &manifest)
+            .restore_one(request)
+            .unwrap();
+        assert!(outcome.used_suffix);
+        assert_ne!(outcome.restored_path, original);
+        assert!(outcome.restored_path.contains("(відновлено)"));
+        let files = fs.files.lock().unwrap();
+        assert!(files.contains(&original), "чужий файл лишився недоторканим");
+        assert!(files.contains(&outcome.restored_path));
+        assert_eq!(
+            manifest.entries.lock().unwrap()[&1].status,
+            QuarantineStatus::Restored
+        );
+    }
+
+    /// Відновлювати можна лише quarantined-записи: in_flight/restored — відмова.
+    #[test]
+    fn restore_rejects_non_quarantined_entry() {
+        use trashradar_domain::error::ErrorCode;
+        let (fs, manifest, request, _original) = restore_fixture(QuarantineStatus::Restored, &[]);
+        let error = QuarantineRestorer::new(&fs, &manifest)
+            .restore_one(request)
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidArgument);
+        assert!(error.message.contains("quarantined"));
     }
 
     #[test]

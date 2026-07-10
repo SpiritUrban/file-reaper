@@ -302,6 +302,7 @@ export type EventName =
   | "category.updated"
   | "duplicates.cascade_updated"
   | "preview.ready"
+  | "quarantine.restored"
   | "quarantine.changed"
   | "quarantine.entry_expired"
   | "settings.changed";
@@ -321,6 +322,18 @@ export interface IndexUpdatedEvent {
   modified: number;
   deleted: number;
   renamed: number;
+}
+
+/** Подія quarantine.restored (T-080): файл повернуто з карантину. */
+export interface QuarantineRestoredEvent {
+  entryId: number;
+  originalPath: string;
+  /** Фактичний шлях після відновлення (може мати суфікс). */
+  restoredPath: string;
+  /** Оригінальний шлях був зайнятий → застосовано суфікс. */
+  usedSuffix: boolean;
+  /** Попередження для показу — лише коли usedSuffix=true. */
+  message?: string;
 }
 
 /** Параметри scan.start (T-033). */

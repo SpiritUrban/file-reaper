@@ -48,7 +48,10 @@ pub use preview::{
     PreviewCacheManager, PreviewPrefetchCandidate, PreviewPrefetchMetrics, PreviewPrefetcher,
     PreviewPriority, PreviewScheduler,
 };
-pub use quarantine::{ReapOutcome, ReapRequest, TransactionalReaper};
+pub use quarantine::{
+    QuarantineRestorer, ReapOutcome, ReapRequest, RestoreOutcome, RestoreRequest,
+    TransactionalReaper,
+};
 pub use trashradar_domain::aggregate::{CandidateContribution, CategoryRollup, FreeableSummary};
 pub use trashradar_domain::duplicates::{
     DuplicateRole, KeepPolicy, MarkedDuplicateGroup, MarkedDuplicateMember,

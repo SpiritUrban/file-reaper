@@ -341,6 +341,15 @@ pub trait VideoFrameSource: Send + Sync {
     ) -> Result<Option<ScrubStrip>, CoreError>;
 }
 
+/// Результат спроби відновлення на конкретний шлях (T-080).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestoreMove {
+    Restored,
+    /// Ціль уже зайнята — нічого не перезаписано; викликач підбирає
+    /// наступне ім'я за доменним правилом `restore_destination`.
+    DestinationOccupied,
+}
+
 /// Єдиний шлюз деструктивних операцій з FS (move/restore/purge).
 /// Реалізація: `quarantine-fs` (T-077, T-079…T-084). Інваріант D4:
 /// жоден інший порт не має права змінювати файлову систему.
@@ -353,6 +362,14 @@ pub trait QuarantineFs {
         expected: FileIdentity,
         trashradar_roots: &[String],
     ) -> Result<(), CoreError>;
+
+    /// Зворотний move з карантину на цільовий шлях (T-080). НІКОЛИ не
+    /// перезаписує наявний файл: зайнята ціль → `DestinationOccupied`.
+    fn restore_from_quarantine(
+        &self,
+        surrogate_path: &str,
+        destination_path: &str,
+    ) -> Result<RestoreMove, CoreError>;
 }
 
 /// Хешування для каскаду дублікатів. Реалізація: `hash` (T-059/T-060).
