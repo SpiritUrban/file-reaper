@@ -42,6 +42,10 @@ pub mod topic {
     /// Файл відновлено з карантину; `usedSuffix=true` = попередження про
     /// зайнятий оригінальний шлях (T-080). Живить тост T-132.
     pub const QUARANTINE_RESTORED: &str = "quarantine.restored";
+    #[allow(dead_code)] // lifecycle wiring starts with Quarantine screen T-131
+    pub const QUARANTINE_CHANGED: &str = "quarantine.changed";
+    #[allow(dead_code)] // lifecycle wiring starts with Quarantine screen T-131
+    pub const QUARANTINE_ENTRY_EXPIRED: &str = "quarantine.entry_expired";
 }
 
 /// Payload `index.updated` (T-032): дельта після USN-тика.
@@ -184,6 +188,59 @@ pub fn emit_quarantine_restored<R: Runtime>(
         );
     }
     emit(app, topic::QUARANTINE_RESTORED, &payload);
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)] // emitted by scheduled shell lifecycle once T-131 wires Quarantine UI
+pub struct QuarantineChangedEvent {
+    pub purged_count: u64,
+    pub purged_bytes: u64,
+    pub held_bytes: u64,
+    pub threshold_exceeded: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)] // emitted by scheduled shell lifecycle once T-131 wires Quarantine UI
+pub struct QuarantineEntryExpiredEvent {
+    pub entry_id: u64,
+    pub original_path: String,
+    pub size_bytes: u64,
+}
+
+#[allow(dead_code)] // shell lifecycle wiring follows with T-131
+pub fn emit_quarantine_sweep<R: Runtime>(app: &AppHandle<R>, result: &trashradar_app::SweepResult) {
+    for entry in &result.purged {
+        emit(
+            app,
+            topic::QUARANTINE_ENTRY_EXPIRED,
+            &QuarantineEntryExpiredEvent {
+                entry_id: entry.id.0,
+                original_path: entry.original_path.clone(),
+                size_bytes: entry.size.0,
+            },
+        );
+    }
+    let message = result.threshold_exceeded.then(|| {
+        format!(
+            "Quarantine утримує {} байт — перевищено налаштований поріг.",
+            result.held_bytes
+        )
+    });
+    emit(
+        app,
+        topic::QUARANTINE_CHANGED,
+        &QuarantineChangedEvent {
+            purged_count: result.purged.len() as u64,
+            purged_bytes: result.purged_bytes,
+            held_bytes: result.held_bytes,
+            threshold_exceeded: result.threshold_exceeded,
+            message,
+        },
+    );
 }
 
 /// Реєстр реалізованих scan/index/aggregate-подій (health / smoke).

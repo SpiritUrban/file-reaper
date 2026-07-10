@@ -3,6 +3,7 @@
 //! architecture.md §7.3.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use trashradar_domain::{
     error::CoreError,
@@ -13,6 +14,7 @@ use trashradar_domain::{
 };
 
 use crate::ports::{QuarantineFs, QuarantineManifest, RestoreMove};
+use crate::workers::{JobHandle, JobPriority, WorkerPool};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReapRequest {
@@ -194,6 +196,96 @@ impl<'a, F: QuarantineFs, M: QuarantineManifest> QuarantineRestorer<'a, F, M> {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SweepResult {
+    pub purged: Vec<QuarantineEntry>,
+    pub purged_bytes: u64,
+    pub held_bytes: u64,
+    pub threshold_exceeded: bool,
+}
+
+/// Фоновий TTL-sweeper Quarantine (T-082).
+pub struct QuarantineSweeper<'a, F: QuarantineFs, M: QuarantineManifest> {
+    filesystem: &'a F,
+    manifest: &'a M,
+}
+
+impl<'a, F: QuarantineFs, M: QuarantineManifest> QuarantineSweeper<'a, F, M> {
+    pub fn new(filesystem: &'a F, manifest: &'a M) -> Self {
+        Self {
+            filesystem,
+            manifest,
+        }
+    }
+
+    pub fn sweep_once(
+        &self,
+        now_unix: i64,
+        warning_threshold_bytes: u64,
+        mut surrogate_path: impl FnMut(&QuarantineEntry) -> Result<String, CoreError>,
+    ) -> Result<SweepResult, CoreError> {
+        let entries = self.manifest.list_entries()?;
+        let mut purged = Vec::new();
+        let mut purged_bytes = 0u64;
+        for mut entry in entries
+            .iter()
+            .filter(|entry| {
+                entry.status == QuarantineStatus::Quarantined && entry.expires_at_unix <= now_unix
+            })
+            .cloned()
+        {
+            self.filesystem
+                .purge_from_quarantine(&surrogate_path(&entry)?)?;
+            self.manifest
+                .update_status(entry.id, QuarantineStatus::Purged)?;
+            purged_bytes = purged_bytes.saturating_add(entry.size.0);
+            entry.status = QuarantineStatus::Purged;
+            purged.push(entry);
+        }
+        let held_bytes = entries
+            .iter()
+            .filter(|entry| {
+                entry.status == QuarantineStatus::Quarantined && entry.expires_at_unix > now_unix
+            })
+            .fold(0u64, |total, entry| total.saturating_add(entry.size.0));
+        Ok(SweepResult {
+            purged,
+            purged_bytes,
+            held_bytes,
+            threshold_exceeded: held_bytes > warning_threshold_bytes,
+        })
+    }
+}
+
+/// Поставити один плановий sweep у фонову чергу T-008.
+pub fn spawn_quarantine_sweep<F, M, P, C>(
+    pool: &WorkerPool,
+    filesystem: Arc<F>,
+    manifest: Arc<M>,
+    now_unix: i64,
+    warning_threshold_bytes: u64,
+    surrogate_path: P,
+    on_complete: C,
+) -> JobHandle
+where
+    F: QuarantineFs + Send + Sync + 'static,
+    M: QuarantineManifest + Send + Sync + 'static,
+    P: Fn(&QuarantineEntry) -> Result<String, CoreError> + Send + Sync + 'static,
+    C: FnOnce(Result<SweepResult, CoreError>) + Send + 'static,
+{
+    pool.submit(JobPriority::Background, move |cancel| {
+        if cancel.is_cancelled() {
+            return;
+        }
+        let result = QuarantineSweeper::new(filesystem.as_ref(), manifest.as_ref()).sweep_once(
+            now_unix,
+            warning_threshold_bytes,
+            surrogate_path,
+        );
+        on_complete(result);
+    })
+}
+
 fn validate_request(request: &ReapRequest) -> Result<(), CoreError> {
     if request.entry.original_path.is_empty() || request.entry.surrogate_name.is_empty() {
         return Err(CoreError::invalid_argument(
@@ -316,6 +408,14 @@ mod tests {
             );
             assert!(files.insert(destination_path.to_string()));
             Ok(RestoreMove::Restored)
+        }
+
+        fn purge_from_quarantine(&self, surrogate_path: &str) -> Result<(), CoreError> {
+            if self.files.lock().unwrap().remove(surrogate_path) {
+                Ok(())
+            } else {
+                Err(CoreError::io("surrogate missing"))
+            }
         }
     }
 
@@ -507,6 +607,52 @@ mod tests {
         assert!(outcomes
             .iter()
             .all(|outcome| outcome.entry.status == QuarantineStatus::Restored));
+    }
+
+    #[test]
+    fn sweeper_purges_expired_and_reports_held_threshold() {
+        let now = 1_800_000_000;
+        let mut expired = request(1).entry;
+        expired.status = QuarantineStatus::Quarantined;
+        expired.expires_at_unix = now;
+        let mut future = request(2).entry;
+        future.status = QuarantineStatus::Quarantined;
+        future.expires_at_unix = now + 60;
+        let path = |entry: &QuarantineEntry| {
+            format!(r"C:\.trashradar\quarantine\{}", entry.surrogate_name)
+        };
+        let crash = Arc::new(CrashControl {
+            phase: CrashPhase::AfterMove,
+            crash_call: usize::MAX,
+            inserts: Mutex::new(0),
+            moves: Mutex::new(0),
+            updates: Mutex::new(0),
+        });
+        let fs = FakeFs {
+            files: Arc::new(Mutex::new(
+                [path(&expired), path(&future)].into_iter().collect(),
+            )),
+            crash: Arc::clone(&crash),
+        };
+        let manifest = FakeManifest {
+            entries: Arc::new(Mutex::new(HashMap::from([
+                (expired.id.0, expired.clone()),
+                (future.id.0, future.clone()),
+            ]))),
+            crash,
+        };
+        let result = QuarantineSweeper::new(&fs, &manifest)
+            .sweep_once(now, 1, |entry| Ok(path(entry)))
+            .unwrap();
+        assert_eq!(result.purged.len(), 1);
+        assert_eq!(result.purged_bytes, expired.size.0);
+        assert_eq!(result.held_bytes, future.size.0);
+        assert!(result.threshold_exceeded);
+        assert_eq!(
+            manifest.entries.lock().unwrap()[&1].status,
+            QuarantineStatus::Purged
+        );
+        assert!(fs.files.lock().unwrap().contains(&path(&future)));
     }
 
     #[test]

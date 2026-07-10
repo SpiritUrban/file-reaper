@@ -336,6 +336,20 @@ export interface QuarantineRestoredEvent {
   message?: string;
 }
 
+export interface QuarantineChangedEvent {
+  purgedCount: number;
+  purgedBytes: number;
+  heldBytes: number;
+  thresholdExceeded: boolean;
+  message?: string;
+}
+
+export interface QuarantineEntryExpiredEvent {
+  entryId: number;
+  originalPath: string;
+  sizeBytes: number;
+}
+
 /** Параметри scan.start (T-033). */
 export interface ScanStartPayload {
   /** Літери томів; omit = усі доступні. */

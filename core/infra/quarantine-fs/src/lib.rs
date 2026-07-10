@@ -123,6 +123,29 @@ impl QuarantineFs for NativeQuarantineFs {
             NoReplaceMove::DestinationOccupied => Ok(RestoreMove::DestinationOccupied),
         }
     }
+
+    fn purge_from_quarantine(&self, surrogate_path: &str) -> Result<(), CoreError> {
+        let surrogate = Path::new(surrogate_path);
+        validate_quarantine_destination(surrogate).map_err(|_| {
+            CoreError::invalid_argument("Purge дозволений лише всередині .trashradar\\quarantine.")
+        })?;
+        let metadata = fs::symlink_metadata(surrogate).map_err(|error| {
+            CoreError::io(format!(
+                "Не вдалося перевірити surrogate перед purge: {error}"
+            ))
+        })?;
+        let result = if metadata.is_dir() {
+            fs::remove_dir_all(surrogate)
+        } else {
+            fs::remove_file(surrogate)
+        };
+        result.map_err(|error| {
+            CoreError::io(format!(
+                "Не вдалося остаточно видалити {} з Quarantine: {error}",
+                surrogate.display()
+            ))
+        })
+    }
 }
 
 fn windows_volume(path: &str) -> Option<char> {
@@ -598,6 +621,29 @@ mod tests {
         assert!(error.message.contains("reap скасовано"));
         assert!(source.exists(), "файл не переміщено і не втрачено");
         assert!(!destination.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn purge_removes_only_surrogate_inside_quarantine() {
+        use trashradar_domain::error::ErrorCode;
+
+        let root = temp_volume("purge");
+        let directory = NativeQuarantineFs.ensure_at_root(&root).unwrap();
+        let surrogate = directory.quarantine_root.join("expired.bin");
+        fs::write(&surrogate, b"expired").unwrap();
+        NativeQuarantineFs
+            .purge_from_quarantine(&surrogate.to_string_lossy())
+            .unwrap();
+        assert!(!surrogate.exists());
+
+        let outside = root.join("outside.bin");
+        fs::write(&outside, b"keep").unwrap();
+        let error = NativeQuarantineFs
+            .purge_from_quarantine(&outside.to_string_lossy())
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidArgument);
+        assert!(outside.exists());
         fs::remove_dir_all(root).unwrap();
     }
 

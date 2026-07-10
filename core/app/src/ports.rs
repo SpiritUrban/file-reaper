@@ -377,6 +377,9 @@ pub trait QuarantineFs {
         surrogate_path: &str,
         destination_path: &str,
     ) -> Result<RestoreMove, CoreError>;
+
+    /// Остаточно знищити прострочений сурогат лише з Quarantine (T-082).
+    fn purge_from_quarantine(&self, surrogate_path: &str) -> Result<(), CoreError>;
 }
 
 /// Хешування для каскаду дублікатів. Реалізація: `hash` (T-059/T-060).

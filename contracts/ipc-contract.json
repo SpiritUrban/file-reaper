@@ -113,8 +113,16 @@
       "task": "T-080",
       "$comment": "{entryId, originalPath, restoredPath, usedSuffix, message?}; usedSuffix=true → message = warning about occupied original path; feeds restore toast (T-132)"
     },
-    "quarantine.changed": { "status": "planned", "task": "T-082" },
-    "quarantine.entry_expired": { "status": "planned", "task": "T-082" },
+    "quarantine.changed": {
+      "status": "implemented",
+      "task": "T-082",
+      "$comment": "{purgedCount, purgedBytes, heldBytes, thresholdExceeded, message?}; thresholdExceeded emits visible volume warning"
+    },
+    "quarantine.entry_expired": {
+      "status": "implemented",
+      "task": "T-082",
+      "$comment": "{entryId, originalPath, sizeBytes}; emitted after TTL purge succeeds and manifest is confirmed"
+    },
     "settings.changed": { "status": "planned", "task": "T-093" }
   }
 }
