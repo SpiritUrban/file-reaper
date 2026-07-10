@@ -12,7 +12,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Runtime};
 use trashradar_app::elevation::{
@@ -27,12 +27,21 @@ use trashradar_platform_win::{relaunch_elevated, ElevationRelaunch};
 #[derive(Clone)]
 pub struct SettingsRuntime {
     source: Option<trashradar_settings_json::JsonSettingsSource>,
+    current: Arc<RwLock<AppSettings>>,
+    schedule_generation: Arc<AtomicU64>,
 }
 
 impl SettingsRuntime {
     pub fn new(profile: Option<std::path::PathBuf>) -> Self {
+        let source = profile.map(trashradar_settings_json::JsonSettingsSource::in_profile);
+        let current = source
+            .as_ref()
+            .and_then(|source| source.load().ok())
+            .unwrap_or_default();
         Self {
-            source: profile.map(trashradar_settings_json::JsonSettingsSource::in_profile),
+            source,
+            current: Arc::new(RwLock::new(current)),
+            schedule_generation: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -41,6 +50,10 @@ impl SettingsRuntime {
             .clone()
             .ok_or_else(|| CoreError::io("LOCALAPPDATA недоступна — settings profile невідомий."))
     }
+
+    pub fn current(&self) -> AppSettings {
+        self.current.read().expect("settings lock").clone()
+    }
 }
 
 #[tauri::command]
@@ -48,16 +61,24 @@ pub async fn settings_get(
     state: tauri::State<'_, SettingsRuntime>,
 ) -> Result<AppSettings, CoreError> {
     record_command();
-    let source = state.source()?;
-    tauri::async_runtime::spawn_blocking(move || source.load())
-        .await
-        .map_err(|error| CoreError::internal(format!("Settings read task failed: {error}")))?
+    Ok(state.current())
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsChangedEvent {
+    pub settings: AppSettings,
+    pub detector_records_recalculated: u64,
+    pub quarantine_rescheduled: bool,
+    pub schedule_generation: u64,
 }
 
 #[tauri::command]
-pub async fn settings_set(
+pub async fn settings_set<R: Runtime>(
+    app: AppHandle<R>,
     settings: AppSettings,
     state: tauri::State<'_, SettingsRuntime>,
+    scan: tauri::State<'_, crate::scan_runtime::ScanRuntime>,
 ) -> Result<AppSettings, CoreError> {
     record_command();
     validate_settings(&settings).map_err(|error| {
@@ -68,6 +89,25 @@ pub async fn settings_set(
     tauri::async_runtime::spawn_blocking(move || source.save(&saved))
         .await
         .map_err(|error| CoreError::internal(format!("Settings write task failed: {error}")))??;
+    let previous = state.current();
+    let recalculated = scan.apply_settings(&settings)?;
+    let rescheduled = previous.quarantine != settings.quarantine;
+    let generation = if rescheduled {
+        state.schedule_generation.fetch_add(1, Ordering::SeqCst) + 1
+    } else {
+        state.schedule_generation.load(Ordering::SeqCst)
+    };
+    *state.current.write().expect("settings lock") = settings.clone();
+    events::emit(
+        &app,
+        events::topic::SETTINGS_CHANGED,
+        &SettingsChangedEvent {
+            settings: settings.clone(),
+            detector_records_recalculated: recalculated,
+            quarantine_rescheduled: rescheduled,
+            schedule_generation: generation,
+        },
+    );
     Ok(settings)
 }
 
@@ -795,7 +835,7 @@ mod tests {
 
     #[test]
     fn settings_get_set_roundtrip_over_ipc() {
-        let (_app, webview) = test_app();
+        let (app, webview) = test_app();
         let defaults =
             get_ipc_response(&webview, request("settings_get", json!({}))).expect("settings.get");
         let mut settings: AppSettings =
@@ -812,6 +852,9 @@ mod tests {
             .expect("settings.get after set");
         let loaded: AppSettings = serde_json::from_value(body_json(loaded)).expect("loaded shape");
         assert_eq!(loaded, saved);
+        use tauri::Manager;
+        let runtime = app.state::<SettingsRuntime>();
+        assert_eq!(runtime.schedule_generation.load(Ordering::SeqCst), 1);
     }
 
     #[test]

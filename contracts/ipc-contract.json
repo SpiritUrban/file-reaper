@@ -131,6 +131,6 @@
       "task": "T-082",
       "$comment": "{entryId, originalPath, sizeBytes}; emitted after TTL purge succeeds and manifest is confirmed"
     },
-    "settings.changed": { "status": "planned", "task": "T-093" }
+    "settings.changed": { "status": "implemented", "task": "T-093" }
   }
 }

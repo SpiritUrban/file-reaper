@@ -50,9 +50,11 @@ fn main() {
     }
     recover_quarantine_at_startup();
 
+    let settings = ipc::SettingsRuntime::new(logging::data_profile_dir());
+    let scan = scan_runtime::ScanRuntime::with_settings(settings.current());
     tauri::Builder::default()
-        .manage(scan_runtime::ScanRuntime::new())
-        .manage(ipc::SettingsRuntime::new(logging::data_profile_dir()))
+        .manage(scan)
+        .manage(settings)
         .invoke_handler(tauri::generate_handler![
             ipc::app_health,
             ipc::app_ping,

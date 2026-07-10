@@ -3,13 +3,15 @@
 //! Бізнес-логіка сесії — `trashradar_app::scan_control`; тут лише
 //! Tauri State, фоновий потік і адаптери MFT/walk.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Runtime, State};
-use trashradar_app::detectors::DetectorOrchestrator;
+use trashradar_app::detectors::{
+    DetectorId, DetectorOrchestrator, DetectorRegistry, ThresholdValue,
+};
 use trashradar_app::ports::{HotIndex, ScanEnvironment};
 use trashradar_app::scan_control::{
     run_scan_session, CancellableVolumeScanner, ScanController, ScanProgress, VolumeScanOutcome,
@@ -23,6 +25,7 @@ use trashradar_domain::candidate::{
 use trashradar_domain::category::CategoryId;
 use trashradar_domain::error::{CoreError, ErrorCode};
 use trashradar_domain::scan::ScanStrategy;
+use trashradar_domain::settings::AppSettings;
 use trashradar_index_memory::InMemoryIndex;
 use trashradar_platform_win::WinScanEnvironment;
 use trashradar_scan_walk::{full_path, PathExclusions, WalkConfig};
@@ -36,16 +39,56 @@ pub struct ScanRuntime {
     pub index: Arc<InMemoryIndex>,
     /// Останній live-підсумок (T-055) — для health/діагностики.
     pub last_totals: Arc<Mutex<LiveTotals>>,
+    settings: Arc<RwLock<AppSettings>>,
 }
 
 impl ScanRuntime {
     pub fn new() -> Self {
+        Self::with_settings(AppSettings::default())
+    }
+
+    pub fn with_settings(settings: AppSettings) -> Self {
         Self {
             controller: Arc::new(ScanController::new()),
             index: Arc::new(InMemoryIndex::new()),
             last_totals: Arc::new(Mutex::new(LiveTotals::new())),
+            settings: Arc::new(RwLock::new(settings)),
         }
     }
+
+    pub fn apply_settings(&self, settings: &AppSettings) -> Result<u64, CoreError> {
+        let registry = configured_registry(settings)?;
+        let stats = DetectorOrchestrator::new(&registry)
+            .recalculate_index(self.index.as_ref(), &CancellationToken::new())?;
+        *self.settings.write().expect("scan settings lock") = settings.clone();
+        let records = self.index.get_all();
+        let mut totals = self.last_totals.lock().expect("live totals lock");
+        totals.clear();
+        totals.ingest_primary(&records);
+        Ok(stats.records_seen)
+    }
+}
+
+fn configured_registry(settings: &AppSettings) -> Result<DetectorRegistry, CoreError> {
+    let registry = mvp_predicate_registry();
+    for (id, detector) in &settings.detectors {
+        let detector_id = match id.as_str() {
+            "large_files" => DetectorId::new("large_files"),
+            "old_files" => DetectorId::new("old_files"),
+            "forgotten_videos" => DetectorId::new("forgotten_videos"),
+            "archives" => DetectorId::new("archives"),
+            "installers" => DetectorId::new("installers"),
+            _ => {
+                return Err(CoreError::invalid_argument(format!(
+                    "Unknown detector: {id}"
+                )))
+            }
+        };
+        for (key, value) in &detector.thresholds {
+            registry.set_threshold(detector_id, key, ThresholdValue::U64(*value))?;
+        }
+    }
+    Ok(registry)
 }
 
 impl Default for ScanRuntime {
@@ -339,6 +382,7 @@ pub async fn scan_start<R: Runtime>(
     let controller = Arc::clone(&state.controller);
     let index = Arc::clone(&state.index);
     let last_totals = Arc::clone(&state.last_totals);
+    let settings = Arc::clone(&state.settings);
     let app2 = app.clone();
 
     if let Err(e) = thread::Builder::new()
@@ -348,7 +392,15 @@ pub async fn scan_start<R: Runtime>(
             if let Ok(mut live) = last_totals.lock() {
                 live.clear();
             }
-            let farm = mvp_predicate_registry();
+            let settings = settings.read().expect("scan settings lock").clone();
+            let farm = match configured_registry(&settings) {
+                Ok(farm) => farm,
+                Err(error) => {
+                    record_command_error();
+                    eprintln!("settings apply failed: {error}");
+                    return;
+                }
+            };
             let orch = DetectorOrchestrator::new(&farm);
             let mut throttle = events::AggregateThrottle::new_at(
                 Duration::from_millis(100), // ≤10/с (T-006)
@@ -573,8 +625,11 @@ pub async fn candidate_mark<R: Runtime>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
     use trashradar_app::scan_control::SteppedTestScanner;
+    use trashradar_domain::candidate::{ByteSize, FileAttributes};
     use trashradar_domain::scan::ScanStrategy;
+    use trashradar_domain::settings::DetectorSettings;
 
     #[test]
     fn parse_volume_accepts_drive_forms() {
@@ -591,6 +646,40 @@ mod tests {
         };
         let v = resolve_volumes(&p).unwrap();
         assert_eq!(v, vec!['C', 'D']);
+    }
+
+    #[test]
+    fn detector_threshold_applies_to_existing_index_without_rescan() {
+        let runtime = ScanRuntime::new();
+        runtime
+            .index
+            .insert_batch(vec![FileRecord {
+                candidate_id: CandidateId(1),
+                path: "C:\\medium.bin".into(),
+                size: ByteSize(50 * 1024 * 1024),
+                created_at: None,
+                modified_at: None,
+                accessed_at: None,
+                kind: FileKind::Other,
+                unit: CandidateUnit::File,
+                category: CategoryId::Uncategorized,
+                safety: SafetyLevel::ReviewRecommended,
+                decision: Decision::Undecided,
+                detector_id: String::new(),
+                explanation: String::new(),
+                attributes: FileAttributes::default(),
+            }])
+            .unwrap();
+        let mut settings = AppSettings::default();
+        settings.detectors.insert(
+            "large_files".into(),
+            DetectorSettings {
+                thresholds: BTreeMap::from([("min_size_bytes".into(), 10 * 1024 * 1024)]),
+            },
+        );
+        assert_eq!(runtime.apply_settings(&settings).unwrap(), 1);
+        let records = runtime.index.get_all();
+        assert_eq!(records[0].category, CategoryId::LargeFiles);
     }
 
     #[test]

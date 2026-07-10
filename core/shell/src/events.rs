@@ -46,6 +46,7 @@ pub mod topic {
     pub const QUARANTINE_CHANGED: &str = "quarantine.changed";
     #[allow(dead_code)] // lifecycle wiring starts with Quarantine screen T-131
     pub const QUARANTINE_ENTRY_EXPIRED: &str = "quarantine.entry_expired";
+    pub const SETTINGS_CHANGED: &str = "settings.changed";
 }
 
 /// Payload `index.updated` (T-032): дельта після USN-тика.

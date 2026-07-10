@@ -345,6 +345,7 @@ export interface AppSettings {
     excludedPaths: string[];
     minimumSizeBytes: number;
   };
+  detectors: Record<string, { thresholds: Record<string, number> }>;
 }
 
 export interface QuarantineChangedEvent {

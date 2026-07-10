@@ -1,6 +1,7 @@
 //! Конфігурація Core: ефективні значення та optional overrides (T-090).
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 pub const DEFAULT_QUARANTINE_TTL_DAYS: u32 = 30;
 pub const DEFAULT_QUARANTINE_WARNING_BYTES: u64 = 50 * 1024 * 1024 * 1024;
@@ -19,6 +20,15 @@ pub struct SettingsFieldError {
 pub struct AppSettings {
     pub quarantine: QuarantineSettings,
     pub scan: ScanSettings,
+    #[serde(default)]
+    pub detectors: BTreeMap<String, DetectorSettings>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DetectorSettings {
+    #[serde(default)]
+    pub thresholds: BTreeMap<String, u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,6 +61,8 @@ pub struct SettingsOverrides {
     pub quarantine: QuarantineOverrides,
     #[serde(default, skip_serializing_if = "ScanOverrides::is_empty")]
     pub scan: ScanOverrides,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub detectors: BTreeMap<String, DetectorSettings>,
 }
 
 impl SettingsOverrides {
@@ -67,6 +79,7 @@ impl SettingsOverrides {
         if let Some(value) = self.scan.minimum_size_bytes {
             settings.scan.minimum_size_bytes = value;
         }
+        settings.detectors = self.detectors.clone();
         settings
     }
 
@@ -86,11 +99,12 @@ impl SettingsOverrides {
                     != defaults.scan.minimum_size_bytes)
                     .then_some(settings.scan.minimum_size_bytes),
             },
+            detectors: settings.detectors.clone(),
         }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.quarantine.is_empty() && self.scan.is_empty()
+        self.quarantine.is_empty() && self.scan.is_empty() && self.detectors.is_empty()
     }
 }
 
