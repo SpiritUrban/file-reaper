@@ -4,7 +4,7 @@
   "error_envelope": {
     "$comment": "T-007: кожна помилка команди — цей конверт. Коди стабільні: додавати можна, змінювати/видаляти — ні. Rust: domain::error::CoreError; TS: ui/src/ipc/types.ts CoreErrorPayload.",
     "shape": { "code": "snake_case ErrorCode", "message": "людський текст, готовий до показу" },
-    "codes": ["internal", "invalid_argument", "not_implemented", "io", "cancelled"]
+    "codes": ["internal", "invalid_argument", "not_implemented", "io", "cancelled", "path_protected"]
   },
   "commands": {
     "app.health": {

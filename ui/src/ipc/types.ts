@@ -147,7 +147,8 @@ export type CoreErrorCode =
   | "invalid_argument"
   | "not_implemented"
   | "io"
-  | "cancelled";
+  | "cancelled"
+  | "path_protected";
 
 /** Конверт помилки Core → UI: {"code", "message"}. */
 export interface CoreErrorPayload {

@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use trashradar_app::ports::QuarantineFs;
-use trashradar_domain::error::CoreError;
+use trashradar_domain::{error::CoreError, quarantine::QuarantineGuard};
 use trashradar_platform_win::set_hidden;
 
 pub const SERVICE_DIRECTORY_NAME: &str = ".trashradar";
@@ -33,6 +33,23 @@ pub struct NativeQuarantineFs;
 impl QuarantineFs for NativeQuarantineFs {}
 
 impl NativeQuarantineFs {
+    /// Остання лінія захисту перед будь-яким reap/move (T-085).
+    pub fn validate_reap_path<I, S>(&self, path: &str, trashradar_roots: I) -> Result<(), CoreError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let normalized = path.trim().trim_start_matches(r"\\?\");
+        let bytes = normalized.as_bytes();
+        let volume = if bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+            bytes[0] as char
+        } else {
+            '?'
+        };
+        QuarantineGuard::windows_volume(volume)
+            .with_trashradar_roots(trashradar_roots)
+            .validate(path)
+    }
     /// Створити `<том>\.trashradar\quarantine` і підтвердити право запису.
     pub fn ensure_on_volume(&self, volume: char) -> Result<QuarantineDirectory, CoreError> {
         if !volume.is_ascii_alphabetic() {
@@ -149,6 +166,23 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn gateway_rejects_protected_path_before_move() {
+        use trashradar_domain::error::ErrorCode;
+        let error = NativeQuarantineFs
+            .validate_reap_path(
+                r"C:\Windows\System32\drivers\etc\hosts",
+                [r"C:\Users\Ada\AppData\Local\TrashRadar"],
+            )
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::PathProtected);
+        assert!(NativeQuarantineFs
+            .validate_reap_path(
+                r"C:\Users\Ada\Videos\clip.mp4",
+                [r"C:\Users\Ada\AppData\Local\TrashRadar"]
+            )
+            .is_ok());
+    }
     #[test]
     fn rejects_missing_root_and_invalid_volume() {
         let missing = std::env::temp_dir().join("trashradar-t077-missing-root");
