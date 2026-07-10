@@ -33,7 +33,65 @@ pub struct QuarantineDirectory {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NativeQuarantineFs;
 
-impl QuarantineFs for NativeQuarantineFs {}
+impl QuarantineFs for NativeQuarantineFs {
+    fn move_into_quarantine(
+        &self,
+        source_path: &str,
+        destination_path: &str,
+        expected: FileIdentity,
+        trashradar_roots: &[String],
+    ) -> Result<(), CoreError> {
+        self.validate_reap_path(source_path, trashradar_roots)?;
+        let source = Path::new(source_path);
+        let destination = Path::new(destination_path);
+        self.validate_file_identity(source, expected)?;
+        validate_quarantine_destination(destination)?;
+        if let (Some(source_volume), Some(destination_volume)) = (
+            windows_volume(source_path),
+            windows_volume(destination_path),
+        ) {
+            if source_volume != destination_volume {
+                return Err(CoreError::invalid_argument(
+                    "Reap дозволяє лише atomic move у межах того самого тому.",
+                ));
+            }
+        }
+        fs::rename(source, destination).map_err(|error| {
+            CoreError::io(format!(
+                "Не вдалося перемістити {} у Quarantine: {error}",
+                source.display()
+            ))
+        })
+    }
+}
+
+fn windows_volume(path: &str) -> Option<char> {
+    let normalized = path.trim().trim_start_matches(r"\\?\");
+    let bytes = normalized.as_bytes();
+    (bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
+        .then(|| (bytes[0] as char).to_ascii_uppercase())
+}
+
+fn validate_quarantine_destination(destination: &Path) -> Result<(), CoreError> {
+    let quarantine = destination.parent().and_then(Path::file_name);
+    let service = destination
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::file_name);
+    let valid = quarantine
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case(QUARANTINE_DIRECTORY_NAME))
+        && service
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case(SERVICE_DIRECTORY_NAME));
+    if valid {
+        Ok(())
+    } else {
+        Err(CoreError::invalid_argument(
+            "Destination reap має бути всередині .trashradar\\quarantine.",
+        ))
+    }
+}
 
 impl NativeQuarantineFs {
     /// Остання лінія захисту перед будь-яким reap/move (T-085).
@@ -194,6 +252,78 @@ mod tests {
                 [r"C:\Users\Ada\AppData\Local\TrashRadar"]
             )
             .is_ok());
+    }
+    #[cfg(windows)]
+    #[test]
+    fn transactional_reaper_persists_move_and_confirmation() {
+        use trashradar_app::{ReapRequest, TransactionalReaper};
+        use trashradar_domain::quarantine::{
+            BatchId, QuarantineEntry, QuarantineEntryId, QuarantineStatus,
+        };
+        use trashradar_index_sqlite::IndexDatabase;
+
+        let root = temp_volume("transactional-reap");
+        let directory = NativeQuarantineFs.ensure_at_root(&root).unwrap();
+        let source = root.join("candidate.mp4");
+        fs::write(&source, b"video-data").unwrap();
+        let identity = read_file_identity(&source).unwrap();
+        let surrogate = "00000077.bin".to_string();
+        let destination = directory.quarantine_root.join(&surrogate);
+        let database = IndexDatabase::open_profile(root.join("profile")).unwrap();
+        let request = ReapRequest {
+            entry: QuarantineEntry {
+                id: QuarantineEntryId(77),
+                batch_id: Some(BatchId(9)),
+                original_path: source.to_string_lossy().into_owned(),
+                surrogate_name: surrogate,
+                size: identity.size,
+                quarantined_at_unix: 1_750_000_000,
+                expires_at_unix: 1_752_592_000,
+                status: QuarantineStatus::InFlight,
+            },
+            destination_path: destination.to_string_lossy().into_owned(),
+            expected_identity: identity,
+        };
+
+        let outcome = TransactionalReaper::new(&NativeQuarantineFs, &database, &[])
+            .reap_one(request)
+            .unwrap();
+        assert_eq!(outcome.entry.status, QuarantineStatus::Quarantined);
+        assert!(!source.exists());
+        assert!(destination.exists());
+        assert_eq!(
+            database
+                .get_quarantine_entry(QuarantineEntryId(77))
+                .unwrap()
+                .unwrap()
+                .status,
+            QuarantineStatus::Quarantined
+        );
+        drop(database);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[cfg(windows)]
+    #[test]
+    fn atomic_move_places_exactly_one_copy_in_quarantine() {
+        let root = temp_volume("atomic-move");
+        let directory = NativeQuarantineFs.ensure_at_root(&root).unwrap();
+        let source = root.join("candidate.bin");
+        let destination = directory.quarantine_root.join("00000001.bin");
+        fs::write(&source, b"candidate-data").unwrap();
+        let identity = read_file_identity(&source).unwrap();
+
+        NativeQuarantineFs
+            .move_into_quarantine(
+                &source.to_string_lossy(),
+                &destination.to_string_lossy(),
+                identity,
+                &[],
+            )
+            .unwrap();
+
+        assert!(!source.exists());
+        assert_eq!(fs::read(&destination).unwrap(), b"candidate-data");
+        fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn changed_file_is_rejected_before_move() {

@@ -20,6 +20,7 @@ pub mod location_registry;
 pub mod mvp_farm;
 pub mod ports;
 pub mod preview;
+pub mod quarantine;
 pub mod scan_control;
 pub mod scan_strategy;
 pub mod usn_apply;
@@ -47,6 +48,7 @@ pub use preview::{
     PreviewCacheManager, PreviewPrefetchCandidate, PreviewPrefetchMetrics, PreviewPrefetcher,
     PreviewPriority, PreviewScheduler,
 };
+pub use quarantine::{ReapOutcome, ReapRequest, TransactionalReaper};
 pub use trashradar_domain::aggregate::{CandidateContribution, CategoryRollup, FreeableSummary};
 pub use trashradar_domain::duplicates::{
     DuplicateRole, KeepPolicy, MarkedDuplicateGroup, MarkedDuplicateMember,

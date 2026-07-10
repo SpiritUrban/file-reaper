@@ -8,3 +8,6 @@ edition.workspace = true
 trashradar-domain = { path = "../../domain" }
 trashradar-app = { path = "../../app" }
 trashradar-platform-win = { path = "../platform-win" }
+
+[dev-dependencies]
+trashradar-index-sqlite = { path = "../index-sqlite" }

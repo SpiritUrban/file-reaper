@@ -65,7 +65,7 @@ use trashradar_domain::{
     candidate::{ByteSize, FileRecord, FileRecordSort, FsTimestamp},
     category::CategoryId,
     error::CoreError,
-    quarantine::{QuarantineEntry, QuarantineEntryId, QuarantineStatus},
+    quarantine::{FileIdentity, QuarantineEntry, QuarantineEntryId, QuarantineStatus},
     scan::{ScanEntry, UsnChange, UsnCursor, UsnJournalInfo},
     ContentHash, FileHashCacheEntry, PartialHash,
 };
@@ -344,7 +344,16 @@ pub trait VideoFrameSource: Send + Sync {
 /// Єдиний шлюз деструктивних операцій з FS (move/restore/purge).
 /// Реалізація: `quarantine-fs` (T-077, T-079…T-084). Інваріант D4:
 /// жоден інший порт не має права змінювати файлову систему.
-pub trait QuarantineFs {}
+pub trait QuarantineFs {
+    /// Guard + identity check + атомарний same-volume rename у службовий каталог.
+    fn move_into_quarantine(
+        &self,
+        source_path: &str,
+        destination_path: &str,
+        expected: FileIdentity,
+        trashradar_roots: &[String],
+    ) -> Result<(), CoreError>;
+}
 
 /// Хешування для каскаду дублікатів. Реалізація: `hash` (T-059/T-060).
 ///
