@@ -360,6 +360,150 @@ pub struct PreviewDelivery {
 
 /// Колбек доставки превью (може викликатись з фонового воркера).
 pub type PreviewDeliveryFn = Arc<dyn Fn(PreviewDelivery) + Send + Sync>;
+/// Кандидат прогнозованого завантаження мініатюри (T-075).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreviewPrefetchCandidate {
+    pub source_path: String,
+    pub size: ByteSize,
+    pub modified_at: Option<FsTimestamp>,
+}
+
+/// Ефективність префетчу на момент фактичного наведення/фокуса.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PreviewPrefetchMetrics {
+    pub demands: u64,
+    pub cache_hits: u64,
+    pub scheduled: u64,
+}
+
+impl PreviewPrefetchMetrics {
+    pub fn hit_rate(&self) -> f64 {
+        if self.demands == 0 {
+            0.0
+        } else {
+            self.cache_hits as f64 / self.demands as f64
+        }
+    }
+}
+
+/// Прогріває наступні плитки за знаком руху курсора/скролу P2-задачами.
+pub struct PreviewPrefetcher {
+    cache: Arc<PreviewCacheManager>,
+    scheduler: Arc<PreviewScheduler>,
+    sources: Vec<Arc<dyn ThumbnailSource>>,
+    encoder: Arc<dyn ThumbnailEncoder>,
+    max_edge: u32,
+    look_ahead: usize,
+    metrics: Arc<Mutex<PreviewPrefetchMetrics>>,
+}
+
+impl PreviewPrefetcher {
+    pub fn new(
+        cache: Arc<PreviewCacheManager>,
+        scheduler: Arc<PreviewScheduler>,
+        sources: Vec<Arc<dyn ThumbnailSource>>,
+        encoder: Arc<dyn ThumbnailEncoder>,
+        max_edge: u32,
+        look_ahead: usize,
+    ) -> Self {
+        Self {
+            cache,
+            scheduler,
+            sources,
+            encoder,
+            max_edge,
+            look_ahead: look_ahead.clamp(2, 3),
+            metrics: Arc::new(Mutex::new(PreviewPrefetchMetrics::default())),
+        }
+    }
+
+    /// `motion`: додатна дельта рухається вперед, від'ємна — назад.
+    pub fn prefetch_from_motion(
+        &self,
+        candidates: &[PreviewPrefetchCandidate],
+        anchor_index: usize,
+        motion: i32,
+    ) -> Vec<String> {
+        if candidates.is_empty() || anchor_index >= candidates.len() || motion == 0 {
+            return Vec::new();
+        }
+        let indices: Box<dyn Iterator<Item = usize>> = if motion > 0 {
+            Box::new((anchor_index + 1)..candidates.len())
+        } else {
+            Box::new((0..anchor_index).rev())
+        };
+        let mut scheduled_paths = Vec::new();
+        for index in indices.take(self.look_ahead) {
+            let candidate = &candidates[index];
+            if self
+                .cache
+                .get_valid_preview_path(
+                    &candidate.source_path,
+                    PreviewKind::Thumbnail,
+                    candidate.size,
+                    candidate.modified_at,
+                )
+                .is_some()
+                || self.scheduler.is_queued_or_running(&candidate.source_path)
+            {
+                continue;
+            }
+            let cache = Arc::clone(&self.cache);
+            let sources = self.sources.clone();
+            let encoder = Arc::clone(&self.encoder);
+            let path = candidate.source_path.clone();
+            let size = candidate.size;
+            let modified_at = candidate.modified_at;
+            let max_edge = self.max_edge;
+            self.scheduler
+                .submit(path.clone(), PreviewPriority::P2, move |token| {
+                    if token.is_cancelled() {
+                        return;
+                    }
+                    let Some(raw) = generate_from_chain(&sources, &path, max_edge) else {
+                        return;
+                    };
+                    if token.is_cancelled() {
+                        return;
+                    }
+                    let Some(bytes) = encode_thumbnail(encoder.as_ref(), &raw) else {
+                        return;
+                    };
+                    let _ = cache.save_preview(
+                        &path,
+                        PreviewKind::Thumbnail,
+                        size,
+                        modified_at,
+                        &bytes,
+                    );
+                });
+            scheduled_paths.push(candidate.source_path.clone());
+        }
+        self.metrics.lock().unwrap().scheduled += scheduled_paths.len() as u64;
+        scheduled_paths
+    }
+
+    /// Фіксує фактичне наведення/фокус для вимірювання prefetch hit rate.
+    pub fn observe_demand(&self, candidate: &PreviewPrefetchCandidate) -> bool {
+        let hit = self
+            .cache
+            .get_valid_preview_path(
+                &candidate.source_path,
+                PreviewKind::Thumbnail,
+                candidate.size,
+                candidate.modified_at,
+            )
+            .is_some();
+        let mut metrics = self.metrics.lock().unwrap();
+        metrics.demands += 1;
+        metrics.cache_hits += u64::from(hit);
+        hit
+    }
+
+    pub fn metrics(&self) -> PreviewPrefetchMetrics {
+        *self.metrics.lock().unwrap()
+    }
+}
 
 /// Підсумок прийому запиту двоступеневого превью (T-073).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1137,5 +1281,84 @@ mod tests {
             trashradar_domain::error::ErrorCode::InvalidArgument
         );
         let _ = std::fs::remove_dir_all(&fx.temp_dir);
+    }
+
+    // --- T-075: префетч за траєкторією --------------------------------
+
+    fn prefetch_fixture(name: &str) -> (PreviewPrefetcher, Arc<AtomicUsize>, PathBuf) {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "tr_t075_{name}_{}",
+            Instant::now().elapsed().as_nanos()
+        ));
+        let cache = Arc::new(PreviewCacheManager::new(
+            temp_dir.clone(),
+            Arc::new(MockPreviewCache::new()),
+        ));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let prefetcher = PreviewPrefetcher::new(
+            cache,
+            Arc::new(PreviewScheduler::new(1, 0.0)),
+            vec![Arc::new(CountingSource {
+                calls: Arc::clone(&calls),
+            })],
+            Arc::new(PassthroughEncoder),
+            128,
+            3,
+        );
+        (prefetcher, calls, temp_dir)
+    }
+
+    fn prefetch_candidates() -> Vec<PreviewPrefetchCandidate> {
+        (0..6)
+            .map(|i| PreviewPrefetchCandidate {
+                source_path: format!(r"C:\media\tile_{i}.png"),
+                size: ByteSize(100 + i),
+                modified_at: Some(FsTimestamp(200 + i as i64)),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn prefetches_three_tiles_in_motion_direction() {
+        let (prefetcher, calls, temp_dir) = prefetch_fixture("direction");
+        let candidates = prefetch_candidates();
+        assert_eq!(
+            prefetcher.prefetch_from_motion(&candidates, 1, 1),
+            vec![
+                candidates[2].source_path.clone(),
+                candidates[3].source_path.clone(),
+                candidates[4].source_path.clone(),
+            ]
+        );
+        for _ in 0..100 {
+            if calls.load(Ordering::SeqCst) == 3 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            prefetcher.prefetch_from_motion(&candidates, 4, -1),
+            vec![candidates[1].source_path.clone()]
+        );
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn prefetched_tile_is_counted_as_demand_cache_hit() {
+        let (prefetcher, _calls, temp_dir) = prefetch_fixture("hit_rate");
+        let candidates = prefetch_candidates();
+        prefetcher.prefetch_from_motion(&candidates, 0, 1);
+        for _ in 0..100 {
+            if prefetcher.observe_demand(&candidates[1]) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        let metrics = prefetcher.metrics();
+        assert!(metrics.cache_hits >= 1);
+        assert!(metrics.hit_rate() > 0.0);
+        assert_eq!(metrics.scheduled, 3);
+        let _ = std::fs::remove_dir_all(temp_dir);
     }
 }
