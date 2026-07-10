@@ -9,8 +9,9 @@ use std::sync::Arc;
 use trashradar_domain::{
     error::CoreError,
     quarantine::{
-        restore_destination, BatchId, FileIdentity, QuarantineEntry, QuarantineEntryId,
-        QuarantineStatus, RESTORE_SUFFIX_MAX_ATTEMPTS,
+        restore_destination, AuditActor, AuditOperation, BatchId, DestructiveAuditEvent,
+        FileIdentity, QuarantineEntry, QuarantineEntryId, QuarantineStatus,
+        RESTORE_SUFFIX_MAX_ATTEMPTS,
     },
 };
 
@@ -56,8 +57,13 @@ impl<'a, F: QuarantineFs, M: QuarantineManifest> TransactionalReaper<'a, F, M> {
             request.expected_identity,
             self.trashradar_roots,
         )?;
-        self.manifest
-            .update_status(request.entry.id, QuarantineStatus::Quarantined)?;
+        confirm_with_audit(
+            self.manifest,
+            &request.entry,
+            QuarantineStatus::Quarantined,
+            AuditOperation::Reap,
+            AuditActor::User,
+        )?;
         request.entry.status = QuarantineStatus::Quarantined;
         Ok(ReapOutcome {
             entry: request.entry,
@@ -153,8 +159,13 @@ impl<'a, F: QuarantineFs, M: QuarantineManifest> QuarantineRestorer<'a, F, M> {
             }
         };
 
-        self.manifest
-            .update_status(entry.id, QuarantineStatus::Restored)?;
+        confirm_with_audit(
+            self.manifest,
+            &entry,
+            QuarantineStatus::Restored,
+            AuditOperation::Restore,
+            AuditActor::User,
+        )?;
         entry.status = QuarantineStatus::Restored;
         Ok(RestoreOutcome {
             entry,
@@ -259,8 +270,13 @@ impl<'a, F: QuarantineFs, M: QuarantineManifest> QuarantineRecovery<'a, F, M> {
                     result.rolled_back.push(entry.id);
                 }
                 RecoveryLocation::QuarantineOnly => {
-                    self.manifest
-                        .update_status(entry.id, QuarantineStatus::Quarantined)?;
+                    confirm_with_audit(
+                        self.manifest,
+                        &entry,
+                        QuarantineStatus::Quarantined,
+                        AuditOperation::Reap,
+                        AuditActor::Recovery,
+                    )?;
                     result.completed.push(entry.id);
                 }
                 RecoveryLocation::Both => {
@@ -333,8 +349,13 @@ impl<'a, F: QuarantineFs, M: QuarantineManifest> ManualPurger<'a, F, M> {
         for mut entry in targets {
             self.filesystem
                 .purge_from_quarantine(&surrogate_path(&entry)?)?;
-            self.manifest
-                .update_status(entry.id, QuarantineStatus::Purged)?;
+            confirm_with_audit(
+                self.manifest,
+                &entry,
+                QuarantineStatus::Purged,
+                AuditOperation::PurgeManual,
+                AuditActor::User,
+            )?;
             purged_bytes = purged_bytes.saturating_add(entry.size.0);
             entry.status = QuarantineStatus::Purged;
             purged.push(entry);
@@ -378,8 +399,13 @@ impl<'a, F: QuarantineFs, M: QuarantineManifest> QuarantineSweeper<'a, F, M> {
         {
             self.filesystem
                 .purge_from_quarantine(&surrogate_path(&entry)?)?;
-            self.manifest
-                .update_status(entry.id, QuarantineStatus::Purged)?;
+            confirm_with_audit(
+                self.manifest,
+                &entry,
+                QuarantineStatus::Purged,
+                AuditOperation::PurgeTtl,
+                AuditActor::Sweeper,
+            )?;
             purged_bytes = purged_bytes.saturating_add(entry.size.0);
             entry.status = QuarantineStatus::Purged;
             purged.push(entry);
@@ -445,6 +471,27 @@ fn validate_request(request: &ReapRequest) -> Result<(), CoreError> {
     Ok(())
 }
 
+fn confirm_with_audit<M: QuarantineManifest>(
+    manifest: &M,
+    entry: &QuarantineEntry,
+    status: QuarantineStatus,
+    operation: AuditOperation,
+    actor: AuditActor,
+) -> Result<(), CoreError> {
+    manifest.confirm_with_audit(
+        entry.id,
+        status,
+        &DestructiveAuditEvent {
+            entry_id: entry.id,
+            batch_id: entry.batch_id,
+            operation,
+            actor,
+            original_path: entry.original_path.clone(),
+            size: entry.size,
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -453,7 +500,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use trashradar_domain::{
         candidate::{ByteSize, FsTimestamp},
-        quarantine::{BatchId, QuarantineEntryId},
+        quarantine::{BatchId, DestructiveAuditRecord, QuarantineEntryId},
     };
 
     #[derive(Clone, Copy, PartialEq, Eq)]
@@ -469,6 +516,7 @@ mod tests {
         inserts: Mutex<usize>,
         moves: Mutex<usize>,
         updates: Mutex<usize>,
+        audits: Mutex<Vec<DestructiveAuditEvent>>,
     }
 
     impl CrashControl {
@@ -505,6 +553,26 @@ mod tests {
         fn remove_entry(&self, id: QuarantineEntryId) -> Result<(), CoreError> {
             self.entries.lock().unwrap().remove(&id.0);
             Ok(())
+        }
+        fn append_audit(&self, event: &DestructiveAuditEvent) -> Result<(), CoreError> {
+            self.crash.audits.lock().unwrap().push(event.clone());
+            Ok(())
+        }
+        fn list_audit(&self) -> Result<Vec<DestructiveAuditRecord>, CoreError> {
+            Ok(self
+                .crash
+                .audits
+                .lock()
+                .unwrap()
+                .iter()
+                .cloned()
+                .enumerate()
+                .map(|(index, event)| DestructiveAuditRecord {
+                    sequence: index as u64 + 1,
+                    event,
+                    occurred_at_unix: 1_800_000_000,
+                })
+                .collect())
         }
         fn update_status(
             &self,
@@ -617,6 +685,7 @@ mod tests {
             inserts: Mutex::new(0),
             moves: Mutex::new(0),
             updates: Mutex::new(0),
+            audits: Mutex::new(Vec::new()),
         });
         let fs = FakeFs {
             files: Arc::clone(&files),
@@ -631,6 +700,9 @@ mod tests {
             .unwrap();
         assert_eq!(outcomes[0].entry.status, QuarantineStatus::Quarantined);
         assert_eq!(outcomes[0].entry.batch_id, Some(BatchId(42)));
+        let audit = manifest.list_audit().unwrap();
+        assert_eq!(audit[0].event.operation, AuditOperation::Reap);
+        assert_eq!(audit[0].event.actor, AuditActor::User);
         assert_eq!(
             entries.lock().unwrap()[&1].status,
             QuarantineStatus::Quarantined
@@ -655,6 +727,7 @@ mod tests {
             inserts: Mutex::new(0),
             moves: Mutex::new(0),
             updates: Mutex::new(0),
+            audits: Mutex::new(Vec::new()),
         });
         let fs = FakeFs {
             files: Arc::new(Mutex::new(
@@ -692,6 +765,10 @@ mod tests {
         assert_eq!(
             manifest.entries.lock().unwrap()[&1].status,
             QuarantineStatus::Restored
+        );
+        assert_eq!(
+            manifest.list_audit().unwrap()[0].event.operation,
+            AuditOperation::Restore
         );
         let files = fs.files.lock().unwrap();
         assert!(files.contains(&original));
@@ -751,6 +828,7 @@ mod tests {
             inserts: Mutex::new(0),
             moves: Mutex::new(0),
             updates: Mutex::new(0),
+            audits: Mutex::new(Vec::new()),
         });
         let fs = FakeFs {
             files: Arc::new(Mutex::new(entries.iter().map(paths).collect())),
@@ -789,6 +867,7 @@ mod tests {
             inserts: Mutex::new(0),
             moves: Mutex::new(0),
             updates: Mutex::new(0),
+            audits: Mutex::new(Vec::new()),
         });
         let fs = FakeFs {
             files: Arc::new(Mutex::new(
@@ -810,6 +889,9 @@ mod tests {
         assert_eq!(result.purged_bytes, expired.size.0);
         assert_eq!(result.held_bytes, future.size.0);
         assert!(result.threshold_exceeded);
+        let audit = manifest.list_audit().unwrap();
+        assert_eq!(audit[0].event.operation, AuditOperation::PurgeTtl);
+        assert_eq!(audit[0].event.actor, AuditActor::Sweeper);
         assert_eq!(
             manifest.entries.lock().unwrap()[&1].status,
             QuarantineStatus::Purged
@@ -832,6 +914,7 @@ mod tests {
             inserts: Mutex::new(0),
             moves: Mutex::new(0),
             updates: Mutex::new(0),
+            audits: Mutex::new(Vec::new()),
         });
         let fs = FakeFs {
             files: Arc::new(Mutex::new(entries.iter().map(path).collect())),
@@ -855,6 +938,10 @@ mod tests {
             vec![2]
         );
         assert_eq!(selected.purged_bytes, entries[1].size.0);
+        assert_eq!(
+            manifest.list_audit().unwrap()[0].event.operation,
+            AuditOperation::PurgeManual
+        );
 
         let all = purger
             .purge(ManualPurgeSelection::All, |entry| Ok(path(entry)))
@@ -900,6 +987,7 @@ mod tests {
             inserts: Mutex::new(0),
             moves: Mutex::new(0),
             updates: Mutex::new(0),
+            audits: Mutex::new(Vec::new()),
         });
         let fs = FakeFs {
             files: Arc::new(Mutex::new(HashSet::from([
@@ -943,6 +1031,7 @@ mod tests {
                 inserts: Mutex::new(0),
                 moves: Mutex::new(0),
                 updates: Mutex::new(0),
+                audits: Mutex::new(Vec::new()),
             });
             let fs = FakeFs {
                 files: Arc::new(Mutex::new(files.into_iter().collect())),
@@ -990,6 +1079,7 @@ mod tests {
                 inserts: Mutex::new(0),
                 moves: Mutex::new(0),
                 updates: Mutex::new(0),
+                audits: Mutex::new(Vec::new()),
             });
             let fs = FakeFs {
                 files: Arc::clone(&files),

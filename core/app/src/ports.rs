@@ -65,7 +65,10 @@ use trashradar_domain::{
     candidate::{ByteSize, FileRecord, FileRecordSort, FsTimestamp},
     category::CategoryId,
     error::CoreError,
-    quarantine::{BatchId, FileIdentity, QuarantineEntry, QuarantineEntryId, QuarantineStatus},
+    quarantine::{
+        BatchId, DestructiveAuditEvent, DestructiveAuditRecord, FileIdentity, QuarantineEntry,
+        QuarantineEntryId, QuarantineStatus,
+    },
     scan::{ScanEntry, UsnChange, UsnCursor, UsnJournalInfo},
     ContentHash, FileHashCacheEntry, PartialHash,
 };
@@ -116,6 +119,17 @@ pub trait QuarantineManifest {
             .collect())
     }
     fn remove_entry(&self, id: QuarantineEntryId) -> Result<(), CoreError>;
+    fn append_audit(&self, event: &DestructiveAuditEvent) -> Result<(), CoreError>;
+    fn list_audit(&self) -> Result<Vec<DestructiveAuditRecord>, CoreError>;
+    fn confirm_with_audit(
+        &self,
+        id: QuarantineEntryId,
+        status: QuarantineStatus,
+        event: &DestructiveAuditEvent,
+    ) -> Result<(), CoreError> {
+        self.update_status(id, status)?;
+        self.append_audit(event)
+    }
     fn update_status(
         &self,
         id: QuarantineEntryId,

@@ -37,6 +37,40 @@ pub struct QuarantineEntryId(pub u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct BatchId(pub u64);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditOperation {
+    Reap,
+    Restore,
+    PurgeTtl,
+    PurgeManual,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditActor {
+    User,
+    Sweeper,
+    Recovery,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DestructiveAuditEvent {
+    pub entry_id: QuarantineEntryId,
+    pub batch_id: Option<BatchId>,
+    pub operation: AuditOperation,
+    pub actor: AuditActor,
+    pub original_path: String,
+    pub size: ByteSize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DestructiveAuditRecord {
+    pub sequence: u64,
+    pub event: DestructiveAuditEvent,
+    pub occurred_at_unix: i64,
+}
+
 /// Статус запису журналу.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

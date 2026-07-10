@@ -20,7 +20,10 @@ use trashradar_domain::{
     },
     category::CategoryId,
     duplicates::{normalize_hash_cache_path, ContentHash, FileHashCacheEntry, PartialHash},
-    quarantine::{BatchId, QuarantineEntry, QuarantineEntryId, QuarantineStatus},
+    quarantine::{
+        AuditActor, AuditOperation, BatchId, DestructiveAuditEvent, DestructiveAuditRecord,
+        QuarantineEntry, QuarantineEntryId, QuarantineStatus,
+    },
     scan::UsnCursor,
 };
 
@@ -32,7 +35,8 @@ const SCHEMA_VERSION_V3: i64 = 3;
 const SCHEMA_VERSION_V4: i64 = 4;
 const SCHEMA_VERSION_V5: i64 = 5;
 const SCHEMA_VERSION_V6: i64 = 6;
-const LATEST_SCHEMA_VERSION: i64 = SCHEMA_VERSION_V6;
+const SCHEMA_VERSION_V7: i64 = 7;
+const LATEST_SCHEMA_VERSION: i64 = SCHEMA_VERSION_V7;
 const WRITER_QUEUE_CHANNEL_CLOSED: &str = "sqlite index writer queue is closed";
 
 /// Migration v1 creates the persistent file-record layer used by scanner output and
@@ -167,6 +171,27 @@ CREATE INDEX IF NOT EXISTS idx_quarantine_manifest_batch
 
 PRAGMA user_version = 6;
 "#;
+const SCHEMA_V7_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS destructive_audit (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    entry_id INTEGER NOT NULL,
+    batch_id INTEGER,
+    operation TEXT NOT NULL CHECK (operation IN ('reap', 'restore', 'purge_ttl', 'purge_manual')),
+    actor TEXT NOT NULL CHECK (actor IN ('user', 'sweeper', 'recovery')),
+    original_path TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+    occurred_at_unix INTEGER NOT NULL DEFAULT (unixepoch())
+);
+CREATE TRIGGER destructive_audit_no_update
+BEFORE UPDATE ON destructive_audit BEGIN
+    SELECT RAISE(ABORT, 'destructive_audit is append-only');
+END;
+CREATE TRIGGER destructive_audit_no_delete
+BEFORE DELETE ON destructive_audit BEGIN
+    SELECT RAISE(ABORT, 'destructive_audit is append-only');
+END;
+PRAGMA user_version = 7;
+"#;
 const MIGRATIONS: &[Migration] = &[
     Migration {
         version: SCHEMA_VERSION_V1,
@@ -191,6 +216,10 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         version: SCHEMA_VERSION_V6,
         sql: SCHEMA_V6_SQL,
+    },
+    Migration {
+        version: SCHEMA_VERSION_V7,
+        sql: SCHEMA_V7_SQL,
     },
 ];
 
@@ -768,6 +797,60 @@ impl IndexDatabase {
         )?;
         Ok(())
     }
+
+    pub fn append_destructive_audit(&self, event: &DestructiveAuditEvent) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO destructive_audit (entry_id, batch_id, operation, actor, original_path, size_bytes) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                sqlite_integer("audit entry id", event.entry_id.0)?,
+                event.batch_id.map(|id| sqlite_integer("audit batch id", id.0)).transpose()?,
+                audit_operation_name(event.operation),
+                audit_actor_name(event.actor),
+                event.original_path,
+                sqlite_integer("audit size", event.size.0)?,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_destructive_audit(&self) -> Result<Vec<DestructiveAuditRecord>> {
+        let mut statement = self.connection.prepare(
+            "SELECT sequence, entry_id, batch_id, operation, actor, original_path, size_bytes, occurred_at_unix FROM destructive_audit ORDER BY sequence",
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, i64>(7)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(DestructiveAuditRecord {
+                    sequence: unsigned_integer("audit sequence", row.0)?,
+                    event: DestructiveAuditEvent {
+                        entry_id: QuarantineEntryId(unsigned_integer("audit entry id", row.1)?),
+                        batch_id: row
+                            .2
+                            .map(|id| unsigned_integer("audit batch id", id).map(BatchId))
+                            .transpose()?,
+                        operation: parse_audit_operation(&row.3)?,
+                        actor: parse_audit_actor(&row.4)?,
+                        original_path: row.5,
+                        size: ByteSize(unsigned_integer("audit size", row.6)?),
+                    },
+                    occurred_at_unix: row.7,
+                })
+            })
+            .collect()
+    }
     pub fn get_hash_cache_entry(&self, path: &str) -> Result<Option<FileHashCacheEntry>> {
         let key = normalize_hash_cache_path(path);
         type HashCacheRow = (i64, i64, Option<Vec<u8>>, Option<Vec<u8>>);
@@ -1064,6 +1147,56 @@ impl trashradar_app::ports::QuarantineManifest for IndexDatabase {
         self.remove_quarantine_entry(id)
             .map_err(|error| trashradar_domain::error::CoreError::internal(error.to_string()))
     }
+
+    fn append_audit(
+        &self,
+        event: &DestructiveAuditEvent,
+    ) -> std::result::Result<(), trashradar_domain::error::CoreError> {
+        self.append_destructive_audit(event)
+            .map_err(|error| trashradar_domain::error::CoreError::internal(error.to_string()))
+    }
+
+    fn list_audit(
+        &self,
+    ) -> std::result::Result<Vec<DestructiveAuditRecord>, trashradar_domain::error::CoreError> {
+        self.list_destructive_audit()
+            .map_err(|error| trashradar_domain::error::CoreError::internal(error.to_string()))
+    }
+
+    fn confirm_with_audit(
+        &self,
+        id: QuarantineEntryId,
+        status: QuarantineStatus,
+        event: &DestructiveAuditEvent,
+    ) -> std::result::Result<(), trashradar_domain::error::CoreError> {
+        let transaction = self
+            .connection
+            .unchecked_transaction()
+            .map_err(|error| trashradar_domain::error::CoreError::internal(error.to_string()))?;
+        transaction
+            .execute(
+                "UPDATE quarantine_manifest SET status = ?2 WHERE entry_id = ?1",
+                params![
+                    sqlite_integer("quarantine entry id", id.0).map_err(|error| {
+                        trashradar_domain::error::CoreError::internal(error.to_string())
+                    })?,
+                    quarantine_status_name(status)
+                ],
+            )
+            .map_err(|error| trashradar_domain::error::CoreError::internal(error.to_string()))?;
+        transaction.execute(
+            "INSERT INTO destructive_audit (entry_id, batch_id, operation, actor, original_path, size_bytes) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                sqlite_integer("audit entry id", event.entry_id.0).map_err(|error| trashradar_domain::error::CoreError::internal(error.to_string()))?,
+                event.batch_id.map(|batch| sqlite_integer("audit batch id", batch.0)).transpose().map_err(|error| trashradar_domain::error::CoreError::internal(error.to_string()))?,
+                audit_operation_name(event.operation), audit_actor_name(event.actor), event.original_path,
+                sqlite_integer("audit size", event.size.0).map_err(|error| trashradar_domain::error::CoreError::internal(error.to_string()))?,
+            ],
+        ).map_err(|error| trashradar_domain::error::CoreError::internal(error.to_string()))?;
+        transaction
+            .commit()
+            .map_err(|error| trashradar_domain::error::CoreError::internal(error.to_string()))
+    }
 }
 /// Thread-safe обгортка `IndexDatabase` для [`HashCache`] (rusqlite Connection !Sync).
 ///
@@ -1239,6 +1372,48 @@ fn quarantine_status_name(status: QuarantineStatus) -> &'static str {
         QuarantineStatus::Quarantined => "quarantined",
         QuarantineStatus::Restored => "restored",
         QuarantineStatus::Purged => "purged",
+    }
+}
+
+fn audit_operation_name(operation: AuditOperation) -> &'static str {
+    match operation {
+        AuditOperation::Reap => "reap",
+        AuditOperation::Restore => "restore",
+        AuditOperation::PurgeTtl => "purge_ttl",
+        AuditOperation::PurgeManual => "purge_manual",
+    }
+}
+
+fn audit_actor_name(actor: AuditActor) -> &'static str {
+    match actor {
+        AuditActor::User => "user",
+        AuditActor::Sweeper => "sweeper",
+        AuditActor::Recovery => "recovery",
+    }
+}
+
+fn parse_audit_operation(value: &str) -> Result<AuditOperation> {
+    match value {
+        "reap" => Ok(AuditOperation::Reap),
+        "restore" => Ok(AuditOperation::Restore),
+        "purge_ttl" => Ok(AuditOperation::PurgeTtl),
+        "purge_manual" => Ok(AuditOperation::PurgeManual),
+        other => Err(IndexSqliteError::InvalidEnumValue {
+            field: "audit operation",
+            value: other.to_string(),
+        }),
+    }
+}
+
+fn parse_audit_actor(value: &str) -> Result<AuditActor> {
+    match value {
+        "user" => Ok(AuditActor::User),
+        "sweeper" => Ok(AuditActor::Sweeper),
+        "recovery" => Ok(AuditActor::Recovery),
+        other => Err(IndexSqliteError::InvalidEnumValue {
+            field: "audit actor",
+            value: other.to_string(),
+        }),
     }
 }
 
@@ -2530,13 +2705,34 @@ mod tests {
         drop(database);
         let reopened = IndexDatabase::open_profile(&profile_dir).unwrap();
         assert_eq!(reopened.list_quarantine_entries().unwrap(), listed);
+        let audit = DestructiveAuditEvent {
+            entry_id: entry.id,
+            batch_id: entry.batch_id,
+            operation: AuditOperation::Reap,
+            actor: AuditActor::User,
+            original_path: entry.original_path.clone(),
+            size: entry.size,
+        };
+        reopened.append_destructive_audit(&audit).unwrap();
+        let records = reopened.list_destructive_audit().unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].event, audit);
+        assert!(records[0].occurred_at_unix > 0);
+        assert!(reopened
+            .connection
+            .execute("UPDATE destructive_audit SET actor = 'recovery'", [])
+            .is_err());
+        assert!(reopened
+            .connection
+            .execute("DELETE FROM destructive_audit", [])
+            .is_err());
         reopened.remove_quarantine_entry(entry.id).unwrap();
         assert_eq!(reopened.get_quarantine_entry(entry.id).unwrap(), None);
         cleanup(profile_dir);
     }
 
     #[test]
-    fn migration_v6_adds_manifest_without_losing_v5_cache() {
+    fn migrations_add_manifest_and_audit_without_losing_v5_cache() {
         let profile_dir = temp_profile_dir("migration-v6");
         fs::create_dir_all(&profile_dir).unwrap();
         let path = profile_dir.join(DATABASE_FILE_NAME);
@@ -2550,7 +2746,7 @@ mod tests {
             connection.execute("INSERT INTO preview_cache (source_path, preview_kind, size_bytes, modified_at_filetime, preview_path) VALUES (?1, 'large', 1, 2, ?2)", params![r"C:\media\kept.png", r"C:\cache\kept.png"]).unwrap();
         }
         let database = IndexDatabase::open(&path).unwrap();
-        assert_eq!(database.schema_version().unwrap(), SCHEMA_VERSION_V6);
+        assert_eq!(database.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
         let count: i64 = database
             .connection
             .query_row(
