@@ -25,6 +25,90 @@ use trashradar_domain::settings::{validate_settings, AppSettings};
 use trashradar_platform_win::{relaunch_elevated, ElevationRelaunch};
 
 #[derive(Clone)]
+pub struct CacheRuntime {
+    cache_dir: Option<std::path::PathBuf>,
+}
+
+impl CacheRuntime {
+    pub fn new(profile: Option<std::path::PathBuf>) -> Self {
+        Self {
+            cache_dir: profile.map(|path| path.join("cache")),
+        }
+    }
+
+    fn dir(&self) -> Result<std::path::PathBuf, CoreError> {
+        self.cache_dir
+            .clone()
+            .ok_or_else(|| CoreError::io("LOCALAPPDATA недоступна — cache profile невідомий."))
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CacheUsage {
+    pub bytes: u64,
+    pub files: u64,
+}
+
+fn cache_usage(path: &std::path::Path) -> Result<CacheUsage, CoreError> {
+    let mut usage = CacheUsage { bytes: 0, files: 0 };
+    if !path.exists() {
+        return Ok(usage);
+    }
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        let metadata = std::fs::symlink_metadata(entry.path())?;
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        if metadata.is_dir() {
+            let nested = cache_usage(&entry.path())?;
+            usage.bytes = usage.bytes.saturating_add(nested.bytes);
+            usage.files = usage.files.saturating_add(nested.files);
+        } else if metadata.is_file() {
+            usage.bytes = usage.bytes.saturating_add(metadata.len());
+            usage.files = usage.files.saturating_add(1);
+        }
+    }
+    Ok(usage)
+}
+
+#[tauri::command]
+pub async fn cache_get_usage(
+    state: tauri::State<'_, CacheRuntime>,
+) -> Result<CacheUsage, CoreError> {
+    record_command();
+    let dir = state.dir()?;
+    tauri::async_runtime::spawn_blocking(move || cache_usage(&dir))
+        .await
+        .map_err(|error| CoreError::internal(format!("Cache usage task failed: {error}")))?
+}
+
+#[tauri::command]
+pub async fn cache_clear(state: tauri::State<'_, CacheRuntime>) -> Result<CacheUsage, CoreError> {
+    record_command();
+    let dir = state.dir()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let cleared = cache_usage(&dir)?;
+        if dir.exists() {
+            for entry in std::fs::read_dir(&dir)? {
+                let entry = entry?;
+                let metadata = std::fs::symlink_metadata(entry.path())?;
+                if metadata.is_dir() && !metadata.file_type().is_symlink() {
+                    std::fs::remove_dir_all(entry.path())?;
+                } else {
+                    std::fs::remove_file(entry.path())?;
+                }
+            }
+        }
+        std::fs::create_dir_all(&dir)?;
+        Ok(cleared)
+    })
+    .await
+    .map_err(|error| CoreError::internal(format!("Cache clear task failed: {error}")))?
+}
+
+#[derive(Clone)]
 pub struct SettingsRuntime {
     source: Option<trashradar_settings_json::JsonSettingsSource>,
     current: Arc<RwLock<AppSettings>>,
@@ -615,15 +699,19 @@ mod tests {
             .unwrap()
             .as_nanos();
         let profile = std::env::temp_dir().join(format!("trashradar-ipc-settings-{nonce}"));
+        let cache = CacheRuntime::new(Some(profile.clone()));
         let app = mock_builder()
             .manage(crate::scan_runtime::ScanRuntime::new())
             .manage(SettingsRuntime::new(Some(profile)))
+            .manage(cache)
             .invoke_handler(tauri::generate_handler![
                 app_health,
                 app_ping,
                 app_test_stream,
                 settings_get,
                 settings_set,
+                cache_get_usage,
+                cache_clear,
                 crate::scan_runtime::scan_start,
                 crate::scan_runtime::scan_stop,
             ])
@@ -882,6 +970,34 @@ mod tests {
             .expect("settings.get remains available");
         let loaded: AppSettings = serde_json::from_value(body_json(loaded)).unwrap();
         assert_eq!(loaded, AppSettings::default());
+    }
+
+    #[test]
+    fn cache_usage_and_clear_cover_only_profile_cache() {
+        let (app, webview) = test_app();
+        use tauri::Manager;
+        let runtime = app.state::<CacheRuntime>();
+        let cache_dir = runtime.dir().unwrap();
+        std::fs::create_dir_all(cache_dir.join("previews")).unwrap();
+        std::fs::write(cache_dir.join("previews").join("a.bin"), [1_u8; 7]).unwrap();
+        std::fs::write(cache_dir.join("b.bin"), [2_u8; 5]).unwrap();
+        let usage = get_ipc_response(&webview, request("cache_get_usage", json!({}))).unwrap();
+        let usage: CacheUsage = serde_json::from_value(body_json(usage)).unwrap();
+        assert_eq!(
+            usage,
+            CacheUsage {
+                bytes: 12,
+                files: 2
+            }
+        );
+        let cleared = get_ipc_response(&webview, request("cache_clear", json!({}))).unwrap();
+        let cleared: CacheUsage = serde_json::from_value(body_json(cleared)).unwrap();
+        assert_eq!(cleared, usage);
+        assert!(cache_dir.exists());
+        assert_eq!(
+            cache_usage(&cache_dir).unwrap(),
+            CacheUsage { bytes: 0, files: 0 }
+        );
     }
 
     #[test]

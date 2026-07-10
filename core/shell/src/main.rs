@@ -51,10 +51,12 @@ fn main() {
     recover_quarantine_at_startup();
 
     let settings = ipc::SettingsRuntime::new(logging::data_profile_dir());
+    let cache = ipc::CacheRuntime::new(logging::data_profile_dir());
     let scan = scan_runtime::ScanRuntime::with_settings(settings.current());
     tauri::Builder::default()
         .manage(scan)
         .manage(settings)
+        .manage(cache)
         .invoke_handler(tauri::generate_handler![
             ipc::app_health,
             ipc::app_ping,
@@ -63,6 +65,8 @@ fn main() {
             ipc::app_decline_elevation,
             ipc::settings_get,
             ipc::settings_set,
+            ipc::cache_get_usage,
+            ipc::cache_clear,
             scan_runtime::scan_start,
             scan_runtime::scan_stop,
             scan_runtime::candidate_keep,

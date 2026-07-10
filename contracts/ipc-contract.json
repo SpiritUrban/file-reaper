@@ -72,6 +72,8 @@
       "task": "T-092",
       "$comment": "{settings: AppSettings} → saved AppSettings; invalid field returns invalid_argument with field path; atomic temp+fsync+rename"
     },
+    "cache.get_usage": { "status": "implemented", "task": "T-094", "$comment": "{} → {bytes,files}; only TrashRadar profile/cache" },
+    "cache.clear": { "status": "implemented", "task": "T-094", "$comment": "{} → cleared {bytes,files}; preserves cache root" },
     "search.candidates": { "status": "planned", "task": "T-018" }
   },
   "events": {

@@ -289,7 +289,14 @@ export type CommandName =
   | "quarantine.purge"
   | "settings.get"
   | "settings.set"
+  | "cache.get_usage"
+  | "cache.clear"
   | "search.candidates";
+
+export interface CacheUsage {
+  bytes: number;
+  files: number;
+}
 
 /** Імена подій (contracts/ipc-contract.json → events). */
 export type EventName =
