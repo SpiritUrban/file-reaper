@@ -32,6 +32,8 @@ pub enum ErrorCode {
     Cancelled,
     /// Шлях захищений guard-list і не може бути переміщений у Quarantine.
     PathProtected,
+    /// Файл змінився після індексації; деструктивна операція скасована.
+    FileChanged,
 }
 
 impl ErrorCode {
@@ -44,6 +46,7 @@ impl ErrorCode {
             ErrorCode::Io => "io",
             ErrorCode::Cancelled => "cancelled",
             ErrorCode::PathProtected => "path_protected",
+            ErrorCode::FileChanged => "file_changed",
         }
     }
 }
@@ -88,6 +91,10 @@ impl CoreError {
 
     pub fn path_protected(message: impl Into<String>) -> Self {
         Self::new(ErrorCode::PathProtected, message)
+    }
+
+    pub fn file_changed(message: impl Into<String>) -> Self {
+        Self::new(ErrorCode::FileChanged, message)
     }
 
     pub fn io(message: impl Into<String>) -> Self {
@@ -155,6 +162,7 @@ mod tests {
             ErrorCode::Io,
             ErrorCode::Cancelled,
             ErrorCode::PathProtected,
+            ErrorCode::FileChanged,
         ] {
             let serialized = serde_json::to_value(code).expect("серіалізація");
             assert_eq!(serialized, code.as_str(), "as_str і serde збігаються");

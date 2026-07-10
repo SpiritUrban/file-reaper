@@ -31,7 +31,7 @@ const FILE_ATTRIBUTE_TEMPORARY: u32 = 0x0000_0100;
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
 
 /// Інтервал FILETIME між 1601-01-01 і Unix epoch (100-нс тики).
-const FILETIME_UNIX_EPOCH: u64 = 11_644_473_600_000_000_000;
+const FILETIME_UNIX_EPOCH: u64 = 116_444_736_000_000_000;
 
 /// Конфігурація обходу.
 #[derive(Debug, Clone, Default)]

@@ -8,7 +8,11 @@
 //! відмови — у `trashradar_app::elevation`.
 
 use trashradar_app::ports::ScanEnvironment;
-use trashradar_domain::error::CoreError;
+use trashradar_domain::{
+    candidate::{ByteSize, FsTimestamp},
+    error::CoreError,
+    quarantine::FileIdentity,
+};
 
 /// Адаптер [`ScanEnvironment`] на WinAPI (T-028).
 #[derive(Debug, Default, Clone, Copy)]
@@ -65,6 +69,58 @@ pub fn volume_file_system(volume: char) -> Result<Option<String>, CoreError> {
     }
 }
 
+/// Прочитати живі size+mtime у тому самому FILETIME-форматі, що й індекс (T-086).
+pub fn read_file_identity(path: &std::path::Path) -> Result<FileIdentity, CoreError> {
+    let metadata = std::fs::metadata(path).map_err(|error| {
+        CoreError::io(format!(
+            "Не вдалося прочитати метадані {}: {error}",
+            path.display()
+        ))
+    })?;
+    #[cfg(windows)]
+    let modified_at = {
+        use std::os::windows::fs::MetadataExt;
+        let ticks = metadata.last_write_time();
+        if ticks == 0 {
+            None
+        } else {
+            i64::try_from(ticks).ok().map(FsTimestamp)
+        }
+    };
+    #[cfg(not(windows))]
+    let modified_at = metadata.modified().ok().and_then(system_time_to_filetime);
+
+    Ok(FileIdentity {
+        size: ByteSize(metadata.len()),
+        modified_at,
+    })
+}
+
+#[cfg(not(windows))]
+const FILETIME_UNIX_EPOCH: u64 = 116_444_736_000_000_000;
+
+#[cfg(not(windows))]
+fn system_time_to_filetime(time: std::time::SystemTime) -> Option<FsTimestamp> {
+    match time.duration_since(std::time::UNIX_EPOCH) {
+        Ok(duration) => {
+            let ticks = duration
+                .as_secs()
+                .checked_mul(10_000_000)?
+                .checked_add((duration.subsec_nanos() / 100) as u64)?
+                .checked_add(FILETIME_UNIX_EPOCH)?;
+            i64::try_from(ticks).ok().map(FsTimestamp)
+        }
+        Err(error) => {
+            let duration = error.duration();
+            let delta = duration
+                .as_secs()
+                .checked_mul(10_000_000)?
+                .checked_add((duration.subsec_nanos() / 100) as u64)?;
+            (delta <= FILETIME_UNIX_EPOCH)
+                .then(|| FsTimestamp((FILETIME_UNIX_EPOCH - delta) as i64))
+        }
+    }
+}
 /// Додати Windows-атрибут `HIDDEN`, зберігши решту атрибутів (T-077).
 pub fn set_hidden(path: &std::path::Path) -> Result<(), CoreError> {
     #[cfg(windows)]

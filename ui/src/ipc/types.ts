@@ -148,7 +148,8 @@ export type CoreErrorCode =
   | "not_implemented"
   | "io"
   | "cancelled"
-  | "path_protected";
+  | "path_protected"
+  | "file_changed";
 
 /** Конверт помилки Core → UI: {"code", "message"}. */
 export interface CoreErrorPayload {

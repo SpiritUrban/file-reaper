@@ -38,6 +38,24 @@ pub struct QuarantineEntry {
     pub status: QuarantineStatus,
 }
 
+/// Ідентичність файла для optimistic concurrency перед move (T-086).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileIdentity {
+    pub size: ByteSize,
+    pub modified_at: Option<crate::candidate::FsTimestamp>,
+}
+
+impl FileIdentity {
+    pub fn validate_unchanged(self, live: Self, path: &str) -> Result<(), crate::error::CoreError> {
+        if self == live {
+            return Ok(());
+        }
+        Err(crate::error::CoreError::file_changed(format!(
+            "Файл «{path}» змінився після сканування (очікувалось size={} mtime={:?}, зараз size={} mtime={:?}); reap скасовано.",
+            self.size.0, self.modified_at, live.size.0, live.modified_at
+        )))
+    }
+}
 /// Причина блокування шляху останньою лінією захисту (T-085).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProtectedPathKind {

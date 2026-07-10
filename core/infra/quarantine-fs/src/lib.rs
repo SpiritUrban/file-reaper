@@ -10,8 +10,11 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use trashradar_app::ports::QuarantineFs;
-use trashradar_domain::{error::CoreError, quarantine::QuarantineGuard};
-use trashradar_platform_win::set_hidden;
+use trashradar_domain::{
+    error::CoreError,
+    quarantine::{FileIdentity, QuarantineGuard},
+};
+use trashradar_platform_win::{read_file_identity, set_hidden};
 
 pub const SERVICE_DIRECTORY_NAME: &str = ".trashradar";
 pub const QUARANTINE_DIRECTORY_NAME: &str = "quarantine";
@@ -49,6 +52,15 @@ impl NativeQuarantineFs {
         QuarantineGuard::windows_volume(volume)
             .with_trashradar_roots(trashradar_roots)
             .validate(path)
+    }
+    /// Звірити живий файл з size+mtime індексу безпосередньо перед move (T-086).
+    pub fn validate_file_identity(
+        &self,
+        path: &Path,
+        expected: FileIdentity,
+    ) -> Result<(), CoreError> {
+        let live = read_file_identity(path)?;
+        expected.validate_unchanged(live, &path.to_string_lossy())
     }
     /// Створити `<том>\.trashradar\quarantine` і підтвердити право запису.
     pub fn ensure_on_volume(&self, volume: char) -> Result<QuarantineDirectory, CoreError> {
@@ -182,6 +194,53 @@ mod tests {
                 [r"C:\Users\Ada\AppData\Local\TrashRadar"]
             )
             .is_ok());
+    }
+    #[test]
+    fn changed_file_is_rejected_before_move() {
+        use trashradar_domain::error::ErrorCode;
+
+        let root = temp_volume("identity");
+        let file_path = root.join("candidate.bin");
+        fs::write(&file_path, b"before").unwrap();
+        let expected = read_file_identity(&file_path).unwrap();
+        NativeQuarantineFs
+            .validate_file_identity(&file_path, expected)
+            .unwrap();
+
+        fs::write(&file_path, b"after-change").unwrap();
+        let error = NativeQuarantineFs
+            .validate_file_identity(&file_path, expected)
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::FileChanged);
+        assert!(error.message.contains("змінився після сканування"));
+        assert!(
+            file_path.exists(),
+            "перевірка не переміщує і не видаляє файл"
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn mtime_mismatch_is_rejected_even_when_size_matches() {
+        use trashradar_domain::{candidate::FsTimestamp, error::ErrorCode};
+
+        let root = temp_volume("mtime");
+        let file_path = root.join("same-size.bin");
+        fs::write(&file_path, b"12345678").unwrap();
+        let live = read_file_identity(&file_path).unwrap();
+        let expected = FileIdentity {
+            size: live.size,
+            modified_at: live.modified_at.map(|time| FsTimestamp(time.0 - 1)),
+        };
+        assert_eq!(
+            NativeQuarantineFs
+                .validate_file_identity(&file_path, expected)
+                .unwrap_err()
+                .code,
+            ErrorCode::FileChanged
+        );
+        fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn rejects_missing_root_and_invalid_volume() {
