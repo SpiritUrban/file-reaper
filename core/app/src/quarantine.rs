@@ -7,8 +7,8 @@ use std::path::Path;
 use trashradar_domain::{
     error::CoreError,
     quarantine::{
-        restore_destination, FileIdentity, QuarantineEntry, QuarantineEntryId, QuarantineStatus,
-        RESTORE_SUFFIX_MAX_ATTEMPTS,
+        restore_destination, BatchId, FileIdentity, QuarantineEntry, QuarantineEntryId,
+        QuarantineStatus, RESTORE_SUFFIX_MAX_ATTEMPTS,
     },
 };
 
@@ -64,10 +64,17 @@ impl<'a, F: QuarantineFs, M: QuarantineManifest> TransactionalReaper<'a, F, M> {
 
     /// Послідовний батч: перша помилка/аварія зупиняє нові move; вже завершені
     /// та поточний in_flight лишаються відновлюваними за manifest (T-084).
-    pub fn reap_batch(&self, requests: Vec<ReapRequest>) -> Result<Vec<ReapOutcome>, CoreError> {
+    pub fn reap_batch(
+        &self,
+        batch_id: BatchId,
+        requests: Vec<ReapRequest>,
+    ) -> Result<Vec<ReapOutcome>, CoreError> {
         requests
             .into_iter()
-            .map(|request| self.reap_one(request))
+            .map(|mut request| {
+                request.entry.batch_id = Some(batch_id);
+                self.reap_one(request)
+            })
             .collect()
     }
 }
@@ -162,6 +169,28 @@ impl<'a, F: QuarantineFs, M: QuarantineManifest> QuarantineRestorer<'a, F, M> {
             .into_iter()
             .map(|request| self.restore_one(request))
             .collect()
+    }
+
+    /// Масове «Скасувати»: manifest сам знаходить усі quarantined-записи
+    /// операції, а викликач лише резолвить фізичний шлях сурогата.
+    pub fn undo_batch(
+        &self,
+        batch_id: BatchId,
+        mut surrogate_path: impl FnMut(&QuarantineEntry) -> Result<String, CoreError>,
+    ) -> Result<Vec<RestoreOutcome>, CoreError> {
+        let requests = self
+            .manifest
+            .list_entries_by_batch(batch_id)?
+            .into_iter()
+            .filter(|entry| entry.status == QuarantineStatus::Quarantined)
+            .map(|entry| {
+                Ok(RestoreRequest {
+                    entry_id: entry.id,
+                    surrogate_path: surrogate_path(&entry)?,
+                })
+            })
+            .collect::<Result<Vec<_>, CoreError>>()?;
+        self.restore_batch(requests)
     }
 }
 
@@ -336,9 +365,10 @@ mod tests {
             crash,
         };
         let outcomes = TransactionalReaper::new(&fs, &manifest, &[])
-            .reap_batch(requests)
+            .reap_batch(BatchId(42), requests)
             .unwrap();
         assert_eq!(outcomes[0].entry.status, QuarantineStatus::Quarantined);
+        assert_eq!(outcomes[0].entry.batch_id, Some(BatchId(42)));
         assert_eq!(
             entries.lock().unwrap()[&1].status,
             QuarantineStatus::Quarantined
@@ -444,6 +474,42 @@ mod tests {
     }
 
     #[test]
+    fn undo_batch_restores_all_matching_entries_in_one_call() {
+        let mut entries = [request(1).entry, request(2).entry];
+        for entry in &mut entries {
+            entry.batch_id = Some(BatchId(77));
+            entry.status = QuarantineStatus::Quarantined;
+        }
+        let paths = |entry: &QuarantineEntry| {
+            format!(r"C:\.trashradar\quarantine\{}", entry.surrogate_name)
+        };
+        let crash = Arc::new(CrashControl {
+            phase: CrashPhase::AfterMove,
+            crash_call: usize::MAX,
+            inserts: Mutex::new(0),
+            moves: Mutex::new(0),
+            updates: Mutex::new(0),
+        });
+        let fs = FakeFs {
+            files: Arc::new(Mutex::new(entries.iter().map(paths).collect())),
+            crash: Arc::clone(&crash),
+        };
+        let manifest = FakeManifest {
+            entries: Arc::new(Mutex::new(
+                entries.iter().map(|e| (e.id.0, e.clone())).collect(),
+            )),
+            crash,
+        };
+        let outcomes = QuarantineRestorer::new(&fs, &manifest)
+            .undo_batch(BatchId(77), |entry| Ok(paths(entry)))
+            .unwrap();
+        assert_eq!(outcomes.len(), 2);
+        assert!(outcomes
+            .iter()
+            .all(|outcome| outcome.entry.status == QuarantineStatus::Restored));
+    }
+
+    #[test]
     fn stress_kill_mid_batch_never_loses_or_duplicates_file() {
         const FILES: u64 = 64;
         const CRASH_CALL: usize = 32;
@@ -475,9 +541,10 @@ mod tests {
                 crash,
             };
             let reaper = TransactionalReaper::new(&fs, &manifest, &[]);
-            assert!(
-                catch_unwind(AssertUnwindSafe(|| reaper.reap_batch(requests.clone()))).is_err()
-            );
+            assert!(catch_unwind(AssertUnwindSafe(|| {
+                reaper.reap_batch(BatchId(1), requests.clone())
+            }))
+            .is_err());
 
             let physical = files.lock().unwrap();
             for req in &requests {

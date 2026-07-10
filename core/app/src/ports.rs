@@ -65,7 +65,7 @@ use trashradar_domain::{
     candidate::{ByteSize, FileRecord, FileRecordSort, FsTimestamp},
     category::CategoryId,
     error::CoreError,
-    quarantine::{FileIdentity, QuarantineEntry, QuarantineEntryId, QuarantineStatus},
+    quarantine::{BatchId, FileIdentity, QuarantineEntry, QuarantineEntryId, QuarantineStatus},
     scan::{ScanEntry, UsnChange, UsnCursor, UsnJournalInfo},
     ContentHash, FileHashCacheEntry, PartialHash,
 };
@@ -108,6 +108,13 @@ pub trait QuarantineManifest {
     fn insert_entry(&self, entry: &QuarantineEntry) -> Result<(), CoreError>;
     fn get_entry(&self, id: QuarantineEntryId) -> Result<Option<QuarantineEntry>, CoreError>;
     fn list_entries(&self) -> Result<Vec<QuarantineEntry>, CoreError>;
+    fn list_entries_by_batch(&self, batch_id: BatchId) -> Result<Vec<QuarantineEntry>, CoreError> {
+        Ok(self
+            .list_entries()?
+            .into_iter()
+            .filter(|entry| entry.batch_id == Some(batch_id))
+            .collect())
+    }
     fn update_status(
         &self,
         id: QuarantineEntryId,
