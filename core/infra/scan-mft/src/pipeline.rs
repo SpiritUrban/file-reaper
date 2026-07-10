@@ -13,6 +13,7 @@ use trashradar_domain::candidate::{
 };
 use trashradar_domain::category::CategoryId;
 use trashradar_domain::error::CoreError;
+use trashradar_domain::quarantine::is_under_service_directory;
 use trashradar_domain::scan::ScanEntry;
 
 use crate::paths::PathResolver;
@@ -47,6 +48,8 @@ pub struct IndexingStats {
     pub files_indexed: u64,
     /// Пропущено (шлях не розкрутився — сирота/цикл).
     pub skipped_no_path: u64,
+    /// Пропущено з-під `<том>\.trashradar` — карантин не сканується (T-088).
+    pub skipped_quarantine: u64,
     /// Пошкоджені записи MFT, пропущені з логом (T-025).
     pub corrupt: u64,
     /// Кількість зданих батчів.
@@ -94,6 +97,11 @@ where
             self.stats.skipped_no_path += 1;
             return;
         };
+        // T-088: вміст карантину ніколи не стає кандидатом (architecture.md §7.4).
+        if is_under_service_directory(&path) {
+            self.stats.skipped_quarantine += 1;
+            return;
+        }
         let record = to_file_record(&entry, path, self.next_id);
         self.next_id += 1;
         self.batch.push(record);
@@ -280,6 +288,30 @@ mod tests {
         assert_eq!(*count.borrow(), 1);
         assert_eq!(stats.files_indexed, 1);
         assert_eq!(stats.skipped_no_path, 1);
+    }
+
+    /// DoD T-088: вміст `<том>\.trashradar` ніколи не з'являється у кандидатах.
+    #[test]
+    fn quarantine_service_directory_is_never_indexed() {
+        let dirs = vec![
+            entry(5, 5, ".", true, 0),
+            entry(10, 5, "Media", true, 0),
+            entry(20, 5, ".trashradar", true, 0),
+            entry(21, 20, "quarantine", true, 0),
+        ];
+        let resolver = PathResolver::from_entries('C', &dirs);
+        let paths: RefCell<Vec<String>> = RefCell::new(Vec::new());
+        let mut batcher = Batcher::new(&resolver, 10, |b: Vec<FileRecord>| {
+            paths.borrow_mut().extend(b.into_iter().map(|r| r.path));
+            Ok(())
+        });
+        batcher.push(entry(100, 21, "00000001.bin", false, 4096)); // у карантині
+        batcher.push(entry(101, 20, "meta.json", false, 10)); // у службовому корені
+        batcher.push(entry(102, 10, "clip.mp4", false, 2048)); // звичайний файл
+        let stats = batcher.finish().unwrap();
+        assert_eq!(*paths.borrow(), vec!["C:\\Media\\clip.mp4".to_string()]);
+        assert_eq!(stats.files_indexed, 1);
+        assert_eq!(stats.skipped_quarantine, 2);
     }
 
     #[test]

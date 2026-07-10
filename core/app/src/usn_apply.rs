@@ -16,6 +16,7 @@ use trashradar_domain::candidate::{
 };
 use trashradar_domain::category::CategoryId;
 use trashradar_domain::error::CoreError;
+use trashradar_domain::quarantine::is_under_service_directory;
 use trashradar_domain::scan::{usn_reason, UsnChange, UsnCursor};
 
 use crate::ports::{HotIndex, IndexStore, UsnReadOutcome};
@@ -144,6 +145,8 @@ pub struct UsnApplyStats {
     pub renamed: u64,
     pub skipped_unresolved: u64,
     pub skipped_directory: u64,
+    /// Зміни у `<том>\.trashradar` — карантин не потрапляє в кандидати (T-088).
+    pub skipped_quarantine: u64,
     pub ignored: u64,
 }
 
@@ -251,6 +254,19 @@ pub fn plan_usn_mutations(
                     continue;
                 };
 
+                // T-088: reap-move у карантин — файл залишає множину кандидатів.
+                // Старий шлях видаляється з індексу, Upsert карантинного шляху
+                // заборонений (кеш FRN оновлюємо, щоб restore-rename розкрутився).
+                if is_under_service_directory(&new_path) {
+                    if let Some(old_path) = rename_old_paths.remove(&change.file_ref) {
+                        mutations.push(IndexMutation::Remove { path: old_path });
+                        stats.deleted += 1;
+                    }
+                    cache.insert(change.file_ref, new_path);
+                    stats.skipped_quarantine += 1;
+                    continue;
+                }
+
                 if let Some(old_path) = rename_old_paths.remove(&change.file_ref) {
                     mutations.push(IndexMutation::Remove {
                         path: old_path.clone(),
@@ -282,6 +298,12 @@ pub fn plan_usn_mutations(
                     stats.skipped_unresolved += 1;
                     continue;
                 };
+                // T-088: створене в карантині не стає кандидатом.
+                if is_under_service_directory(&path) {
+                    cache.insert(change.file_ref, path);
+                    stats.skipped_quarantine += 1;
+                    continue;
+                }
                 let probe_data = probe(&path);
                 let record = build_record(*next_candidate_id, &path, probe_data.as_ref(), change);
                 *next_candidate_id += 1;
@@ -298,6 +320,12 @@ pub fn plan_usn_mutations(
                     stats.skipped_unresolved += 1;
                     continue;
                 };
+                // T-088: зміни всередині карантину індекс не цікавлять.
+                if is_under_service_directory(&path) {
+                    cache.insert(change.file_ref, path);
+                    stats.skipped_quarantine += 1;
+                    continue;
+                }
                 let probe_data = probe(&path);
                 let record = build_record(*next_candidate_id, &path, probe_data.as_ref(), change);
                 *next_candidate_id += 1;
@@ -678,6 +706,87 @@ mod tests {
         assert!(!paths
             .iter()
             .any(|p| p.eq_ignore_ascii_case("C:\\data\\old.txt")));
+    }
+
+    /// DoD T-088: reap-move у `<том>\.trashradar` прибирає файл з кандидатів
+    /// і НЕ заносить карантинний шлях у індекс.
+    #[test]
+    fn rename_into_quarantine_removes_candidate_without_upsert() {
+        let index = MemIndex::new();
+        let mut cache = FrnPathCache::new();
+        cache.seed_volume_root('C');
+        cache.insert(10, "C:\\data");
+        cache.insert(11, "C:\\.trashradar\\quarantine");
+        cache.insert(20, "C:\\data\\old.mp4");
+
+        index
+            .insert_batch(vec![FileRecord {
+                candidate_id: CandidateId(1),
+                path: "C:\\data\\old.mp4".into(),
+                size: ByteSize(4096),
+                created_at: None,
+                modified_at: None,
+                accessed_at: None,
+                kind: FileKind::Video,
+                unit: CandidateUnit::File,
+                category: CategoryId::Uncategorized,
+                safety: SafetyLevel::ReviewRecommended,
+                decision: Decision::Undecided,
+                detector_id: String::new(),
+                explanation: String::new(),
+                attributes: FileAttributes::default(),
+            }])
+            .unwrap();
+
+        // Reap = rename same-volume: old у C:\data, new у карантині.
+        let changes = vec![
+            change(1, 20, 10, usn_reason::RENAME_OLD_NAME, "old.mp4", false),
+            change(
+                2,
+                20,
+                11,
+                usn_reason::RENAME_NEW_NAME,
+                "00000001.bin",
+                false,
+            ),
+        ];
+        let mut next_id = 2u64;
+        let (mutations, stats) = plan_usn_mutations(&changes, &mut cache, |_| None, &mut next_id);
+        apply_mutations_to_hot_index(&index, &mutations).unwrap();
+
+        assert_eq!(stats.skipped_quarantine, 1);
+        assert_eq!(stats.deleted, 1);
+        assert!(
+            index.is_empty().unwrap(),
+            "карантинний шлях не має бути в індексі: {:?}",
+            index.paths()
+        );
+        assert!(
+            !mutations
+                .iter()
+                .any(|m| matches!(m, IndexMutation::Upsert(_))),
+            "Upsert карантинного шляху заборонений"
+        );
+    }
+
+    /// DoD T-088: створення/зміна файла всередині карантину не породжує кандидата.
+    #[test]
+    fn create_and_modify_inside_quarantine_are_ignored() {
+        let mut cache = FrnPathCache::new();
+        cache.seed_volume_root('C');
+        cache.insert(11, "C:\\.trashradar\\quarantine");
+
+        let changes = vec![
+            change(1, 30, 11, usn_reason::FILE_CREATE, "00000002.bin", false),
+            change(2, 30, 11, usn_reason::DATA_EXTEND, "00000002.bin", false),
+        ];
+        let mut next_id = 1u64;
+        let (mutations, stats) = plan_usn_mutations(&changes, &mut cache, |_| None, &mut next_id);
+
+        assert!(mutations.is_empty());
+        assert_eq!(stats.skipped_quarantine, 2);
+        assert_eq!(stats.created, 0);
+        assert_eq!(stats.modified, 0);
     }
 
     #[test]

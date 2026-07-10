@@ -16,7 +16,8 @@ use trashradar_domain::{
 };
 use trashradar_platform_win::{read_file_identity, set_hidden};
 
-pub const SERVICE_DIRECTORY_NAME: &str = ".trashradar";
+pub use trashradar_domain::quarantine::SERVICE_DIRECTORY_NAME;
+
 pub const QUARANTINE_DIRECTORY_NAME: &str = "quarantine";
 
 static PROBE_SEQUENCE: AtomicU64 = AtomicU64::new(0);

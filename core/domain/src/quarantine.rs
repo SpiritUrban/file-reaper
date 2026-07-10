@@ -7,6 +7,28 @@ use serde::{Deserialize, Serialize};
 
 use crate::candidate::ByteSize;
 
+/// Ім'я службового каталогу TrashRadar у корені тому (`<том>\.trashradar`).
+/// Єдине джерело правди для guard-list (T-085), FS-шлюзу (T-077) і виключення
+/// зі сканування (T-088).
+pub const SERVICE_DIRECTORY_NAME: &str = ".trashradar";
+
+/// Чи лежить шлях у службовому каталозі TrashRadar тому (`<X>:\.trashradar\…`).
+///
+/// Правило продукту «сміття не знаходить саме себе» (architecture.md §7.4):
+/// вміст карантину ніколи не потрапляє в кандидати — жодне джерело скану
+/// (MFT / walk / USN-дельта) не заносить такі шляхи в індекс.
+pub fn is_under_service_directory(path: &str) -> bool {
+    let Some(normalized) = normalize_windows_path(path) else {
+        return false;
+    };
+    if drive_letter(&normalized).is_none() {
+        return false;
+    }
+    // normalized гарантовано починається з `x:\` — службовий корінь тому.
+    let service_root = format!("{}{}", &normalized[..3], SERVICE_DIRECTORY_NAME);
+    path_is_under(&normalized, &service_root)
+}
+
 /// Ідентифікатор запису журналу Quarantine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct QuarantineEntryId(pub u64);
@@ -98,7 +120,7 @@ impl QuarantineGuard {
                 ProtectedPathKind::Applications,
             ),
             (
-                format!(r"{drive}:\.trashradar"),
+                format!(r"{drive}:\{SERVICE_DIRECTORY_NAME}"),
                 ProtectedPathKind::TrashRadar,
             ),
         ];
@@ -196,6 +218,25 @@ mod tests {
         assert!(guard.validate(r"C:\Users\Ada\Videos\clip.mp4").is_ok());
         assert!(guard.validate(r"C:\WindowsBackup\clip.mp4").is_ok());
         assert!(guard.validate(r"C:\Program Files Backup\clip.mp4").is_ok());
+    }
+
+    #[test]
+    fn service_directory_detection_is_segment_safe_and_normalized() {
+        // Під службовим каталогом — будь-яка глибина, регістр, роздільники.
+        assert!(is_under_service_directory(r"C:\.trashradar"));
+        assert!(is_under_service_directory(
+            r"C:\.trashradar\quarantine\00000001.bin"
+        ));
+        assert!(is_under_service_directory(r"d:/.TrashRadar/quarantine"));
+        assert!(is_under_service_directory(
+            r"\\?\E:\.trashradar\quarantine\x"
+        ));
+        // Не під ним: сусідні імена, службовий каталог не в корені тому, UNC.
+        assert!(!is_under_service_directory(r"C:\.trashradar2\file.bin"));
+        assert!(!is_under_service_directory(r"C:\Users\Ada\.trashradar\x"));
+        assert!(!is_under_service_directory(r"C:\Users\Ada\video.mp4"));
+        assert!(!is_under_service_directory(r"\\server\.trashradar\x"));
+        assert!(!is_under_service_directory(""));
     }
 
     #[test]

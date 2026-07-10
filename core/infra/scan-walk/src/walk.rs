@@ -17,6 +17,7 @@ use std::time::{Duration, SystemTime};
 
 use trashradar_domain::candidate::{ByteSize, FileAttributes, FsTimestamp};
 use trashradar_domain::error::{CoreError, ErrorCode};
+use trashradar_domain::quarantine::SERVICE_DIRECTORY_NAME;
 use trashradar_domain::scan::ScanEntry;
 
 use crate::exclude::PathExclusions;
@@ -138,6 +139,14 @@ fn walk_path_internal(
     root: &Path,
     config: WalkConfig,
 ) -> Result<(Vec<ScanEntry>, WalkStats), CoreError> {
+    // T-088: службовий каталог TrashRadar під коренем скану виключається
+    // безумовно, незалежно від конфігурації — «сміття не знаходить саме себе»
+    // (architecture.md §7.4). Для тому це `<X>:\.trashradar`.
+    let mut config = config;
+    config
+        .exclusions
+        .extend([root.join(SERVICE_DIRECTORY_NAME)]);
+
     // Корінь сам у виключенні — у піддерево не заходимо взагалі (0 syscall всередині).
     if config.exclusions.is_excluded(root) {
         tracing::debug!(path = %root.display(), "корінь скану виключено — обхід пропущено");
@@ -733,6 +742,52 @@ mod tests {
                     && !o.starts_with(&format!("{secret_norm}\\"))
                     && !o.starts_with(&secret_norm.replace("\\\\", "\\")),
                 "read_dir зайшов у виключене піддерево: {o} (secret={secret_norm})"
+            );
+        }
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// DoD T-088: вміст карантину ніколи не з'являється у кандидатах —
+    /// `.trashradar` під коренем скану відсікається навіть з порожнім
+    /// списком виключень (безумовне правило, не конфігурація).
+    #[test]
+    fn quarantine_directory_is_always_excluded_from_walk() {
+        let root = temp_tree();
+        create_dir_all(root.join(".trashradar/quarantine")).unwrap();
+        File::create(root.join(".trashradar/quarantine/00000001.bin"))
+            .unwrap()
+            .write_all(b"reaped")
+            .unwrap();
+
+        let config = WalkConfig {
+            workers: 2,
+            exclusions: PathExclusions::empty(),
+            record_opened_dirs: true,
+        };
+        let (entries, stats) = walk_path_with_stats(&root, config).expect("walk");
+
+        let names: std::collections::HashSet<_> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert!(!names.contains(".trashradar"));
+        assert!(!names.contains("quarantine"));
+        assert!(!names.contains("00000001.bin"));
+        assert!(names.contains("root.txt"));
+        assert!(stats.skipped_excluded >= 1);
+
+        // Жодного read_dir усередині службового каталогу (0 syscall, стиль T-027).
+        let service = root
+            .join(".trashradar")
+            .to_string_lossy()
+            .to_ascii_lowercase()
+            .replace('/', "\\");
+        for opened in &stats.opened_dirs {
+            let o = opened
+                .to_string_lossy()
+                .to_ascii_lowercase()
+                .replace('/', "\\");
+            assert!(
+                o != service && !o.starts_with(&format!("{service}\\")),
+                "read_dir зайшов у карантин: {o}"
             );
         }
 
