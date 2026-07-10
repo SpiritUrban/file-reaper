@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
@@ -225,8 +226,9 @@ fn worker_loop(state_lock: Arc<Mutex<SchedulerState>>, changed: Arc<Condvar>) {
         );
         drop(state);
 
-        // Виконання задачі
-        (task.job)(cancellation.clone());
+        // T-074: декодери медіа можуть панікувати на битих/екзотичних файлах.
+        // Паніка однієї preview-задачі не має вбивати worker і всю чергу.
+        let _ = panic::catch_unwind(AssertUnwindSafe(|| (task.job)(cancellation.clone())));
 
         let mut state = state_lock.lock().unwrap();
         state.running.remove(&task.path);
@@ -478,7 +480,7 @@ impl TwoStagePreviewer {
                 if token.is_cancelled() {
                     return;
                 }
-                let Ok(bytes) = encoder.encode(&raw) else {
+                let Some(bytes) = encode_thumbnail(encoder.as_ref(), &raw) else {
                     return;
                 };
                 if let Ok(preview_path) =
@@ -505,19 +507,27 @@ impl TwoStagePreviewer {
     }
 }
 
-/// Пройти ланцюжок джерел: перше `Some` виграє; `Ok(None)` і помилка
-/// окремого джерела не зривають ланцюжок (architecture.md §5.2).
+/// Пройти ланцюжок джерел: перше `Some` виграє; `Ok(None)`, помилка
+/// та panic окремого джерела не зривають ланцюжок (T-074).
 fn generate_from_chain(
     sources: &[Arc<dyn ThumbnailSource>],
     path: &str,
     max_edge: u32,
 ) -> Option<RawThumbnail> {
     for source in sources {
-        if let Ok(Some(raw)) = source.thumbnail(path, max_edge) {
-            return Some(raw);
+        match panic::catch_unwind(AssertUnwindSafe(|| source.thumbnail(path, max_edge))) {
+            Ok(Ok(Some(raw))) => return Some(raw),
+            Ok(Ok(None)) | Ok(Err(_)) | Err(_) => continue,
         }
     }
     None
+}
+
+fn encode_thumbnail(encoder: &dyn ThumbnailEncoder, raw: &RawThumbnail) -> Option<Vec<u8>> {
+    match panic::catch_unwind(AssertUnwindSafe(|| encoder.encode(raw))) {
+        Ok(Ok(bytes)) => Some(bytes),
+        Ok(Err(_)) | Err(_) => None,
+    }
 }
 
 #[cfg(test)]
@@ -874,6 +884,15 @@ mod tests {
         }
     }
 
+    /// Джерело, що панікує як битий/екзотичний декодер (T-074).
+    struct PanickingSource;
+
+    impl ThumbnailSource for PanickingSource {
+        fn thumbnail(&self, _p: &str, _e: u32) -> Result<Option<RawThumbnail>, CoreError> {
+            panic!("decoder panic");
+        }
+    }
+
     /// Тестовий кодувальник: префікс + пікселі як є.
     struct PassthroughEncoder;
 
@@ -882,6 +901,14 @@ mod tests {
             let mut out = b"ENC".to_vec();
             out.extend_from_slice(&thumbnail.bgra);
             Ok(out)
+        }
+    }
+
+    struct PanickingEncoder;
+
+    impl ThumbnailEncoder for PanickingEncoder {
+        fn encode(&self, _thumbnail: &RawThumbnail) -> Result<Vec<u8>, CoreError> {
+            panic!("encoder panic");
         }
     }
 
@@ -1034,6 +1061,68 @@ mod tests {
         let _ = std::fs::remove_dir_all(&fx.temp_dir);
     }
 
+    /// Паніка одного джерела не вбиває preview worker і не зриває ланцюжок.
+    #[test]
+    fn chain_falls_through_panicking_source() {
+        let fx = two_stage_fixture("panic_source", vec![Arc::new(PanickingSource)]);
+        let (cb, _log, rx) = delivery_recorder();
+        fx.previewer
+            .request_large_preview(r"C:\media\panic.bin", ByteSize(1), None, 128, cb)
+            .unwrap();
+        assert_eq!(
+            rx.recv_timeout(Duration::from_millis(500)).unwrap(),
+            PreviewQuality::Sharp
+        );
+        assert_eq!(fx.source_calls.load(Ordering::SeqCst), 1);
+        let _ = std::fs::remove_dir_all(&fx.temp_dir);
+    }
+
+    /// Паніка всередині preview job не завершує worker: наступна задача виконується.
+    #[test]
+    fn scheduler_survives_panicking_preview_job() {
+        let scheduler = PreviewScheduler::new(1, 0.0);
+        scheduler.submit("panic".to_string(), PreviewPriority::P1, move |_| {
+            panic!("decoder worker panic");
+        });
+
+        let (tx, rx) = mpsc::channel();
+        scheduler.submit("after".to_string(), PreviewPriority::P1, move |_| {
+            tx.send(()).unwrap();
+        });
+
+        rx.recv_timeout(Duration::from_millis(500))
+            .expect("worker має пережити panic і виконати наступну задачу");
+    }
+
+    /// Panic енкодера деградує у відсутнє різке превью без доставки й без падіння.
+    #[test]
+    fn panicking_encoder_means_preview_unavailable() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "tr_t074_encoder_{}",
+            Instant::now().elapsed().as_nanos()
+        ));
+        let db = Arc::new(MockPreviewCache::new());
+        let cache = Arc::new(PreviewCacheManager::new(
+            temp_dir.clone(),
+            db as Arc<dyn PreviewCache>,
+        ));
+        let previewer = TwoStagePreviewer::new(
+            cache,
+            Arc::new(PreviewScheduler::new(1, 0.0)),
+            vec![Arc::new(CountingSource {
+                calls: Arc::new(AtomicUsize::new(0)),
+            })],
+            Arc::new(PanickingEncoder),
+        );
+        let (cb, log, rx) = delivery_recorder();
+        let outcome = previewer
+            .request_large_preview(r"C:\media\bad-encode.png", ByteSize(1), None, 128, cb)
+            .unwrap();
+        assert_eq!(outcome, TwoStageOutcome::SharpScheduledOnly);
+        assert!(rx.recv_timeout(Duration::from_millis(200)).is_err());
+        assert!(log.lock().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
     /// Порожній шлях — помилка аргументу, як у всіх джерел конвеєра.
     #[test]
     fn two_stage_empty_path_is_invalid_argument() {
