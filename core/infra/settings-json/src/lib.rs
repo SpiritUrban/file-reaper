@@ -2,6 +2,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 use trashradar_app::ports::SettingsSource;
@@ -10,6 +11,7 @@ use trashradar_domain::settings::{AppSettings, SettingsOverrides};
 
 pub const SETTINGS_FILE_NAME: &str = "settings.json";
 pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -71,8 +73,31 @@ impl JsonSettingsSource {
         let text = serde_json::to_string_pretty(&document).map_err(|error| {
             CoreError::internal(format!("Не вдалося серіалізувати settings: {error}"))
         })?;
-        fs::write(&self.path, format!("{text}\n"))
-            .map_err(|error| CoreError::io(format!("Не вдалося записати settings.json: {error}")))
+        let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let temp_path = self
+            .path
+            .with_extension(format!("json.tmp-{}-{sequence}", std::process::id()));
+        let result = (|| {
+            let mut file = fs::File::create(&temp_path).map_err(|error| {
+                CoreError::io(format!("Не вдалося створити temp settings: {error}"))
+            })?;
+            use std::io::Write;
+            file.write_all(format!("{text}\n").as_bytes())
+                .and_then(|_| file.sync_all())
+                .map_err(|error| {
+                    CoreError::io(format!("Не вдалося синхронізувати temp settings: {error}"))
+                })?;
+            drop(file);
+            fs::rename(&temp_path, &self.path).map_err(|error| {
+                CoreError::io(format!(
+                    "Не вдалося атомарно замінити settings.json: {error}"
+                ))
+            })
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temp_path);
+        }
+        result
     }
 }
 
@@ -145,6 +170,15 @@ mod tests {
         assert!(!text.contains("warningThresholdBytes"));
         assert!(!text.contains("minimumSizeBytes"));
         assert_eq!(source.load().unwrap(), settings);
+
+        settings.quarantine.ttl_days = 21;
+        source.save(&settings).unwrap();
+        assert_eq!(source.load().unwrap().quarantine.ttl_days, 21);
+        let files: Vec<_> = fs::read_dir(&profile)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(files, vec![std::ffi::OsString::from(SETTINGS_FILE_NAME)]);
 
         source.save(&AppSettings::default()).unwrap();
         assert!(!source.path().exists());

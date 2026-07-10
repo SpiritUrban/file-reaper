@@ -336,6 +336,17 @@ export interface QuarantineRestoredEvent {
   message?: string;
 }
 
+export interface AppSettings {
+  quarantine: {
+    ttlDays: number;
+    warningThresholdBytes: number;
+  };
+  scan: {
+    excludedPaths: string[];
+    minimumSizeBytes: number;
+  };
+}
+
 export interface QuarantineChangedEvent {
   purgedCount: number;
   purgedBytes: number;

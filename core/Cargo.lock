@@ -3819,6 +3819,7 @@ dependencies = [
  "trashradar-quarantine-fs",
  "trashradar-scan-mft",
  "trashradar-scan-walk",
+ "trashradar-settings-json",
 ]
 
 [[package]]

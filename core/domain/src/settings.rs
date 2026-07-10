@@ -4,6 +4,15 @@ use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_QUARANTINE_TTL_DAYS: u32 = 30;
 pub const DEFAULT_QUARANTINE_WARNING_BYTES: u64 = 50 * 1024 * 1024 * 1024;
+pub const MIN_QUARANTINE_WARNING_BYTES: u64 = 1024 * 1024;
+pub const MAX_QUARANTINE_TTL_DAYS: u32 = 3650;
+pub const MAX_EXCLUDED_PATHS: usize = 4096;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettingsFieldError {
+    pub field: &'static str,
+    pub message: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -85,6 +94,39 @@ impl SettingsOverrides {
     }
 }
 
+pub fn validate_settings(settings: &AppSettings) -> Result<(), SettingsFieldError> {
+    if !(1..=MAX_QUARANTINE_TTL_DAYS).contains(&settings.quarantine.ttl_days) {
+        return Err(SettingsFieldError {
+            field: "quarantine.ttlDays",
+            message: format!("має бути від 1 до {MAX_QUARANTINE_TTL_DAYS}"),
+        });
+    }
+    if settings.quarantine.warning_threshold_bytes < MIN_QUARANTINE_WARNING_BYTES {
+        return Err(SettingsFieldError {
+            field: "quarantine.warningThresholdBytes",
+            message: format!("має бути не менше {MIN_QUARANTINE_WARNING_BYTES}"),
+        });
+    }
+    if settings.scan.excluded_paths.len() > MAX_EXCLUDED_PATHS {
+        return Err(SettingsFieldError {
+            field: "scan.excludedPaths",
+            message: format!("містить більше {MAX_EXCLUDED_PATHS} шляхів"),
+        });
+    }
+    if let Some(index) = settings
+        .scan
+        .excluded_paths
+        .iter()
+        .position(|path| path.trim().is_empty())
+    {
+        return Err(SettingsFieldError {
+            field: "scan.excludedPaths",
+            message: format!("елемент {index} не може бути порожнім"),
+        });
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct QuarantineOverrides {
@@ -128,5 +170,13 @@ mod tests {
         assert_eq!(overrides.quarantine.ttl_days, Some(14));
         assert!(overrides.scan.is_empty());
         assert_eq!(overrides.apply_to(defaults), changed);
+    }
+
+    #[test]
+    fn validation_reports_field_path() {
+        let mut settings = AppSettings::default();
+        settings.quarantine.ttl_days = 0;
+        let error = validate_settings(&settings).unwrap_err();
+        assert_eq!(error.field, "quarantine.ttlDays");
     }
 }

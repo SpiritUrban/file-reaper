@@ -52,12 +52,15 @@ fn main() {
 
     tauri::Builder::default()
         .manage(scan_runtime::ScanRuntime::new())
+        .manage(ipc::SettingsRuntime::new(logging::data_profile_dir()))
         .invoke_handler(tauri::generate_handler![
             ipc::app_health,
             ipc::app_ping,
             ipc::app_test_stream,
             ipc::app_request_elevation,
             ipc::app_decline_elevation,
+            ipc::settings_get,
+            ipc::settings_set,
             scan_runtime::scan_start,
             scan_runtime::scan_stop,
             scan_runtime::candidate_keep,

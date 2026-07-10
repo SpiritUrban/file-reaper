@@ -19,8 +19,57 @@ use trashradar_app::elevation::{
     elevation_benefit_message, elevation_benefit_summary, evaluate_elevation_prompt,
     ElevationSession,
 };
+use trashradar_app::ports::SettingsSource;
 use trashradar_domain::error::CoreError;
+use trashradar_domain::settings::{validate_settings, AppSettings};
 use trashradar_platform_win::{relaunch_elevated, ElevationRelaunch};
+
+#[derive(Clone)]
+pub struct SettingsRuntime {
+    source: Option<trashradar_settings_json::JsonSettingsSource>,
+}
+
+impl SettingsRuntime {
+    pub fn new(profile: Option<std::path::PathBuf>) -> Self {
+        Self {
+            source: profile.map(trashradar_settings_json::JsonSettingsSource::in_profile),
+        }
+    }
+
+    fn source(&self) -> Result<trashradar_settings_json::JsonSettingsSource, CoreError> {
+        self.source
+            .clone()
+            .ok_or_else(|| CoreError::io("LOCALAPPDATA недоступна — settings profile невідомий."))
+    }
+}
+
+#[tauri::command]
+pub async fn settings_get(
+    state: tauri::State<'_, SettingsRuntime>,
+) -> Result<AppSettings, CoreError> {
+    record_command();
+    let source = state.source()?;
+    tauri::async_runtime::spawn_blocking(move || source.load())
+        .await
+        .map_err(|error| CoreError::internal(format!("Settings read task failed: {error}")))?
+}
+
+#[tauri::command]
+pub async fn settings_set(
+    settings: AppSettings,
+    state: tauri::State<'_, SettingsRuntime>,
+) -> Result<AppSettings, CoreError> {
+    record_command();
+    validate_settings(&settings).map_err(|error| {
+        CoreError::invalid_argument(format!("Поле {}: {}.", error.field, error.message))
+    })?;
+    let source = state.source()?;
+    let saved = settings.clone();
+    tauri::async_runtime::spawn_blocking(move || source.save(&saved))
+        .await
+        .map_err(|error| CoreError::internal(format!("Settings write task failed: {error}")))??;
+    Ok(settings)
+}
 
 use crate::events;
 
@@ -521,12 +570,20 @@ mod tests {
         tauri::App<tauri::test::MockRuntime>,
         tauri::WebviewWindow<tauri::test::MockRuntime>,
     ) {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let profile = std::env::temp_dir().join(format!("trashradar-ipc-settings-{nonce}"));
         let app = mock_builder()
             .manage(crate::scan_runtime::ScanRuntime::new())
+            .manage(SettingsRuntime::new(Some(profile)))
             .invoke_handler(tauri::generate_handler![
                 app_health,
                 app_ping,
                 app_test_stream,
+                settings_get,
+                settings_set,
                 crate::scan_runtime::scan_start,
                 crate::scan_runtime::scan_stop,
             ])
@@ -734,6 +791,54 @@ mod tests {
         .expect_err("команда мусить відмовити");
         assert_eq!(envelope["code"], "invalid_argument");
         assert!(envelope["message"].as_str().expect("текст").ends_with('.'));
+    }
+
+    #[test]
+    fn settings_get_set_roundtrip_over_ipc() {
+        let (_app, webview) = test_app();
+        let defaults =
+            get_ipc_response(&webview, request("settings_get", json!({}))).expect("settings.get");
+        let mut settings: AppSettings =
+            serde_json::from_value(body_json(defaults)).expect("settings shape");
+        settings.quarantine.ttl_days = 14;
+        let saved = get_ipc_response(
+            &webview,
+            request("settings_set", json!({ "settings": settings })),
+        )
+        .expect("settings.set");
+        let saved: AppSettings = serde_json::from_value(body_json(saved)).expect("saved shape");
+        assert_eq!(saved.quarantine.ttl_days, 14);
+        let loaded = get_ipc_response(&webview, request("settings_get", json!({})))
+            .expect("settings.get after set");
+        let loaded: AppSettings = serde_json::from_value(body_json(loaded)).expect("loaded shape");
+        assert_eq!(loaded, saved);
+    }
+
+    #[test]
+    fn settings_set_rejects_invalid_field_without_persisting() {
+        let (_app, webview) = test_app();
+        let result = get_ipc_response(
+            &webview,
+            request(
+                "settings_set",
+                json!({
+                    "settings": {
+                        "quarantine": { "ttlDays": 0, "warningThresholdBytes": 1048576 },
+                        "scan": { "excludedPaths": [], "minimumSizeBytes": 0 }
+                    }
+                }),
+            ),
+        )
+        .expect_err("invalid ttl rejected");
+        assert_eq!(result["code"], "invalid_argument");
+        assert!(result["message"]
+            .as_str()
+            .unwrap()
+            .contains("quarantine.ttlDays"));
+        let loaded = get_ipc_response(&webview, request("settings_get", json!({})))
+            .expect("settings.get remains available");
+        let loaded: AppSettings = serde_json::from_value(body_json(loaded)).unwrap();
+        assert_eq!(loaded, AppSettings::default());
     }
 
     #[test]

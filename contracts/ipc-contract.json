@@ -62,8 +62,16 @@
       "$comment": "Core use case ready (QuarantineRestorer, T-080); command wiring with manifest DB state — T-081/T-132"
     },
     "quarantine.purge": { "status": "planned", "task": "T-083" },
-    "settings.get": { "status": "planned", "task": "T-092" },
-    "settings.set": { "status": "planned", "task": "T-092" },
+    "settings.get": {
+      "status": "implemented",
+      "task": "T-092",
+      "$comment": "{} → AppSettings effective defaults+overrides"
+    },
+    "settings.set": {
+      "status": "implemented",
+      "task": "T-092",
+      "$comment": "{settings: AppSettings} → saved AppSettings; invalid field returns invalid_argument with field path; atomic temp+fsync+rename"
+    },
     "search.candidates": { "status": "planned", "task": "T-018" }
   },
   "events": {

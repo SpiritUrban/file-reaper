@@ -23,6 +23,7 @@ trashradar-scan-mft = { path = "../infra/scan-mft" }
 trashradar-scan-walk = { path = "../infra/scan-walk" }
 trashradar-quarantine-fs = { path = "../infra/quarantine-fs" }
 trashradar-index-sqlite = { path = "../infra/index-sqlite" }
+trashradar-settings-json = { path = "../infra/settings-json" }
 
 [dev-dependencies]
 # Mock-рантайм Tauri: наскрізні тести диспетчеризації команд без вікна.
