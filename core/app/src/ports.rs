@@ -70,6 +70,7 @@ use trashradar_domain::{
         QuarantineEntryId, QuarantineStatus,
     },
     scan::{ScanEntry, UsnChange, UsnCursor, UsnJournalInfo},
+    settings::AppSettings,
     ContentHash, FileHashCacheEntry, PartialHash,
 };
 
@@ -461,3 +462,9 @@ pub fn hash_cache_lookup(
 
 /// Джерело часу — для тестованості TTL і «віку» файлів.
 pub trait Clock {}
+
+/// Persistent-джерело ефективних налаштувань Core (T-090).
+pub trait SettingsSource {
+    fn load(&self) -> Result<AppSettings, CoreError>;
+    fn save(&self, settings: &AppSettings) -> Result<(), CoreError>;
+}

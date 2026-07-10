@@ -12,6 +12,7 @@ members = [
     "infra/quarantine-fs",
     "infra/hash",
     "infra/platform-win",
+    "infra/settings-json",
     "shell",
     "testkit",
 ]

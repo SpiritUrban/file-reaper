@@ -3791,6 +3791,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "trashradar-settings-json"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "trashradar-app",
+ "trashradar-domain",
+]
+
+[[package]]
 name = "trashradar-shell"
 version = "0.1.0"
 dependencies = [

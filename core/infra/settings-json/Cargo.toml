@@ -1,0 +1,10 @@
+[package]
+name = "trashradar-settings-json"
+description = "JSON settings adapter: defaults plus user overrides."
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+trashradar-domain = { path = "../../domain" }
+trashradar-app = { path = "../../app" }
+serde_json = { workspace = true }

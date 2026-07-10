@@ -16,6 +16,7 @@ pub mod error;
 pub mod forecast;
 pub mod quarantine;
 pub mod scan;
+pub mod settings;
 
 pub use aggregate::{summarize_unique, CandidateContribution, CategoryRollup, FreeableSummary};
 pub use duplicates::{
