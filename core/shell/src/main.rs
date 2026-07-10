@@ -11,6 +11,33 @@ mod ipc;
 mod logging;
 mod scan_runtime;
 
+fn recover_quarantine_at_startup() {
+    let Some(profile) = logging::data_profile_dir() else {
+        tracing::error!("Crash recovery пропущено: LOCALAPPDATA недоступна");
+        return;
+    };
+    let database = match trashradar_index_sqlite::IndexDatabase::open_profile(profile) {
+        Ok(database) => database,
+        Err(error) => {
+            tracing::error!(%error, "Crash recovery не відкрив manifest");
+            return;
+        }
+    };
+    let filesystem = trashradar_quarantine_fs::NativeQuarantineFs;
+    match trashradar_app::QuarantineRecovery::new(&filesystem, &database).reconcile(|entry| {
+        filesystem
+            .surrogate_path(&entry.original_path, &entry.surrogate_name)
+            .map(|path| path.to_string_lossy().into_owned())
+    }) {
+        Ok(result) => tracing::info!(
+            completed = result.completed.len(),
+            rolled_back = result.rolled_back.len(),
+            "Crash recovery завершено"
+        ),
+        Err(error) => tracing::error!(%error, "Crash recovery потребує ручного втручання"),
+    }
+}
+
 fn main() {
     // Логи — найперше: далі всі підсистеми вже під наглядом (T-003).
     match logging::init() {
@@ -21,6 +48,7 @@ fn main() {
         ),
         Err(reason) => eprintln!("логування у файл недоступне: {reason}"),
     }
+    recover_quarantine_at_startup();
 
     tauri::Builder::default()
         .manage(scan_runtime::ScanRuntime::new())

@@ -50,8 +50,8 @@ pub use preview::{
 };
 pub use quarantine::{
     spawn_quarantine_sweep, ManualPurgeResult, ManualPurgeSelection, ManualPurger,
-    QuarantineRestorer, QuarantineSweeper, ReapOutcome, ReapRequest, RestoreOutcome,
-    RestoreRequest, SweepResult, TransactionalReaper,
+    QuarantineRecovery, QuarantineRestorer, QuarantineSweeper, ReapOutcome, ReapRequest,
+    RecoveryResult, RestoreOutcome, RestoreRequest, SweepResult, TransactionalReaper,
 };
 pub use trashradar_domain::aggregate::{CandidateContribution, CategoryRollup, FreeableSummary};
 pub use trashradar_domain::duplicates::{

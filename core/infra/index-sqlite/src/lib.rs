@@ -760,6 +760,14 @@ impl IndexDatabase {
         )?;
         Ok(())
     }
+
+    pub fn remove_quarantine_entry(&self, id: QuarantineEntryId) -> Result<()> {
+        self.connection.execute(
+            "DELETE FROM quarantine_manifest WHERE entry_id = ?1",
+            [sqlite_integer("quarantine entry id", id.0)?],
+        )?;
+        Ok(())
+    }
     pub fn get_hash_cache_entry(&self, path: &str) -> Result<Option<FileHashCacheEntry>> {
         let key = normalize_hash_cache_path(path);
         type HashCacheRow = (i64, i64, Option<Vec<u8>>, Option<Vec<u8>>);
@@ -1046,6 +1054,14 @@ impl trashradar_app::ports::QuarantineManifest for IndexDatabase {
         status: QuarantineStatus,
     ) -> std::result::Result<(), trashradar_domain::error::CoreError> {
         self.update_quarantine_status(id, status)
+            .map_err(|error| trashradar_domain::error::CoreError::internal(error.to_string()))
+    }
+
+    fn remove_entry(
+        &self,
+        id: QuarantineEntryId,
+    ) -> std::result::Result<(), trashradar_domain::error::CoreError> {
+        self.remove_quarantine_entry(id)
             .map_err(|error| trashradar_domain::error::CoreError::internal(error.to_string()))
     }
 }
@@ -2514,6 +2530,8 @@ mod tests {
         drop(database);
         let reopened = IndexDatabase::open_profile(&profile_dir).unwrap();
         assert_eq!(reopened.list_quarantine_entries().unwrap(), listed);
+        reopened.remove_quarantine_entry(entry.id).unwrap();
+        assert_eq!(reopened.get_quarantine_entry(entry.id).unwrap(), None);
         cleanup(profile_dir);
     }
 

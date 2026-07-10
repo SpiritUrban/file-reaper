@@ -115,6 +115,7 @@ pub trait QuarantineManifest {
             .filter(|entry| entry.batch_id == Some(batch_id))
             .collect())
     }
+    fn remove_entry(&self, id: QuarantineEntryId) -> Result<(), CoreError>;
     fn update_status(
         &self,
         id: QuarantineEntryId,
@@ -357,6 +358,14 @@ pub enum RestoreMove {
     DestinationOccupied,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryLocation {
+    SourceOnly,
+    QuarantineOnly,
+    Both,
+    Missing,
+}
+
 /// Єдиний шлюз деструктивних операцій з FS (move/restore/purge).
 /// Реалізація: `quarantine-fs` (T-077, T-079…T-084). Інваріант D4:
 /// жоден інший порт не має права змінювати файлову систему.
@@ -380,6 +389,13 @@ pub trait QuarantineFs {
 
     /// Остаточно знищити прострочений сурогат лише з Quarantine (T-082).
     fn purge_from_quarantine(&self, surrogate_path: &str) -> Result<(), CoreError>;
+
+    /// Read-only звірка двох можливих місць in-flight файла при старті T-084.
+    fn recovery_location(
+        &self,
+        source_path: &str,
+        surrogate_path: &str,
+    ) -> Result<RecoveryLocation, CoreError>;
 }
 
 /// Хешування для каскаду дублікатів. Реалізація: `hash` (T-059/T-060).

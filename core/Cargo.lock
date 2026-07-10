@@ -3804,6 +3804,7 @@ dependencies = [
  "trashradar-app",
  "trashradar-domain",
  "trashradar-index-memory",
+ "trashradar-index-sqlite",
  "trashradar-platform-win",
  "trashradar-quarantine-fs",
  "trashradar-scan-mft",

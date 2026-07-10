@@ -64,9 +64,13 @@ pub fn init() -> Result<PathBuf, String> {
     Ok(path)
 }
 
+pub fn data_profile_dir() -> Option<PathBuf> {
+    std::env::var_os("LOCALAPPDATA").map(|base| PathBuf::from(base).join("TrashRadar"))
+}
+
 /// `%LOCALAPPDATA%\TrashRadar\logs`.
 fn default_log_dir() -> Option<PathBuf> {
-    std::env::var_os("LOCALAPPDATA").map(|base| PathBuf::from(base).join("TrashRadar").join("logs"))
+    data_profile_dir().map(|profile| profile.join("logs"))
 }
 
 /// Паніки — у лог (з тим самим форматом), потім стандартний обробник.

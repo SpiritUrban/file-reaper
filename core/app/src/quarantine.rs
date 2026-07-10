@@ -14,7 +14,7 @@ use trashradar_domain::{
     },
 };
 
-use crate::ports::{QuarantineFs, QuarantineManifest, RestoreMove};
+use crate::ports::{QuarantineFs, QuarantineManifest, RecoveryLocation, RestoreMove};
 use crate::workers::{JobHandle, JobPriority, WorkerPool};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -215,6 +215,70 @@ pub enum ManualPurgeSelection {
 pub struct ManualPurgeResult {
     pub purged: Vec<QuarantineEntry>,
     pub purged_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RecoveryResult {
+    pub completed: Vec<QuarantineEntryId>,
+    pub rolled_back: Vec<QuarantineEntryId>,
+}
+
+pub struct QuarantineRecovery<'a, F: QuarantineFs, M: QuarantineManifest> {
+    filesystem: &'a F,
+    manifest: &'a M,
+}
+
+impl<'a, F: QuarantineFs, M: QuarantineManifest> QuarantineRecovery<'a, F, M> {
+    pub fn new(filesystem: &'a F, manifest: &'a M) -> Self {
+        Self {
+            filesystem,
+            manifest,
+        }
+    }
+
+    pub fn reconcile(
+        &self,
+        mut surrogate_path: impl FnMut(&QuarantineEntry) -> Result<String, CoreError>,
+    ) -> Result<RecoveryResult, CoreError> {
+        let mut in_flight: Vec<_> = self
+            .manifest
+            .list_entries()?
+            .into_iter()
+            .filter(|entry| entry.status == QuarantineStatus::InFlight)
+            .collect();
+        in_flight.sort_by_key(|entry| entry.id.0);
+        let mut result = RecoveryResult::default();
+        for entry in in_flight {
+            let surrogate = surrogate_path(&entry)?;
+            match self
+                .filesystem
+                .recovery_location(&entry.original_path, &surrogate)?
+            {
+                RecoveryLocation::SourceOnly => {
+                    self.manifest.remove_entry(entry.id)?;
+                    result.rolled_back.push(entry.id);
+                }
+                RecoveryLocation::QuarantineOnly => {
+                    self.manifest
+                        .update_status(entry.id, QuarantineStatus::Quarantined)?;
+                    result.completed.push(entry.id);
+                }
+                RecoveryLocation::Both => {
+                    return Err(CoreError::internal(format!(
+                        "Crash recovery виявив дві копії entry {} — потрібне ручне втручання.",
+                        entry.id.0
+                    )));
+                }
+                RecoveryLocation::Missing => {
+                    return Err(CoreError::internal(format!(
+                        "Crash recovery не знайшов жодної копії entry {} — потрібне ручне втручання.",
+                        entry.id.0
+                    )));
+                }
+            }
+        }
+        Ok(result)
+    }
 }
 
 pub struct ManualPurger<'a, F: QuarantineFs, M: QuarantineManifest> {
@@ -438,6 +502,10 @@ mod tests {
         fn list_entries(&self) -> Result<Vec<QuarantineEntry>, CoreError> {
             Ok(self.entries.lock().unwrap().values().cloned().collect())
         }
+        fn remove_entry(&self, id: QuarantineEntryId) -> Result<(), CoreError> {
+            self.entries.lock().unwrap().remove(&id.0);
+            Ok(())
+        }
         fn update_status(
             &self,
             id: QuarantineEntryId,
@@ -494,6 +562,22 @@ mod tests {
             } else {
                 Err(CoreError::io("surrogate missing"))
             }
+        }
+
+        fn recovery_location(
+            &self,
+            source_path: &str,
+            surrogate_path: &str,
+        ) -> Result<RecoveryLocation, CoreError> {
+            let files = self.files.lock().unwrap();
+            Ok(
+                match (files.contains(source_path), files.contains(surrogate_path)) {
+                    (true, false) => RecoveryLocation::SourceOnly,
+                    (false, true) => RecoveryLocation::QuarantineOnly,
+                    (true, true) => RecoveryLocation::Both,
+                    (false, false) => RecoveryLocation::Missing,
+                },
+            )
         }
     }
 
@@ -802,6 +886,85 @@ mod tests {
                 .purge(ManualPurgeSelection::Entries(ids), |_| Ok(String::new()))
                 .unwrap_err();
             assert_eq!(error.code, ErrorCode::InvalidArgument);
+        }
+    }
+
+    #[test]
+    fn crash_recovery_rolls_back_before_move_and_completes_after_move() {
+        let source_only = request(1);
+        let quarantine_only = request(2);
+        let entries = [source_only.entry.clone(), quarantine_only.entry.clone()];
+        let crash = Arc::new(CrashControl {
+            phase: CrashPhase::AfterMove,
+            crash_call: usize::MAX,
+            inserts: Mutex::new(0),
+            moves: Mutex::new(0),
+            updates: Mutex::new(0),
+        });
+        let fs = FakeFs {
+            files: Arc::new(Mutex::new(HashSet::from([
+                source_only.entry.original_path.clone(),
+                quarantine_only.destination_path.clone(),
+            ]))),
+            crash: Arc::clone(&crash),
+        };
+        let manifest = FakeManifest {
+            entries: Arc::new(Mutex::new(
+                entries.iter().map(|e| (e.id.0, e.clone())).collect(),
+            )),
+            crash,
+        };
+        let result = QuarantineRecovery::new(&fs, &manifest)
+            .reconcile(|entry| {
+                Ok(format!(
+                    r"C:\.trashradar\quarantine\{}",
+                    entry.surrogate_name
+                ))
+            })
+            .unwrap();
+        assert_eq!(result.rolled_back, vec![QuarantineEntryId(1)]);
+        assert_eq!(result.completed, vec![QuarantineEntryId(2)]);
+        let stored = manifest.entries.lock().unwrap();
+        assert!(!stored.contains_key(&1));
+        assert_eq!(stored[&2].status, QuarantineStatus::Quarantined);
+    }
+
+    #[test]
+    fn crash_recovery_fails_closed_for_duplicate_or_missing_file() {
+        use trashradar_domain::error::ErrorCode;
+        for files in [
+            vec![request(1).entry.original_path, request(1).destination_path],
+            vec![],
+        ] {
+            let entry = request(1).entry;
+            let crash = Arc::new(CrashControl {
+                phase: CrashPhase::AfterMove,
+                crash_call: usize::MAX,
+                inserts: Mutex::new(0),
+                moves: Mutex::new(0),
+                updates: Mutex::new(0),
+            });
+            let fs = FakeFs {
+                files: Arc::new(Mutex::new(files.into_iter().collect())),
+                crash: Arc::clone(&crash),
+            };
+            let manifest = FakeManifest {
+                entries: Arc::new(Mutex::new(HashMap::from([(1, entry)]))),
+                crash,
+            };
+            let error = QuarantineRecovery::new(&fs, &manifest)
+                .reconcile(|entry| {
+                    Ok(format!(
+                        r"C:\.trashradar\quarantine\{}",
+                        entry.surrogate_name
+                    ))
+                })
+                .unwrap_err();
+            assert_eq!(error.code, ErrorCode::Internal);
+            assert_eq!(
+                manifest.entries.lock().unwrap()[&1].status,
+                QuarantineStatus::InFlight
+            );
         }
     }
 

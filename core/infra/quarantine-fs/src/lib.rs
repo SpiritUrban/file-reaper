@@ -1,4 +1,4 @@
-//! Адаптер `QuarantineFs` — єдиний шлюз деструктивних операцій.
+﻿//! Адаптер `QuarantineFs` — єдиний шлюз деструктивних операцій.
 //!
 //! ІНВАРІАНТ D4 (docs/architecture.md §8): лише цей крейт має право
 //! змінювати файлову систему. T-077 створює службовий каталог на тому;
@@ -9,7 +9,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use trashradar_app::ports::{QuarantineFs, RestoreMove};
+use trashradar_app::ports::{QuarantineFs, RecoveryLocation, RestoreMove};
 use trashradar_domain::{
     error::CoreError,
     quarantine::{is_under_service_directory, FileIdentity, QuarantineGuard},
@@ -146,6 +146,33 @@ impl QuarantineFs for NativeQuarantineFs {
             ))
         })
     }
+
+    fn recovery_location(
+        &self,
+        source_path: &str,
+        surrogate_path: &str,
+    ) -> Result<RecoveryLocation, CoreError> {
+        let surrogate = Path::new(surrogate_path);
+        validate_quarantine_destination(surrogate).map_err(|_| {
+            CoreError::invalid_argument(
+                "Recovery surrogate має бути всередині .trashradar\\quarantine.",
+            )
+        })?;
+        let source_exists = Path::new(source_path).try_exists().map_err(|error| {
+            CoreError::io(format!("Не вдалося перевірити original path: {error}"))
+        })?;
+        let quarantine_exists = surrogate.try_exists().map_err(|error| {
+            CoreError::io(format!(
+                "Не вдалося перевірити quarantine surrogate: {error}"
+            ))
+        })?;
+        Ok(match (source_exists, quarantine_exists) {
+            (true, false) => RecoveryLocation::SourceOnly,
+            (false, true) => RecoveryLocation::QuarantineOnly,
+            (true, true) => RecoveryLocation::Both,
+            (false, false) => RecoveryLocation::Missing,
+        })
+    }
 }
 
 fn windows_volume(path: &str) -> Option<char> {
@@ -177,6 +204,22 @@ fn validate_quarantine_destination(destination: &Path) -> Result<(), CoreError> 
 }
 
 impl NativeQuarantineFs {
+    pub fn surrogate_path(
+        &self,
+        original_path: &str,
+        surrogate_name: &str,
+    ) -> Result<PathBuf, CoreError> {
+        let volume = windows_volume(original_path).ok_or_else(|| {
+            CoreError::invalid_argument("Original path recovery не містить локального тому.")
+        })?;
+        let mut root = PathBuf::from(format!("{volume}:"));
+        root.push(std::path::MAIN_SEPARATOR.to_string());
+        Ok(root
+            .join(SERVICE_DIRECTORY_NAME)
+            .join(QUARANTINE_DIRECTORY_NAME)
+            .join(surrogate_name))
+    }
+
     /// Остання лінія захисту перед будь-яким reap/move (T-085).
     pub fn validate_reap_path<I, S>(&self, path: &str, trashradar_roots: I) -> Result<(), CoreError>
     where
@@ -621,6 +664,43 @@ mod tests {
         assert!(error.message.contains("reap скасовано"));
         assert!(source.exists(), "файл не переміщено і не втрачено");
         assert!(!destination.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn recovery_reports_source_quarantine_both_and_missing() {
+        let root = temp_volume("recovery");
+        let directory = NativeQuarantineFs.ensure_at_root(&root).unwrap();
+        let source = root.join("original.bin");
+        let surrogate = directory.quarantine_root.join("in-flight.bin");
+        fs::write(&source, b"source").unwrap();
+        assert_eq!(
+            NativeQuarantineFs
+                .recovery_location(&source.to_string_lossy(), &surrogate.to_string_lossy())
+                .unwrap(),
+            RecoveryLocation::SourceOnly
+        );
+        fs::write(&surrogate, b"quarantine").unwrap();
+        assert_eq!(
+            NativeQuarantineFs
+                .recovery_location(&source.to_string_lossy(), &surrogate.to_string_lossy())
+                .unwrap(),
+            RecoveryLocation::Both
+        );
+        fs::remove_file(&source).unwrap();
+        assert_eq!(
+            NativeQuarantineFs
+                .recovery_location(&source.to_string_lossy(), &surrogate.to_string_lossy())
+                .unwrap(),
+            RecoveryLocation::QuarantineOnly
+        );
+        fs::remove_file(&surrogate).unwrap();
+        assert_eq!(
+            NativeQuarantineFs
+                .recovery_location(&source.to_string_lossy(), &surrogate.to_string_lossy())
+                .unwrap(),
+            RecoveryLocation::Missing
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
