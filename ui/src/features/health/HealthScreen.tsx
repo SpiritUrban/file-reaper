@@ -30,7 +30,7 @@ function statusClass(status: string): string {
     case "degraded":
       return "border-quarantine/40 bg-quarantine/10 text-quarantine";
     default:
-      return "border-reap/40 bg-reap/10 text-reap";
+      return "border-quarantine/40 bg-quarantine/10 text-quarantine";
   }
 }
 
@@ -364,7 +364,7 @@ export function HealthScreen() {
                   className={`shrink-0 rounded border px-2 py-0.5 font-mono text-xs ${
                     volumeInfo.available
                       ? "border-keep/40 bg-keep/10 text-keep"
-                      : "border-reap/40 bg-reap/10 text-reap"
+                      : "border-quarantine/40 bg-quarantine/10 text-quarantine"
                   }`}
                 >
                   {volumeInfo.available ? "reap OK" : "reap заблоковано"}

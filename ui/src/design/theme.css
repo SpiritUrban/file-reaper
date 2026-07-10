@@ -27,7 +27,7 @@
   /* Шкала «гарячості» розміру файла */
   --color-heat-1: #d9c33a; /* помітний */
   --color-heat-2: #e8933a; /* великий */
-  --color-heat-3: #e5484d; /* величезний */
+  --color-heat-3: #f06a3a; /* величезний; не reap-червоний */
 
   /* Типографіка: гротеск для UI + моно для шляхів і розмірів */
   --font-sans: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
