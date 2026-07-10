@@ -8,3 +8,4 @@ edition.workspace = true
 trashradar-domain = { path = "../../domain" }
 trashradar-app = { path = "../../app" }
 serde_json = { workspace = true }
+serde = { workspace = true }
