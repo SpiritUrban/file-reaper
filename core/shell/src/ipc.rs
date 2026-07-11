@@ -261,6 +261,23 @@ impl ProfileRuntime {
     pub fn new(profile: Option<std::path::PathBuf>) -> Self {
         Self { profile }
     }
+
+    /// Перевіряє, чи це перший запуск (немає маркера .trashradar у профілі).
+    /// На першому запуску поставлює маркер.
+    pub fn check_and_mark_first_run(&self) -> bool {
+        let Some(profile) = &self.profile else {
+            return false;
+        };
+        let marker = profile.join(".trashradar");
+        if marker.exists() {
+            return false;
+        }
+        // Перший запуск: створюємо маркер-файл
+        if let Err(e) = std::fs::write(&marker, b"first_run_marker") {
+            tracing::warn!("Не вдалося записати маркер першого запуску: {}", e);
+        }
+        true
+    }
 }
 
 /// Бейдж з профільного manifest; недоступна БД → порожній бейдж (деградація,
@@ -291,6 +308,8 @@ pub struct AppStateSnapshot {
     pub volumes: Vec<VolumeUsageInfo>,
     /// Поточний вміст карантину для бейджа (T-106).
     pub quarantine: QuarantineBadge,
+    /// Перший запуск: чистий профіль без попередніх сканів (T-114).
+    pub is_first_run: bool,
 }
 
 /// Authoritative UI snapshot for webview reload (T-098). Read-only: never starts a scan.
@@ -315,12 +334,14 @@ pub async fn app_state(
     })
     .await
     .map_err(|error| CoreError::internal(format!("Quarantine badge task failed: {error}")))?;
+    let is_first_run = profile.check_and_mark_first_run();
     Ok(AppStateSnapshot {
         cleanup,
         scan_running: scan.controller.is_running(),
         settings: settings.current(),
         volumes: build_volume_usage(),
         quarantine,
+        is_first_run,
     })
 }
 

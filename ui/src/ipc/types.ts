@@ -401,6 +401,8 @@ export interface AppStateSnapshot {
   volumes: VolumeUsageInfo[];
   /** Поточний вміст карантину для бейджа (T-106). */
   quarantine: QuarantineBadge;
+  /** Перший запуск: чистий профіль без попередніх сканів (T-114). */
+  isFirstRun: boolean;
 }
 export interface QuarantineChangedEvent {
   purgedCount: number;

@@ -4,7 +4,7 @@
  * переходи між Cleanup / категоріями / Quarantine / Settings (T-099).
  */
 
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { useLocation } from "react-router-dom";
 
 import { ToastViewport } from "@/components/ToastViewport";
@@ -15,8 +15,10 @@ import { QuarantineScreen } from "@/features/quarantine/QuarantineScreen";
 import { SettingsScreen } from "@/features/settings/SettingsScreen";
 import { CATEGORIES, categoryTitle } from "@/store/categories";
 import { useMarkedSummary } from "@/store/selection";
+import { useAppState } from "@/store/appState";
 import type { CategoryId } from "@/ipc/types";
 import { hotkeys } from "@/hotkeys";
+import { command } from "@/ipc/client";
 
 import { Sidebar } from "./Sidebar";
 import { TopBar } from "./TopBar";
@@ -36,6 +38,9 @@ function screenClass(active: boolean): string {
 export function AppLayout() {
   const { pathname } = useLocation();
   const marked = useMarkedSummary();
+  const appState = useAppState();
+  const firstRunHandledRef = useRef(false);
+
   const activeCategory = categoryIdFromPath(pathname);
   const isQuarantine = pathname === "/quarantine";
   const isSettings = pathname === "/settings";
@@ -43,6 +48,21 @@ export function AppLayout() {
   const isCleanup =
     pathname === "/" ||
     (!activeCategory && !isQuarantine && !isSettings && !isHealth);
+
+  // T-114: Автостарт скану на першому запуску (чистий профіль)
+  useEffect(() => {
+    if (
+      appState.status === "ready" &&
+      appState.isFirstRun &&
+      !firstRunHandledRef.current
+    ) {
+      firstRunHandledRef.current = true;
+      command("scan.start", { payload: {} }).catch((error) =>
+        console.warn("Автостарт скану при першому запуску не пройшов:", error),
+      );
+    }
+  }, [appState.status, appState.isFirstRun]);
+
   useEffect(() => {
     hotkeys.setActiveContexts([
       ...(activeCategory ? (["grid"] as const) : []),

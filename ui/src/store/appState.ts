@@ -24,6 +24,8 @@ export interface AppState {
   volumes: VolumeUsageInfo[];
   /** Бейдж Quarantine (T-106): snapshot + події quarantine.changed. */
   quarantine: QuarantineBadge;
+  /** Перший запуск (T-114): сигнал для автостарту скану. */
+  isFirstRun: boolean;
   error: string | null;
 }
 
@@ -42,6 +44,7 @@ const INITIAL_STATE: AppState = {
   settings: null,
   volumes: [],
   quarantine: EMPTY_QUARANTINE,
+  isFirstRun: false,
   error: null,
 };
 
@@ -138,6 +141,7 @@ export class AppStateStore {
         settings: snapshot.settings,
         volumes: snapshot.volumes ?? [],
         quarantine: snapshot.quarantine ?? EMPTY_QUARANTINE,
+        isFirstRun: snapshot.isFirstRun ?? false,
         error: null,
       };
       for (const update of this.buffered) hydrated = update(hydrated);
