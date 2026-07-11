@@ -901,6 +901,41 @@ pub fn category_top_candidates(
     })
 }
 
+/// Запит ВСІХ кандидатів категорії для позначення всередину — T-112.
+#[tauri::command]
+pub fn category_all_candidates(
+    category_id_str: String,
+    scan: tauri::State<'_, scan_runtime::ScanRuntime>,
+) -> Result<Vec<CandidatePreviewDto>, CoreError> {
+    record_command();
+
+    let category_id = match category_id_str.as_str() {
+        "large_files" => CategoryId::LargeFiles,
+        "old_files" => CategoryId::OldFiles,
+        "forgotten_videos" => CategoryId::ForgottenVideos,
+        "duplicates" => CategoryId::Duplicates,
+        "archives" => CategoryId::Archives,
+        "installers" => CategoryId::Installers,
+        "temp_files" => CategoryId::TempFiles,
+        "app_caches" => CategoryId::AppCaches,
+        "dev_artifacts" => CategoryId::DevArtifacts,
+        _ => return Err(CoreError::invalid_argument("невідома категорія")),
+    };
+
+    let records = scan.index.get_all();
+    let candidates: Vec<CandidatePreviewDto> = records
+        .into_iter()
+        .filter(|r| r.category == category_id && r.decision != Decision::Keep)
+        .map(|r| CandidatePreviewDto {
+            id: r.candidate_id.0 as u64,
+            kind: format!("{:?}", r.kind),
+            size_bytes: r.size.0,
+        })
+        .collect();
+
+    Ok(candidates)
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Instant;

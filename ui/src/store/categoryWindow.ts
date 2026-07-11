@@ -27,6 +27,25 @@ export async function fetchCategoryTopCandidates(
 }
 
 /**
+ * Запит УСІХ кандидатів категорії для позначення всередину (T-112).
+ * Повертає масив ID та розмірів всіх файлів категорії.
+ */
+export async function fetchCategoryAllCandidates(
+  categoryId: CategoryId,
+): Promise<Array<{ id: number; sizeBytes: number }>> {
+  try {
+    const candidates = await command<CandidatePreview[]>(
+      "category.all_candidates",
+      { payload: categoryId },
+    );
+    return candidates.map((c) => ({ id: Number(c.id), sizeBytes: c.sizeBytes }));
+  } catch (error) {
+    console.warn(`Failed to fetch all candidates for ${categoryId}:`, error);
+    return [];
+  }
+}
+
+/**
  * Хук для запиту топ-кандидатів категорії (мініпревью).
  */
 export function useCategoryTopCandidates(

@@ -77,6 +77,24 @@ class SelectionStore {
     this.publish(EMPTY_SUMMARY);
   }
 
+  /** Позначити кілька кандидатів (T-112: позначити всю категорію). */
+  markMultiple(candidates: MarkedCandidate[]): void {
+    let countDelta = 0;
+    let bytesDelta = 0;
+    for (const candidate of candidates) {
+      const previous = this.marked.get(candidate.id);
+      if (previous === candidate.sizeBytes) continue;
+      this.marked.set(candidate.id, candidate.sizeBytes);
+      if (previous === undefined) countDelta += 1;
+      bytesDelta += candidate.sizeBytes - (previous ?? 0);
+    }
+    if (countDelta === 0 && bytesDelta === 0) return;
+    this.publish({
+      count: this.summary.count + countDelta,
+      bytes: this.summary.bytes + bytesDelta,
+    });
+  }
+
   private publish(summary: MarkedSummary): void {
     this.summary = summary;
     for (const listener of this.listeners) listener();
@@ -92,4 +110,14 @@ export function useMarkedSummary(): MarkedSummary {
     selectionStore.getSummary,
     selectionStore.getSummary,
   );
+}
+
+/** Публічний API для позначення всіх кандидатів (T-112). */
+export function markAllCandidates(candidates: MarkedCandidate[]): void {
+  selectionStore.markMultiple(candidates);
+}
+
+/** Публічний API для зняття всіх позначень. */
+export function clearAllMarked(): void {
+  selectionStore.clear();
 }

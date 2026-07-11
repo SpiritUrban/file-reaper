@@ -297,6 +297,7 @@ export type CommandName =
   | "category.window"
   | "category.set_threshold"
   | "category.top_candidates"
+  | "category.all_candidates"
   | "candidate.mark"
   | "candidate.keep"
   | "reap.execute"

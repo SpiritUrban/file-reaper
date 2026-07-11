@@ -13,7 +13,8 @@ import { AnimatedBytes, AnimatedInteger } from "@/components/AnimatedCounter";
 import { Meter } from "@/components/Meter";
 import { CATEGORIES } from "@/store/categories";
 import { useAppState } from "@/store/appState";
-import { fetchCategoryTopCandidates } from "@/store/categoryWindow";
+import { fetchCategoryTopCandidates, fetchCategoryAllCandidates } from "@/store/categoryWindow";
+import { markAllCandidates } from "@/store/selection";
 import type { CategorySummary, CandidatePreview } from "@/ipc/types";
 
 /** Гліф для типу файла мініпревью (T-111). */
@@ -42,12 +43,28 @@ function CategoryRow({
   totalBytes: number;
 }) {
   const isEmpty = !summary || summary.totalBytes === 0;
+  const isSafeToBulk = summary?.safety === "safe_to_bulk";
   const [topCandidates, setTopCandidates] = useState<CandidatePreview[]>([]);
+  const [markingAll, setMarkingAll] = useState(false);
 
   useEffect(() => {
     if (isEmpty) return;
     fetchCategoryTopCandidates(descriptor.id, 6).then(setTopCandidates);
   }, [descriptor.id, isEmpty]);
+
+  const handleMarkAll = async (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setMarkingAll(true);
+    try {
+      const candidates = await fetchCategoryAllCandidates(descriptor.id);
+      markAllCandidates(candidates);
+    } catch (error) {
+      console.warn(`Failed to mark all candidates for ${descriptor.id}:`, error);
+    } finally {
+      setMarkingAll(false);
+    }
+  };
 
   const itemClass = isEmpty
     ? "text-ink-faint"
@@ -111,6 +128,18 @@ function CategoryRow({
             </div>
           ))}
       </div>
+
+      {/* Кнопка "Позначити все" для safe-to-bulk категорій (T-112) */}
+      {!isEmpty && isSafeToBulk && (
+        <button
+          onClick={handleMarkAll}
+          disabled={markingAll}
+          className="ml-2 rounded px-2 py-1 text-xs text-ink-faint hover:bg-accent hover:text-ink disabled:opacity-50 transition-colors"
+          title="Позначити всю категорію для видалення"
+        >
+          {markingAll ? "..." : "✓"}
+        </button>
+      )}
 
       {/* Стрілочка наведення */}
       <div className="flex-1" />
