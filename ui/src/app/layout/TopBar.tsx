@@ -255,7 +255,7 @@ export function TopBar({
       {/* Пошук (T-109) */}
       <span className="font-mono text-xs text-ink-faint">🔍 /</span>
 
-      {/* Reap Bar (T-108) */}
+      {/* Reap Bar (T-108): спільний кошик сесії, живі лічильники T-102 */}
       <div className="flex items-center gap-2">
         <span className="text-xs text-ink-dim">
           Позначено:{" "}
@@ -267,7 +267,16 @@ export function TopBar({
         <button
           type="button"
           disabled={markedCount === 0}
-          className="rounded bg-reap/20 px-3 py-1 text-sm font-semibold text-reap opacity-50"
+          title={
+            markedCount === 0
+              ? "Немає позначених кандидатів"
+              : "Перемістити позначене у Quarantine (оверлей — T-135)"
+          }
+          className={`rounded px-3 py-1 text-sm font-semibold transition-colors ${
+            markedCount === 0
+              ? "cursor-not-allowed bg-reap/15 text-reap/50"
+              : "bg-reap text-bg hover:bg-reap/85"
+          }`}
         >
           REAP
         </button>

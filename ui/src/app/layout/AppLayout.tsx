@@ -14,6 +14,7 @@ import { HealthScreen } from "@/features/health/HealthScreen";
 import { QuarantineScreen } from "@/features/quarantine/QuarantineScreen";
 import { SettingsScreen } from "@/features/settings/SettingsScreen";
 import { CATEGORIES, categoryTitle } from "@/store/categories";
+import { useMarkedSummary } from "@/store/selection";
 import type { CategoryId } from "@/ipc/types";
 import { hotkeys } from "@/hotkeys";
 
@@ -34,6 +35,7 @@ function screenClass(active: boolean): string {
 
 export function AppLayout() {
   const { pathname } = useLocation();
+  const marked = useMarkedSummary();
   const activeCategory = categoryIdFromPath(pathname);
   const isQuarantine = pathname === "/quarantine";
   const isSettings = pathname === "/settings";
@@ -62,7 +64,12 @@ export function AppLayout() {
     <div className="flex h-full">
       <Sidebar />
       <div className="flex min-w-0 flex-1 flex-col">
-        <TopBar context={context} categoryId={activeCategory} />
+        <TopBar
+          context={context}
+          categoryId={activeCategory}
+          markedCount={marked.count}
+          markedBytes={marked.bytes}
+        />
         <main className="min-h-0 flex-1">
           <section className={screenClass(isCleanup)} aria-hidden={!isCleanup}>
             <CleanupSummaryScreen />
