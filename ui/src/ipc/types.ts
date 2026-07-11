@@ -69,6 +69,20 @@ export interface CleanupTotal {
 /** Подія category.updated (T-055) — один рядок Sidebar. */
 export type CategoryUpdatedEvent = CategorySummary;
 
+/** Мініпревью для 4–6 найбільших кандидатів у ряду Cleanup Summary (T-111). */
+export interface CandidatePreview {
+  id: number;
+  kind: FileKind;
+  sizeBytes: number;
+}
+
+/** Вікно кандидатів категорії з топ-файлами за розміром (запит T-111). */
+export interface CategoryWindow {
+  categoryId: CategoryId;
+  /** Топ-кандидати за спаданням розміру (4–6 найбільших). */
+  topCandidates: CandidatePreview[];
+}
+
 /** Політика «який залишити» у групі дублікатів (T-065). */
 export type KeepPolicy =
   | "prefer_oldest_modified"
@@ -282,6 +296,7 @@ export type CommandName =
   | "scan.stop"
   | "category.window"
   | "category.set_threshold"
+  | "category.top_candidates"
   | "candidate.mark"
   | "candidate.keep"
   | "reap.execute"

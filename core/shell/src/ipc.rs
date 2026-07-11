@@ -20,9 +20,13 @@ use trashradar_app::elevation::{
     ElevationSession,
 };
 use trashradar_app::ports::SettingsSource;
+use trashradar_domain::candidate::Decision;
+use trashradar_domain::category::CategoryId;
 use trashradar_domain::error::CoreError;
 use trashradar_domain::settings::{validate_settings, AppSettings};
 use trashradar_platform_win::{relaunch_elevated, ElevationRelaunch};
+
+use crate::scan_runtime;
 
 #[derive(Clone)]
 pub struct CacheRuntime {
@@ -798,6 +802,82 @@ pub async fn app_test_stream<R: Runtime>(
     });
 
     Ok(TestStreamAck { accepted: count })
+}
+
+/// Параметри `category.top_candidates`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CategoryTopCandidatesPayload {
+    pub category_id: String,
+    /// Кількість топ-кандидатів (1..=6, дефолт 4).
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// Мініпревью кандидата для 4–6 найбільших у ряду (T-111).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CandidatePreviewDto {
+    pub id: u64,
+    pub kind: String,
+    pub size_bytes: u64,
+}
+
+/// Вікно кандидатів категорії з топ-файлами за розміром (запит T-111).
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CategoryWindowDto {
+    pub category_id: String,
+    /// Топ-кандидати за спаданням розміру (4–6 найбільших).
+    pub top_candidates: Vec<CandidatePreviewDto>,
+}
+
+/// Запит топ-кандидатів категорії для мініпревью у Cleanup Summary (T-111).
+#[tauri::command]
+pub fn category_top_candidates(
+    payload: CategoryTopCandidatesPayload,
+    scan: tauri::State<'_, scan_runtime::ScanRuntime>,
+) -> Result<CategoryWindowDto, CoreError> {
+    record_command();
+
+    // Парсимо categoryId
+    let category_id = match payload.category_id.as_str() {
+        "large_files" => CategoryId::LargeFiles,
+        "old_files" => CategoryId::OldFiles,
+        "forgotten_videos" => CategoryId::ForgottenVideos,
+        "duplicates" => CategoryId::Duplicates,
+        "archives" => CategoryId::Archives,
+        "installers" => CategoryId::Installers,
+        "temp_files" => CategoryId::TempFiles,
+        "app_caches" => CategoryId::AppCaches,
+        "dev_artifacts" => CategoryId::DevArtifacts,
+        _ => return Err(CoreError::invalid_argument("невідома категорія")),
+    };
+
+    let limit = payload.limit.unwrap_or(4).clamp(1, 6);
+
+    let records = scan.index.get_all();
+    let mut candidates: Vec<_> = records
+        .into_iter()
+        .filter(|r| r.category == category_id && r.decision != Decision::Keep)
+        .map(|r| (r.candidate_id, r.kind.clone(), r.size.0))
+        .collect();
+
+    // Сортуємо за розміром (спадання)
+    candidates.sort_by(|a, b| b.2.cmp(&a.2));
+
+    Ok(CategoryWindowDto {
+        category_id: payload.category_id,
+        top_candidates: candidates
+            .into_iter()
+            .take(limit)
+            .map(|(id, kind, size_bytes)| CandidatePreviewDto {
+                id: id.0 as u64,
+                kind: format!("{:?}", kind),
+                size_bytes,
+            })
+            .collect(),
+    })
 }
 
 #[cfg(test)]

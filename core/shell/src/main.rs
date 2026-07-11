@@ -70,6 +70,7 @@ fn main() {
             ipc::settings_set,
             ipc::cache_get_usage,
             ipc::cache_clear,
+            ipc::category_top_candidates,
             scan_runtime::scan_start,
             scan_runtime::scan_stop,
             scan_runtime::candidate_keep,

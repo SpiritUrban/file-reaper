@@ -7,12 +7,119 @@
  */
 
 import { Link } from "react-router-dom";
+import { useState, useEffect } from "react";
 
 import { AnimatedBytes, AnimatedInteger } from "@/components/AnimatedCounter";
 import { Meter } from "@/components/Meter";
 import { CATEGORIES } from "@/store/categories";
 import { useAppState } from "@/store/appState";
-import type { CategorySummary } from "@/ipc/types";
+import { fetchCategoryTopCandidates } from "@/store/categoryWindow";
+import type { CategorySummary, CandidatePreview } from "@/ipc/types";
+
+/** Гліф для типу файла мініпревью (T-111). */
+function fileKindGlyph(kind: string): string {
+  const glyphs: Record<string, string> = {
+    Video: "▶",
+    Image: "🖼",
+    Audio: "♫",
+    Archive: "▤",
+    Installer: "⬇",
+    DiskImage: "📀",
+    Document: "📄",
+    Other: "◻",
+  };
+  return glyphs[kind] || "◻";
+}
+
+/** Компонент рядка категорії з мініпревью (T-111). */
+function CategoryRow({
+  descriptor,
+  summary,
+  totalBytes,
+}: {
+  descriptor: typeof CATEGORIES[0];
+  summary: CategorySummary | undefined;
+  totalBytes: number;
+}) {
+  const isEmpty = !summary || summary.totalBytes === 0;
+  const [topCandidates, setTopCandidates] = useState<CandidatePreview[]>([]);
+
+  useEffect(() => {
+    if (isEmpty) return;
+    fetchCategoryTopCandidates(descriptor.id, 6).then(setTopCandidates);
+  }, [descriptor.id, isEmpty]);
+
+  const itemClass = isEmpty
+    ? "text-ink-faint"
+    : "text-ink-dim hover:text-ink hover:bg-panel";
+
+  return (
+    <Link
+      to={isEmpty ? "#" : `/category/${descriptor.id}`}
+      onClick={(e) => isEmpty && e.preventDefault()}
+      className={`group flex items-center gap-3 py-2.5 transition-colors ${itemClass}`}
+    >
+      {/* Іконка категорії */}
+      <span className="w-5 text-center text-ink-dim">{descriptor.glyph}</span>
+
+      {/* Назва категорії */}
+      <span className="w-40 truncate text-sm font-medium uppercase tracking-wide">
+        {descriptor.title}
+      </span>
+
+      {/* Обсяг (animated) + кількість файлів */}
+      <span className="w-28 font-mono text-sm">
+        {isEmpty ? (
+          "—"
+        ) : (
+          <AnimatedBytes value={summary!.totalBytes} />
+        )}
+      </span>
+      <span className="text-xs text-ink-faint">
+        {isEmpty
+          ? "—"
+          : `${summary!.itemCount} ${
+              summary!.countUnit === "files"
+                ? "ф."
+                : summary!.countUnit === "groups"
+                  ? "гр."
+                  : "папок"
+            }`}
+      </span>
+
+      {/* Смужка прогресу */}
+      <div className="w-32">
+        <Meter
+          fraction={
+            isEmpty || totalBytes === 0
+              ? 0
+              : summary!.totalBytes / totalBytes
+          }
+        />
+      </div>
+
+      {/* Мініпревью — 4–6 найбільших файлів (T-111) */}
+      <div className="flex gap-1">
+        {!isEmpty &&
+          topCandidates.slice(0, 6).map((candidate) => (
+            <div
+              key={candidate.id}
+              className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded bg-panel-2 text-xs text-ink-dim hover:bg-accent hover:text-ink transition-colors"
+              title={`${candidate.kind}`}
+            >
+              {fileKindGlyph(candidate.kind)}
+            </div>
+          ))}
+      </div>
+
+      {/* Стрілочка наведення */}
+      <div className="flex-1" />
+      {!isEmpty && (
+        <span className="text-ink-faint group-hover:text-ink">→</span>
+      )}
+    </Link>
+  );
+}
 
 /**
  * Порядок Sidebar: непорожні категорії за вагою (спадання байтів),
@@ -65,66 +172,14 @@ export function CleanupSummaryScreen() {
 
       {/* Ряди категорій з живими обсягами (T-111) */}
       <div className="flex flex-col divide-y divide-line border-y border-line overflow-y-auto">
-        {rows.map(({ descriptor, summary }) => {
-          const isEmpty = !summary || summary.totalBytes === 0;
-          const itemClass = isEmpty
-            ? "text-ink-faint"
-            : "text-ink-dim hover:text-ink hover:bg-panel";
-
-          return (
-            <Link
-              key={descriptor.id}
-              to={isEmpty ? "#" : `/category/${descriptor.id}`}
-              onClick={(e) => isEmpty && e.preventDefault()}
-              className={`group flex items-center gap-3 py-2.5 transition-colors ${itemClass}`}
-            >
-              {/* Іконка категорії */}
-              <span className="w-5 text-center text-ink-dim">{descriptor.glyph}</span>
-
-              {/* Назва категорії */}
-              <span className="w-40 truncate text-sm font-medium uppercase tracking-wide">
-                {descriptor.title}
-              </span>
-
-              {/* Обсяг (animated) + кількість файлів (T-110 AnimatedBytes + T-111 count) */}
-              <span className="w-28 font-mono text-sm">
-                {isEmpty ? (
-                  "—"
-                ) : (
-                  <AnimatedBytes value={summary.totalBytes} />
-                )}
-              </span>
-              <span className="text-xs text-ink-faint">
-                {isEmpty
-                  ? "—"
-                  : `${summary.itemCount} ${
-                      summary.countUnit === "files"
-                        ? "ф."
-                        : summary.countUnit === "groups"
-                          ? "гр."
-                          : "папок"
-                    }`}
-              </span>
-
-              {/* Смужка прогресу (часткаот загального) */}
-              <div className="w-32">
-                <Meter
-                  fraction={
-                    isEmpty || cleanup.reclaimableBytes === 0
-                      ? 0
-                      : summary.totalBytes / cleanup.reclaimableBytes
-                  }
-                />
-              </div>
-
-              {/* Стрілочка наведення */}
-              <div className="flex-1" />
-              {!isEmpty && (
-                <span className="text-ink-faint group-hover:text-ink">→</span>
-              )}
-            </Link>
-          );
-        })}
+        {rows.map(({ descriptor, summary }) => (
+          <CategoryRow
+            key={descriptor.id}
+            descriptor={descriptor}
+            summary={summary}
+            totalBytes={cleanup.reclaimableBytes}
+          />
+        ))}
       </div>
 
       <div className="flex-1" />
