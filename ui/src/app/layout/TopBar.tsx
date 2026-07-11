@@ -4,12 +4,20 @@
  * живий Reap Bar — T-108, пошук — T-109.
  */
 
+import { AnimatedBytes, AnimatedInteger } from "@/components/AnimatedCounter";
+
 interface TopBarProps {
   /** Контекст зліва: назва екрана або категорії. */
   context: string;
+  markedCount?: number;
+  markedBytes?: number;
 }
 
-export function TopBar({ context }: TopBarProps) {
+export function TopBar({
+  context,
+  markedCount = 0,
+  markedBytes = 0,
+}: TopBarProps) {
   return (
     <header className="flex h-11 shrink-0 items-center gap-3 border-b border-line bg-panel px-3">
       {/* Контекст */}
@@ -39,11 +47,15 @@ export function TopBar({ context }: TopBarProps) {
       {/* Reap Bar (T-108) */}
       <div className="flex items-center gap-2">
         <span className="text-xs text-ink-dim">
-          Позначено: <span className="font-mono">0 · 0 Б</span>
+          Позначено:{" "}
+          <span className="font-mono">
+            <AnimatedInteger value={markedCount} /> ·{" "}
+            <AnimatedBytes value={markedBytes} />
+          </span>
         </span>
         <button
           type="button"
-          disabled
+          disabled={markedCount === 0}
           className="rounded bg-reap/20 px-3 py-1 text-sm font-semibold text-reap opacity-50"
         >
           REAP

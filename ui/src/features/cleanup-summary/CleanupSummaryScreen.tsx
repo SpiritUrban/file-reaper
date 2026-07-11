@@ -6,19 +6,33 @@
 
 import { Link } from "react-router-dom";
 
+import { AnimatedBytes, AnimatedInteger } from "@/components/AnimatedCounter";
 import { Meter } from "@/components/Meter";
 import { CATEGORIES } from "@/store/categories";
+import { useAppState } from "@/store/appState";
 
 export function CleanupSummaryScreen() {
+  const { cleanup, scanRunning, status } = useAppState();
+
   return (
     <div className="flex h-full flex-col px-6 py-4">
       {/* Головна цифра — найбільший текст у продукті (T-110) */}
       <div className="flex items-baseline justify-between py-6">
         <h1 className="text-5xl font-bold tracking-tight">
-          <span className="font-mono">— ГБ</span>{" "}
+          <AnimatedBytes value={cleanup.reclaimableBytes} className="font-mono" />{" "}
           <span className="text-ink-dim text-3xl">можна звільнити</span>
         </h1>
-        <span className="text-xs text-ink-faint">скан не запускався</span>
+        <span className="text-xs text-ink-faint">
+          {scanRunning
+            ? "сканування…"
+            : status === "hydrating"
+              ? "відновлення стану…"
+              : (
+                <>
+                  <AnimatedInteger value={cleanup.uniqueFiles} /> кандидатів
+                </>
+              )}
+        </span>
       </div>
 
       {/* Ряди категорій (T-111); мініпревью і [Позначити все] — T-111/T-112 */}
