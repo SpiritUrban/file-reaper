@@ -13,6 +13,8 @@ export type HotkeyAction =
   | "navigate_up"
   | "navigate_down"
   | "mark_toggle"
+  | "mark_range"
+  | "mark_all"
   | "keep"
   | "details"
   | "reap_confirm"
@@ -49,6 +51,8 @@ export const DEFAULT_HOTKEYS: readonly HotkeyBinding[] = [
   { action: "navigate_up", chord: "ArrowUp", contexts: ["grid"] },
   { action: "navigate_down", chord: "ArrowDown", contexts: ["grid"] },
   { action: "mark_toggle", chord: "Space", contexts: ["grid"] },
+  { action: "mark_range", chord: "Shift+Space", contexts: ["grid"] },
+  { action: "mark_all", chord: "KeyA", contexts: ["grid"] },
   { action: "keep", chord: "KeyK", contexts: ["grid"] },
   { action: "details", chord: "Enter", contexts: ["grid"] },
   { action: "reap_confirm", chord: "Ctrl+Enter", contexts: ["global"] },

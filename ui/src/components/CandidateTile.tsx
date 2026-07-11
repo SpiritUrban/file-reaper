@@ -16,8 +16,13 @@ export interface CandidateTileProps {
   /** Grid може передати відносну heat-оцінку; fallback рахується з size. */
   heat?: TileHeat;
   focused?: boolean;
+  /**
+   * Локальне оптимістичне позначення (T-116, Reap Bar кошик): має пріоритет
+   * над `candidate.decision`. `undefined` — використати decision як є.
+   */
+  marked?: boolean;
   className?: string;
-  onActivate?: (candidate: Candidate) => void;
+  onActivate?: (candidate: Candidate, event: React.MouseEvent) => void;
   onFocusCandidate?: (candidate: Candidate) => void;
 }
 
@@ -71,11 +76,12 @@ export function CandidateTile({
   preview,
   heat = inferredHeat(candidate.sizeBytes),
   focused = false,
+  marked: markedOverride,
   className = "",
   onActivate,
   onFocusCandidate,
 }: CandidateTileProps) {
-  const marked = candidate.decision === "marked";
+  const marked = markedOverride ?? candidate.decision === "marked";
   const kept = candidate.decision === "keep";
   const stateClass = marked
     ? "border-reap"
@@ -91,8 +97,9 @@ export function CandidateTile({
       aria-label={`${fileName(candidate.path)}, ${formatBytes(candidate.sizeBytes)}, ${ageLabel(candidate.lastAccessAt)}`}
       aria-pressed={marked}
       data-decision={candidate.decision}
+      data-marked={marked || undefined}
       data-focused={focused || undefined}
-      onClick={() => onActivate?.(candidate)}
+      onClick={(event) => onActivate?.(candidate, event)}
       onFocus={() => onFocusCandidate?.(candidate)}
     >
       <span className={`absolute inset-x-0 top-0 z-30 h-1 ${heatClass(heat)}`} />

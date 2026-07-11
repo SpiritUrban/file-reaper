@@ -5,12 +5,17 @@
  * `category.set_threshold` → Core перераховує з індексу без рескану →
  * подія `settings.changed` провокує рефетч (без ручного стейт-менеджменту).
  * Фільтр-чипси TopBar звужують кандидатів через store/filters (T-107).
- * Позначення — T-116, дублікати групами — T-126.
+ * T-116: позначення клік/Space (toggle), Shift-клік/Shift+Space (діапазон
+ * від останнього toggle до поточного) і A (все видиме) — усі три способи
+ * пишуть в один спільний `selectionStore` (T-108), тож Reap Bar і плитки
+ * оновлюються ідентично й миттєво. Дублікати групами — T-126.
  */
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useLocation } from "react-router-dom";
 
 import { VirtualCandidateGrid } from "@/components/VirtualCandidateGrid";
+import type { HotkeyActionEventDetail } from "@/hotkeys";
 import { useAppState } from "@/store/appState";
 import { categoryRule, categoryTitle } from "@/store/categories";
 import { useCategoryWindow } from "@/store/categoryWindow";
@@ -26,7 +31,8 @@ import {
   useCandidateFilters,
 } from "@/store/filters";
 import { applySearchQuery, useSearchState } from "@/store/search";
-import type { CategoryId } from "@/ipc/types";
+import { selectionStore, useMarkedSummary } from "@/store/selection";
+import type { Candidate, CategoryId } from "@/ipc/types";
 
 interface CategoryScreenProps {
   categoryId: CategoryId;
@@ -106,6 +112,67 @@ export function CategoryScreen({ categoryId }: CategoryScreenProps) {
   const hasSearch = search.query.length > 0;
   const thresholdFields = CATEGORY_THRESHOLDS[categoryId] ?? [];
 
+  // T-099: усі 9 CategoryScreen змонтовані постійно, приховані CSS-ом —
+  // хук на глобальний хоткей мусить діяти лише для видимої категорії.
+  const { pathname } = useLocation();
+  const isActiveRef = useRef(pathname === `/category/${categoryId}`);
+  isActiveRef.current = pathname === `/category/${categoryId}`;
+
+  const [focusedId, setFocusedId] = useState<number | null>(null);
+  const focusedIdRef = useRef<number | null>(null);
+  focusedIdRef.current = focusedId;
+
+  const anchorRef = useRef<number | null>(null);
+  const visibleRef = useRef<Candidate[]>(visible);
+  visibleRef.current = visible;
+
+  // Реактивність до selectionStore: будь-яка mark/unmark у будь-якій
+  // категорії провокує ре-рендер, тож плитки завжди показують свіжий стан.
+  useMarkedSummary();
+
+  const markRange = (fromId: number, toId: number) => {
+    const list = visibleRef.current;
+    const fromIndex = list.findIndex((c) => c.id === fromId);
+    const toIndex = list.findIndex((c) => c.id === toId);
+    if (fromIndex === -1 || toIndex === -1) return;
+    const [start, end] =
+      fromIndex <= toIndex ? [fromIndex, toIndex] : [toIndex, fromIndex];
+    selectionStore.markMultiple(list.slice(start, end + 1));
+  };
+
+  const toggleOne = (candidate: Candidate) => {
+    selectionStore.toggle(candidate);
+    anchorRef.current = candidate.id;
+  };
+
+  const handleActivate = (candidate: Candidate, event: React.MouseEvent) => {
+    if (event.shiftKey && anchorRef.current !== null) {
+      markRange(anchorRef.current, candidate.id);
+    } else {
+      toggleOne(candidate);
+    }
+  };
+
+  useEffect(() => {
+    const onHotkey = (event: Event) => {
+      if (!isActiveRef.current) return;
+      const { action } = (event as CustomEvent<HotkeyActionEventDetail>).detail;
+      const list = visibleRef.current;
+      if (action === "mark_toggle") {
+        const focused = list.find((c) => c.id === focusedIdRef.current);
+        if (focused) toggleOne(focused);
+      } else if (action === "mark_range") {
+        if (focusedIdRef.current !== null && anchorRef.current !== null) {
+          markRange(anchorRef.current, focusedIdRef.current);
+        }
+      } else if (action === "mark_all") {
+        selectionStore.markMultiple(list);
+      }
+    };
+    window.addEventListener("trashradar:hotkey", onHotkey);
+    return () => window.removeEventListener("trashradar:hotkey", onHotkey);
+  }, []);
+
   return (
     <div className="flex h-full flex-col">
       {/* Рядок детектора: пояснення правила + редаговані пороги (T-115) */}
@@ -130,6 +197,10 @@ export function CategoryScreen({ categoryId }: CategoryScreenProps) {
       <div className="min-h-0 flex-1">
         <VirtualCandidateGrid
           candidates={visible}
+          focusedId={focusedId}
+          isMarked={(candidate) => selectionStore.isMarked(candidate.id)}
+          onActivate={handleActivate}
+          onFocusCandidate={(candidate) => setFocusedId(candidate.id)}
           emptyTitle={
             (hasFilters || hasSearch) && candidates.length > 0
               ? "Жодного збігу з фільтрами чи пошуком"

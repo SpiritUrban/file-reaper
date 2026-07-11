@@ -66,7 +66,9 @@ export interface VirtualCandidateGridProps {
   density?: GridDensity;
   focusedId?: number | null;
   previewFor?: (candidate: Candidate) => CandidatePreview | undefined;
-  onActivate?: (candidate: Candidate) => void;
+  /** Локальне оптимістичне позначення (T-116) — переважає candidate.decision. */
+  isMarked?: (candidate: Candidate) => boolean;
+  onActivate?: (candidate: Candidate, event: React.MouseEvent) => void;
   onFocusCandidate?: (candidate: Candidate) => void;
   emptyTitle?: string;
 }
@@ -76,6 +78,7 @@ export function VirtualCandidateGrid({
   density = "standard",
   focusedId = null,
   previewFor,
+  isMarked,
   onActivate,
   onFocusCandidate,
   emptyTitle = "Немає кандидатів у цій категорії",
@@ -161,6 +164,7 @@ export function VirtualCandidateGrid({
                 candidate={candidate}
                 focused={candidate.id === focusedId}
                 {...(preview ? { preview } : {})}
+                {...(isMarked ? { marked: isMarked(candidate) } : {})}
                 {...(onActivate ? { onActivate } : {})}
                 {...(onFocusCandidate ? { onFocusCandidate } : {})}
               />
