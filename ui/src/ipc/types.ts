@@ -273,6 +273,7 @@ export interface CounterSnapshot {
 /** Імена команд (contracts/ipc-contract.json → commands). */
 export type CommandName =
   | "app.health"
+  | "app.state"
   | "app.ping"
   | "app.test_stream"
   | "app.request_elevation"
@@ -355,6 +356,19 @@ export interface AppSettings {
   detectors: Record<string, { thresholds: Record<string, number> }>;
 }
 
+
+export interface SettingsChangedEvent {
+  settings: AppSettings;
+  detectorRecordsRecalculated: number;
+  quarantineRescheduled: boolean;
+  scheduleGeneration: number;
+}
+
+export interface AppStateSnapshot {
+  cleanup: CleanupTotal;
+  scanRunning: boolean;
+  settings: AppSettings;
+}
 export interface QuarantineChangedEvent {
   purgedCount: number;
   purgedBytes: number;

@@ -59,6 +59,7 @@ fn main() {
         .manage(cache)
         .invoke_handler(tauri::generate_handler![
             ipc::app_health,
+            ipc::app_state,
             ipc::app_ping,
             ipc::app_test_stream,
             ipc::app_request_elevation,

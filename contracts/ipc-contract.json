@@ -12,6 +12,11 @@
       "task": "T-009",
       "$comment": "Diagnostics: versions, module states, IPC counters (T-009); elevated + scanPlans (T-028); elevation {status,offerPending,message…} (T-034); quarantineVolumes [{volume,available,reason?}] (T-089: reap blocked with visible reason)"
     },
+    "app.state": {
+      "status": "implemented",
+      "task": "T-098",
+      "$comment": "Read-only authoritative UI snapshot after webview reload: {cleanup,scanRunning,settings}; never starts a scan"
+    },
     "app.ping": {
       "status": "implemented",
       "task": "T-004",

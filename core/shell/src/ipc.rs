@@ -197,6 +197,35 @@ pub async fn settings_set<R: Runtime>(
 
 use crate::events;
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppStateSnapshot {
+    pub cleanup: events::CleanupTotalEvent,
+    pub scan_running: bool,
+    pub settings: AppSettings,
+}
+
+/// Authoritative UI snapshot for webview reload (T-098). Read-only: never starts a scan.
+#[tauri::command]
+pub async fn app_state(
+    scan: tauri::State<'_, crate::scan_runtime::ScanRuntime>,
+    settings: tauri::State<'_, SettingsRuntime>,
+) -> Result<AppStateSnapshot, CoreError> {
+    record_command();
+    let cleanup = {
+        let totals = scan
+            .last_totals
+            .lock()
+            .map_err(|_| CoreError::internal("Live totals lock poisoned."))?;
+        events::CleanupTotalEvent::from_summary(&totals.summary())
+    };
+    Ok(AppStateSnapshot {
+        cleanup,
+        scan_running: scan.controller.is_running(),
+        settings: settings.current(),
+    })
+}
+
 static COMMANDS_RECEIVED: AtomicU64 = AtomicU64::new(0);
 static COMMAND_ERRORS: AtomicU64 = AtomicU64::new(0);
 
@@ -706,6 +735,7 @@ mod tests {
             .manage(cache)
             .invoke_handler(tauri::generate_handler![
                 app_health,
+                app_state,
                 app_ping,
                 app_test_stream,
                 settings_get,
@@ -899,6 +929,28 @@ mod tests {
         assert!(!again.offer_pending);
     }
 
+    #[test]
+    fn app_state_restores_ui_without_starting_scan() {
+        let (app, webview) = test_app();
+        let response = get_ipc_response(&webview, request("app_state", json!({})))
+            .expect("app.state snapshot");
+        let snapshot = body_json(response);
+        assert_eq!(
+            snapshot["scanRunning"], false,
+            "snapshot must not start a scan"
+        );
+        assert_eq!(snapshot["cleanup"]["reclaimableBytes"], 0);
+        assert_eq!(snapshot["cleanup"]["uniqueFiles"], 0);
+        assert_eq!(
+            snapshot["settings"],
+            serde_json::to_value(AppSettings::default()).unwrap()
+        );
+        use tauri::Manager;
+        assert!(!app
+            .state::<crate::scan_runtime::ScanRuntime>()
+            .controller
+            .is_running());
+    }
     #[test]
     fn ping_roundtrips_ui_core_ui() {
         let (_app, webview) = test_app();

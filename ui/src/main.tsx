@@ -6,6 +6,7 @@ import { command, isTauri, subscribe } from "./ipc/client";
 import type { PingReply, TestEvent, TestStreamAck } from "./ipc/types";
 
 import { router } from "./app/routes";
+import { appStateStore } from "./store/appState";
 import "./design/theme.css";
 
 // Self-check IPC при старті: канал команд (T-004) + канал подій (T-005).
@@ -27,6 +28,10 @@ async function ipcSelfCheck(): Promise<void> {
     payload: { count: expected, intervalMs: 10 },
   });
 }
+
+void appStateStore.start().catch((error) =>
+  console.warn("Відновлення UI state не пройшло:", error),
+);
 
 if (isTauri()) {
   ipcSelfCheck().catch((error) => console.warn("Self-check IPC не пройшов:", error));
