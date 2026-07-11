@@ -29,3 +29,20 @@ export const CATEGORIES: readonly CategoryDescriptor[] = [
 export function categoryTitle(id: CategoryId): string {
   return CATEGORIES.find((c) => c.id === id)?.title ?? id;
 }
+
+/** Пояснення правила детектора для рядка над сіткою категорії (T-115). */
+const CATEGORY_RULES: Record<CategoryId, string> = {
+  large_files: "Файли понад поріг розміру",
+  old_files: "Файли з давнім останнім доступом чи зміною понад поріг віку",
+  forgotten_videos: "Відео понад поріг розміру і давності доступу",
+  archives: "Архіви (zip/rar/7z/…) понад поріг розміру",
+  installers: "Інсталятори у теках завантажень; ISO/IMG — будь-де",
+  temp_files: "Файли з Temp-локацій реєстру Windows і програм",
+  app_caches: "Кеш-каталоги популярних програм (реєстр відомих локацій)",
+  dev_artifacts: "node_modules/build/dist/target/obj/Library — за маркерами проєкту",
+  duplicates: "Групи файлів з ідентичним вмістом (каскад хешування)",
+};
+
+export function categoryRule(id: CategoryId): string {
+  return CATEGORY_RULES[id] ?? "";
+}

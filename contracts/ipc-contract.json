@@ -47,8 +47,26 @@
       "task": "T-033",
       "$comment": "cooperative cancel; ack {stopping}; scanner stops ≤500ms; partial index kept"
     },
-    "category.window": { "status": "planned", "task": "T-014" },
-    "category.set_threshold": { "status": "planned", "task": "T-038" },
+    "category.top_candidates": {
+      "status": "implemented",
+      "task": "T-111",
+      "$comment": "{categoryId, limit?:1..6=4} → {categoryId, topCandidates:[{id,kind,sizeBytes}]}; Keep приховано, сортовано за розміром спаданням"
+    },
+    "category.all_candidates": {
+      "status": "implemented",
+      "task": "T-112",
+      "$comment": "categoryId (string) → [{id,kind,sizeBytes}] усіх кандидатів категорії; живить кнопку [Позначити все] на safe-to-bulk рядках"
+    },
+    "category.window": {
+      "status": "implemented",
+      "task": "T-115",
+      "$comment": "{categoryId} → Candidate[] (id,path,kind,unit,sizeBytes,lastAccessAt,decision,explanation,alsoIn); Keep приховано, сортовано за розміром спаданням; живить віртуалізовану сітку категорії"
+    },
+    "category.set_threshold": {
+      "status": "implemented",
+      "task": "T-115",
+      "$comment": "{categoryId,key,value:u64} → AppSettings; редагований поріг лише large_files/old_files/forgotten_videos/archives (предикатні детектори T-039..042); делегує в той самий шлях, що й settings.set (T-092/T-093) — гарячий перерахунок з індексу без рескану, подія settings.changed"
+    },
     "candidate.mark": {
       "status": "implemented",
       "task": "T-057",

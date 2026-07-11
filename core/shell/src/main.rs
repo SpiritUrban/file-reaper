@@ -72,6 +72,8 @@ fn main() {
             ipc::cache_clear,
             ipc::category_top_candidates,
             ipc::category_all_candidates,
+            ipc::category_window,
+            ipc::category_set_threshold,
             scan_runtime::scan_start,
             scan_runtime::scan_stop,
             scan_runtime::candidate_keep,

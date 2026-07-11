@@ -169,6 +169,19 @@ pub async fn settings_set<R: Runtime>(
     scan: tauri::State<'_, crate::scan_runtime::ScanRuntime>,
 ) -> Result<AppSettings, CoreError> {
     record_command();
+    apply_and_persist_settings(&app, &state, &scan, settings).await
+}
+
+/// Валідація + атомарний запис + гарячий перерахунок + подія `settings.changed`
+/// (T-092/T-093). Спільний шлях для `settings.set` і `category.set_threshold`
+/// (T-115) — редагування порога детектора це теж зміна settings, лише з
+/// іншим UI-входом.
+async fn apply_and_persist_settings<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &SettingsRuntime,
+    scan: &crate::scan_runtime::ScanRuntime,
+    settings: AppSettings,
+) -> Result<AppSettings, CoreError> {
     validate_settings(&settings).map_err(|error| {
         CoreError::invalid_argument(format!("Поле {}: {}.", error.field, error.message))
     })?;
@@ -187,7 +200,7 @@ pub async fn settings_set<R: Runtime>(
     };
     *state.current.write().expect("settings lock") = settings.clone();
     events::emit(
-        &app,
+        app,
         events::topic::SETTINGS_CHANGED,
         &SettingsChangedEvent {
             settings: settings.clone(),
@@ -835,6 +848,39 @@ pub async fn app_test_stream<R: Runtime>(
     Ok(TestStreamAck { accepted: count })
 }
 
+/// Парсить рядковий `categoryId` контракту у [`CategoryId`] (спільно для
+/// усіх `category.*` команд — один список варіантів, не дублюється).
+fn parse_category_id(value: &str) -> Result<CategoryId, CoreError> {
+    match value {
+        "large_files" => Ok(CategoryId::LargeFiles),
+        "old_files" => Ok(CategoryId::OldFiles),
+        "forgotten_videos" => Ok(CategoryId::ForgottenVideos),
+        "duplicates" => Ok(CategoryId::Duplicates),
+        "archives" => Ok(CategoryId::Archives),
+        "installers" => Ok(CategoryId::Installers),
+        "temp_files" => Ok(CategoryId::TempFiles),
+        "app_caches" => Ok(CategoryId::AppCaches),
+        "dev_artifacts" => Ok(CategoryId::DevArtifacts),
+        _ => Err(CoreError::invalid_argument("невідома категорія")),
+    }
+}
+
+/// Кандидати категорії (Keep приховано, T-057), за спаданням розміру —
+/// спільна вибірка для `category.top_candidates`/`category.all_candidates`/`category.window`.
+fn candidates_in_category(
+    scan: &scan_runtime::ScanRuntime,
+    category_id: CategoryId,
+) -> Vec<trashradar_domain::candidate::FileRecord> {
+    let mut records: Vec<_> = scan
+        .index
+        .get_all()
+        .into_iter()
+        .filter(|r| r.category == category_id && r.decision != Decision::Keep)
+        .collect();
+    records.sort_by_key(|r| std::cmp::Reverse(r.size.0));
+    records
+}
+
 /// Параметри `category.top_candidates`.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -870,42 +916,18 @@ pub fn category_top_candidates(
     scan: tauri::State<'_, scan_runtime::ScanRuntime>,
 ) -> Result<CategoryWindowDto, CoreError> {
     record_command();
-
-    // Парсимо categoryId
-    let category_id = match payload.category_id.as_str() {
-        "large_files" => CategoryId::LargeFiles,
-        "old_files" => CategoryId::OldFiles,
-        "forgotten_videos" => CategoryId::ForgottenVideos,
-        "duplicates" => CategoryId::Duplicates,
-        "archives" => CategoryId::Archives,
-        "installers" => CategoryId::Installers,
-        "temp_files" => CategoryId::TempFiles,
-        "app_caches" => CategoryId::AppCaches,
-        "dev_artifacts" => CategoryId::DevArtifacts,
-        _ => return Err(CoreError::invalid_argument("невідома категорія")),
-    };
-
+    let category_id = parse_category_id(&payload.category_id)?;
     let limit = payload.limit.unwrap_or(4).clamp(1, 6);
-
-    let records = scan.index.get_all();
-    let mut candidates: Vec<_> = records
-        .into_iter()
-        .filter(|r| r.category == category_id && r.decision != Decision::Keep)
-        .map(|r| (r.candidate_id, r.kind.clone(), r.size.0))
-        .collect();
-
-    // Сортуємо за розміром (спадання)
-    candidates.sort_by(|a, b| b.2.cmp(&a.2));
 
     Ok(CategoryWindowDto {
         category_id: payload.category_id,
-        top_candidates: candidates
+        top_candidates: candidates_in_category(&scan, category_id)
             .into_iter()
             .take(limit)
-            .map(|(id, kind, size_bytes)| CandidatePreviewDto {
-                id: id.0 as u64,
-                kind: format!("{:?}", kind),
-                size_bytes,
+            .map(|r| CandidatePreviewDto {
+                id: r.candidate_id.0,
+                kind: format!("{:?}", r.kind),
+                size_bytes: r.size.0,
             })
             .collect(),
     })
@@ -918,32 +940,154 @@ pub fn category_all_candidates(
     scan: tauri::State<'_, scan_runtime::ScanRuntime>,
 ) -> Result<Vec<CandidatePreviewDto>, CoreError> {
     record_command();
+    let category_id = parse_category_id(&category_id_str)?;
 
-    let category_id = match category_id_str.as_str() {
-        "large_files" => CategoryId::LargeFiles,
-        "old_files" => CategoryId::OldFiles,
-        "forgotten_videos" => CategoryId::ForgottenVideos,
-        "duplicates" => CategoryId::Duplicates,
-        "archives" => CategoryId::Archives,
-        "installers" => CategoryId::Installers,
-        "temp_files" => CategoryId::TempFiles,
-        "app_caches" => CategoryId::AppCaches,
-        "dev_artifacts" => CategoryId::DevArtifacts,
-        _ => return Err(CoreError::invalid_argument("невідома категорія")),
-    };
-
-    let records = scan.index.get_all();
-    let candidates: Vec<CandidatePreviewDto> = records
+    Ok(candidates_in_category(&scan, category_id)
         .into_iter()
-        .filter(|r| r.category == category_id && r.decision != Decision::Keep)
         .map(|r| CandidatePreviewDto {
-            id: r.candidate_id.0 as u64,
+            id: r.candidate_id.0,
             kind: format!("{:?}", r.kind),
             size_bytes: r.size.0,
         })
-        .collect();
+        .collect())
+}
 
-    Ok(candidates)
+/// Секунди від 1601-01-01 до 1970-01-01 у Windows FILETIME (100 нс тіки),
+/// той самий епох, що й `trashradar_index_memory::filetime_to_unix_secs`.
+const UNIX_EPOCH_AS_DAYS: i64 = 719_468;
+
+/// UTC ISO 8601 без зовнішніх крейтів (Howard Hinnant `civil_from_days`,
+/// коректно для проксимованого григоріанського календаря).
+fn unix_secs_to_iso8601(unix_secs: u32) -> String {
+    let secs = unix_secs as i64;
+    let days = secs.div_euclid(86_400);
+    let time_of_day = secs.rem_euclid(86_400);
+    let (hour, minute, second) = (
+        time_of_day / 3600,
+        (time_of_day / 60) % 60,
+        time_of_day % 60,
+    );
+
+    let z = days + UNIX_EPOCH_AS_DAYS;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { y + 1 } else { y };
+
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+}
+
+/// Повний кандидат сітки категорії — дзеркало `Candidate` з ui/src/ipc/types.ts (T-115).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CandidateDto {
+    pub id: u64,
+    pub path: String,
+    pub kind: trashradar_domain::candidate::FileKind,
+    pub unit: trashradar_domain::candidate::CandidateUnit,
+    pub size_bytes: u64,
+    pub last_access_at: String,
+    pub decision: Decision,
+    pub explanation: String,
+    /// Інші категорії файла (маркер «також у: …») — T-121, поки завжди порожньо.
+    pub also_in: Vec<CategoryId>,
+}
+
+fn file_record_to_candidate_dto(record: &trashradar_domain::candidate::FileRecord) -> CandidateDto {
+    let last_access_ticks = record
+        .accessed_at
+        .or(record.modified_at)
+        .map(|t| t.0)
+        .unwrap_or(0);
+    let last_access_unix = trashradar_index_memory::filetime_to_unix_secs(last_access_ticks);
+    CandidateDto {
+        id: record.candidate_id.0,
+        path: record.path.clone(),
+        kind: record.kind,
+        unit: record.unit,
+        size_bytes: record.size.0,
+        last_access_at: unix_secs_to_iso8601(last_access_unix),
+        decision: record.decision,
+        explanation: record.explanation.clone(),
+        also_in: Vec::new(),
+    }
+}
+
+/// Параметри `category.window`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CategoryWindowPayload {
+    pub category_id: String,
+}
+
+/// Сітка кандидатів категорії з повними метаданими (T-115). Кандидати
+/// сортовані за розміром спаданням; Keep приховано (T-057).
+#[tauri::command]
+pub fn category_window(
+    payload: CategoryWindowPayload,
+    scan: tauri::State<'_, scan_runtime::ScanRuntime>,
+) -> Result<Vec<CandidateDto>, CoreError> {
+    record_command();
+    let category_id = parse_category_id(&payload.category_id)?;
+
+    Ok(candidates_in_category(&scan, category_id)
+        .iter()
+        .map(file_record_to_candidate_dto)
+        .collect())
+}
+
+/// Категорії предикатних детекторів з редагованими порогами (T-039..042):
+/// id категорії == id детектора у [`scan_runtime::configured_registry`].
+const THRESHOLD_EDITABLE_CATEGORIES: &[CategoryId] = &[
+    CategoryId::LargeFiles,
+    CategoryId::OldFiles,
+    CategoryId::ForgottenVideos,
+    CategoryId::Archives,
+];
+
+/// Параметри `category.set_threshold` (T-115 / T-038): поріг детектора
+/// категорії, редагований прямо з рядка детектора над сіткою.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CategorySetThresholdPayload {
+    pub category_id: String,
+    pub key: String,
+    pub value: u64,
+}
+
+/// Зміна порога детектора з рядка категорії (T-115). Делегує в той самий
+/// шлях, що й `settings.set` (T-092/T-093): гарячий перерахунок з індексу
+/// без рескану диска, подія `settings.changed` перебудовує сітку.
+#[tauri::command]
+pub async fn category_set_threshold<R: Runtime>(
+    app: AppHandle<R>,
+    payload: CategorySetThresholdPayload,
+    state: tauri::State<'_, SettingsRuntime>,
+    scan: tauri::State<'_, crate::scan_runtime::ScanRuntime>,
+) -> Result<AppSettings, CoreError> {
+    record_command();
+    let category_id = parse_category_id(&payload.category_id)?;
+    if !THRESHOLD_EDITABLE_CATEGORIES.contains(&category_id) {
+        return Err(CoreError::invalid_argument(format!(
+            "Категорія «{}» не має редагованих порогів.",
+            payload.category_id
+        )));
+    }
+
+    let mut settings = state.current();
+    settings
+        .detectors
+        .entry(payload.category_id.clone())
+        .or_default()
+        .thresholds
+        .insert(payload.key.clone(), payload.value);
+
+    apply_and_persist_settings(&app, &state, &scan, settings).await
 }
 
 #[cfg(test)]
@@ -955,6 +1099,7 @@ mod tests {
     use tauri::test::{get_ipc_response, mock_builder, mock_context, noop_assets, INVOKE_KEY};
     use tauri::webview::InvokeRequest;
     use tauri::WebviewWindowBuilder;
+    use trashradar_app::ports::HotIndex;
 
     use super::*;
 
@@ -993,8 +1138,14 @@ mod tests {
                 settings_set,
                 cache_get_usage,
                 cache_clear,
+                category_top_candidates,
+                category_all_candidates,
+                category_window,
+                category_set_threshold,
                 crate::scan_runtime::scan_start,
                 crate::scan_runtime::scan_stop,
+                crate::scan_runtime::candidate_keep,
+                crate::scan_runtime::candidate_mark,
             ])
             .build(mock_context(noop_assets()))
             .expect("mock app");
@@ -1251,6 +1402,7 @@ mod tests {
             QuarantineBadge {
                 held_count: 2,
                 held_bytes: 350,
+                next_purge_at_unix: 1_700_000_000 + 86_400,
             }
         );
         drop(database);
@@ -1554,5 +1706,153 @@ mod tests {
             ),
         );
         assert!(result.is_err(), "deny_unknown_fields працює");
+    }
+
+    /// Тестовий FileRecord у категорії — для category.window/category.set_threshold (T-115).
+    fn sample_file_record(
+        id: u64,
+        size_bytes: u64,
+        category: CategoryId,
+        decision: Decision,
+    ) -> trashradar_domain::candidate::FileRecord {
+        use trashradar_domain::candidate::{
+            ByteSize, CandidateId, CandidateUnit, FileAttributes, FileKind, FsTimestamp,
+            SafetyLevel,
+        };
+        trashradar_domain::candidate::FileRecord {
+            candidate_id: CandidateId(id),
+            path: format!("C:\\test\\file-{id}.bin"),
+            size: ByteSize(size_bytes),
+            created_at: None,
+            modified_at: None,
+            accessed_at: Some(FsTimestamp(133_500_000_000_000_000)),
+            kind: FileKind::Other,
+            unit: CandidateUnit::File,
+            category,
+            safety: SafetyLevel::ReviewRecommended,
+            decision,
+            detector_id: "large_files".into(),
+            explanation: "розмір понад поріг".into(),
+            attributes: FileAttributes::default(),
+        }
+    }
+
+    #[test]
+    fn unix_secs_to_iso8601_known_instant() {
+        // 2024-01-15T10:30:00Z → 1705314600 (перевірено незалежним розрахунком).
+        assert_eq!(unix_secs_to_iso8601(1_705_314_600), "2024-01-15T10:30:00Z");
+        assert_eq!(unix_secs_to_iso8601(0), "1970-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn category_window_returns_full_candidates_sorted_desc_and_hides_keep() {
+        let (app, webview) = test_app();
+        use tauri::Manager;
+        let scan = app.state::<crate::scan_runtime::ScanRuntime>();
+        scan.index
+            .insert_batch(vec![
+                sample_file_record(
+                    1,
+                    10 * 1024 * 1024,
+                    CategoryId::LargeFiles,
+                    Decision::Undecided,
+                ),
+                sample_file_record(
+                    2,
+                    50 * 1024 * 1024,
+                    CategoryId::LargeFiles,
+                    Decision::Undecided,
+                ),
+                sample_file_record(3, 999 * 1024 * 1024, CategoryId::LargeFiles, Decision::Keep),
+                sample_file_record(
+                    4,
+                    5 * 1024 * 1024,
+                    CategoryId::OldFiles,
+                    Decision::Undecided,
+                ),
+            ])
+            .unwrap();
+
+        let response = get_ipc_response(
+            &webview,
+            request(
+                "category_window",
+                json!({ "payload": { "categoryId": "large_files" } }),
+            ),
+        )
+        .expect("category.window");
+        let candidates = body_json(response);
+        let list = candidates.as_array().expect("масив кандидатів");
+        assert_eq!(list.len(), 2, "Keep приховано, чужа категорія не входить");
+        assert_eq!(list[0]["id"], 2, "сортовано за розміром спаданням");
+        assert_eq!(list[1]["id"], 1);
+        assert_eq!(list[0]["path"], "C:\\test\\file-2.bin");
+        assert_eq!(list[0]["kind"], "other");
+        assert_eq!(list[0]["unit"], "file");
+        assert_eq!(list[0]["decision"], "undecided");
+        assert!(list[0]["lastAccessAt"].as_str().unwrap().ends_with('Z'));
+        assert_eq!(list[0]["alsoIn"], json!([]));
+    }
+
+    #[test]
+    fn category_window_rejects_unknown_category() {
+        let (_app, webview) = test_app();
+        let result = get_ipc_response(
+            &webview,
+            request(
+                "category_window",
+                json!({ "payload": { "categoryId": "not_a_category" } }),
+            ),
+        );
+        assert!(result.is_err());
+    }
+
+    /// DoD T-115: зміна порога перебудовує категорію з індексу без рескану.
+    #[test]
+    fn category_set_threshold_recalculates_index_in_place() {
+        let (app, webview) = test_app();
+        use tauri::Manager;
+        let scan = app.state::<crate::scan_runtime::ScanRuntime>();
+        scan.index
+            .insert_batch(vec![sample_file_record(
+                1,
+                50 * 1024 * 1024,
+                CategoryId::Uncategorized,
+                Decision::Undecided,
+            )])
+            .unwrap();
+
+        let response = get_ipc_response(
+            &webview,
+            request(
+                "category_set_threshold",
+                json!({ "payload": { "categoryId": "large_files", "key": "min_size_bytes", "value": 10 * 1024 * 1024 } }),
+            ),
+        )
+        .expect("category.set_threshold");
+        let settings = body_json(response);
+        assert_eq!(
+            settings["detectors"]["large_files"]["thresholds"]["min_size_bytes"],
+            10 * 1024 * 1024
+        );
+
+        let records = scan.index.get_all();
+        assert_eq!(records[0].category, CategoryId::LargeFiles);
+    }
+
+    #[test]
+    fn category_set_threshold_rejects_category_without_thresholds() {
+        let (_app, webview) = test_app();
+        let result = get_ipc_response(
+            &webview,
+            request(
+                "category_set_threshold",
+                json!({ "payload": { "categoryId": "temp_files", "key": "min_size_bytes", "value": 1 } }),
+            ),
+        );
+        assert!(
+            result.is_err(),
+            "temp_files не має редагованих порогів (реєстрова, не предикатна категорія)"
+        );
     }
 }
