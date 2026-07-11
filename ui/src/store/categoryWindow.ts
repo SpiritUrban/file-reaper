@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { command } from "@/ipc/client";
 import type { Candidate, CategoryId, CandidatePreview } from "@/ipc/types";
 
@@ -88,29 +88,48 @@ export async function fetchCategoryWindow(
  * Хук сітки категорії. `refreshKey` (напр. об'єкт settings) провокує
  * рефетч без рескану, коли Core перерахував категорію з індексу
  * (T-093/T-115: зміна порога детектора → нова сітка тим самим кліком).
+ * `refetch` — ручний рефетч (T-119: клік по стрічці «+N нових знахідок»);
+ * `hasLoaded` — true після першого завершеного фетчу, щоб не блимнути
+ * фальшивою стрічкою до того, як прийшли перші дані.
  */
 export function useCategoryWindow(
   categoryId: CategoryId,
   refreshKey: unknown,
-): { candidates: Candidate[]; loading: boolean } {
+): { candidates: Candidate[]; loading: boolean; hasLoaded: boolean; refetch: () => void } {
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [loading, setLoading] = useState(false);
+  const [hasLoaded, setHasLoaded] = useState(false);
 
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    fetchCategoryWindow(categoryId)
-      .then((result) => {
-        if (!cancelled) setCandidates(result);
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
+  const load = useCallback(
+    (categoryId: CategoryId): (() => void) => {
+      let cancelled = false;
+      setLoading(true);
+      fetchCategoryWindow(categoryId)
+        .then((result) => {
+          if (!cancelled) {
+            setCandidates(result);
+            setHasLoaded(true);
+          }
+        })
+        .finally(() => {
+          if (!cancelled) setLoading(false);
+        });
+      return () => {
+        cancelled = true;
+      };
+    },
+    [],
+  );
+
+  useEffect(
+    () => load(categoryId),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [categoryId, refreshKey]);
+    [categoryId, refreshKey, load],
+  );
 
-  return { candidates, loading };
+  const refetch = useCallback(() => {
+    load(categoryId);
+  }, [categoryId, load]);
+
+  return { candidates, loading, hasLoaded, refetch };
 }

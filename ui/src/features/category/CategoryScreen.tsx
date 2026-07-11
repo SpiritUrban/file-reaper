@@ -14,6 +14,10 @@
  * T-118: щільність сітки `-`/`=` (Compact/Standard/Large) через спільний
  * `gridDensityStore` — один вибір на сесію, перемикання категорій його не
  * скидає; позиція фокуса (`focusedId`) від density не залежить.
+ * T-119: під час скану нові знахідки НЕ вливаються в уже відрендерений
+ * список автоматично (жодного зсуву позицій) — стрічка «+N нових знахідок ↓»
+ * порівнює живий `itemCount` (T-055 cleanup.total_updated/category.updated)
+ * з розміром уже завантаженого вікна; клік по стрічці — ручний `refetch()`.
  * Дублікати групами — T-126.
  */
 
@@ -103,12 +107,16 @@ function ThresholdInput({
 export function CategoryScreen({ categoryId }: CategoryScreenProps) {
   const title = categoryTitle(categoryId);
   const rule = categoryRule(categoryId);
-  const { settings } = useAppState();
+  const appState = useAppState();
+  const { settings } = appState;
   const filters = useCandidateFilters(categoryId);
   const search = useSearchState(categoryId);
   // settings — нова посилання на кожну settings.changed подію (T-098), тому
   // зміна порога детектора перебудовує сітку без ручного тригера (T-115 DoD).
-  const { candidates: fetched } = useCategoryWindow(categoryId, settings);
+  const { candidates: fetched, hasLoaded, refetch } = useCategoryWindow(
+    categoryId,
+    settings,
+  );
   // T-117: Keep ховає файл з усіх категорій сесії одразу — навіть якщо цю
   // категорію завантажено раніше і сервер про Keep у ній ще не знає.
   const keptIds = useKeptIds();
@@ -127,6 +135,15 @@ export function CategoryScreen({ categoryId }: CategoryScreenProps) {
   const hasSearch = search.query.length > 0;
   const thresholdFields = CATEGORY_THRESHOLDS[categoryId] ?? [];
   const density = useGridDensity();
+
+  // T-119: «+N нових знахідок» — лише коли одиниця рахунку категорії це
+  // окремі кандидати (не групи дублікатів, T-126) і перший фетч уже прийшов
+  // (інакше секунду до даних показало б фальшиве «+N» від порожнього fetched).
+  const liveSummary = appState.cleanup.categories.find((c) => c.id === categoryId);
+  const pendingNew =
+    hasLoaded && liveSummary && liveSummary.countUnit !== "groups"
+      ? Math.max(0, liveSummary.itemCount - fetched.length)
+      : 0;
 
   // T-099: усі 9 CategoryScreen змонтовані постійно, приховані CSS-ом —
   // хук на глобальний хоткей мусить діяти лише для видимої категорії.
@@ -217,7 +234,16 @@ export function CategoryScreen({ categoryId }: CategoryScreenProps) {
         ) : null}
       </div>
 
-      <div className="min-h-0 flex-1">
+      <div className="relative min-h-0 flex-1">
+        {pendingNew > 0 ? (
+          <button
+            type="button"
+            onClick={refetch}
+            className="absolute left-1/2 top-2 z-40 -translate-x-1/2 rounded-full border border-accent/50 bg-panel/95 px-3 py-1 text-xs font-medium text-ink shadow-lg backdrop-blur-sm transition-colors hover:border-accent"
+          >
+            +{pendingNew} нових знахідок ↓
+          </button>
+        ) : null}
         <VirtualCandidateGrid
           candidates={visible}
           density={density}
