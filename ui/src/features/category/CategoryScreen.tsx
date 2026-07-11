@@ -14,6 +14,7 @@ import {
   hasActiveFilters,
   useCandidateFilters,
 } from "@/store/filters";
+import { applySearchQuery, useSearchState } from "@/store/search";
 import type { Candidate, CategoryId } from "@/ipc/types";
 
 interface CategoryScreenProps {
@@ -26,12 +27,17 @@ const NO_CANDIDATES: Candidate[] = [];
 export function CategoryScreen({ categoryId }: CategoryScreenProps) {
   const title = categoryTitle(categoryId);
   const filters = useCandidateFilters(categoryId);
+  const search = useSearchState(categoryId);
   const candidates = NO_CANDIDATES;
   const visible = useMemo(
-    () => applyCandidateFilters(candidates, filters),
-    [candidates, filters],
+    () => {
+      const filtered = applyCandidateFilters(candidates, filters);
+      return applySearchQuery(filtered, search.query);
+    },
+    [candidates, filters, search.query],
   );
-  const filtered = hasActiveFilters(filters);
+  const hasFilters = hasActiveFilters(filters);
+  const hasSearch = search.query.length > 0;
 
   return (
     <div className="flex h-full flex-col">
@@ -41,9 +47,9 @@ export function CategoryScreen({ categoryId }: CategoryScreenProps) {
         <span className="font-mono text-ink-faint">
           правило категорії «{title}» — T-115
         </span>
-        {filtered ? (
+        {hasFilters || hasSearch ? (
           <span className="text-ink-faint">
-            · фільтри активні: {visible.length} з {candidates.length}
+            · результати: {visible.length} з {candidates.length}
           </span>
         ) : null}
       </div>
@@ -53,8 +59,8 @@ export function CategoryScreen({ categoryId }: CategoryScreenProps) {
         <VirtualCandidateGrid
           candidates={visible}
           emptyTitle={
-            filtered && candidates.length > 0
-              ? "Жодного збігу з фільтрами"
+            (hasFilters || hasSearch) && candidates.length > 0
+              ? "Жодного збігу з фільтрами чи пошуком"
               : `Сітка кандидатів: ${title}`
           }
         />

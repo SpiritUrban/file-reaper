@@ -20,6 +20,7 @@ import {
   candidateFilterStore,
   useCandidateFilters,
 } from "@/store/filters";
+import { searchStore, useSearchState } from "@/store/search";
 import type { CategoryId, FileKind, ScanStartAck } from "@/ipc/types";
 
 interface TopBarProps {
@@ -146,6 +147,52 @@ function rescanAll(): void {
   );
 }
 
+/** Інпут пошуку: видимий при T-109 active, Escape закриває (ui.md §2). */
+function SearchBox({ categoryId }: { categoryId: CategoryId | null }) {
+  const search = useSearchState(categoryId);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!categoryId) return;
+    const onHotkey = (event: Event) => {
+      const { action } = (event as CustomEvent).detail;
+      if (action === "search") {
+        event.preventDefault();
+        inputRef.current?.focus();
+        searchStore.setActive(categoryId, true);
+      }
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && search.active) {
+        searchStore.clear(categoryId);
+      }
+    };
+    window.addEventListener("trashradar:hotkey", onHotkey);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("trashradar:hotkey", onHotkey);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [categoryId, search.active]);
+
+  if (!categoryId || !search.active) {
+    return <span className="font-mono text-xs text-ink-faint">🔍 /</span>;
+  }
+
+  return (
+    <input
+      ref={inputRef}
+      type="text"
+      placeholder="Пошук по шляху…"
+      value={search.query}
+      onChange={(event) => searchStore.setQuery(categoryId, event.currentTarget.value)}
+      onBlur={() => searchStore.setActive(categoryId, search.query.length > 0)}
+      autoFocus
+      className="w-40 rounded bg-panel-2 px-2 py-0.5 text-xs text-ink placeholder:text-ink-faint focus:outline-none focus:ring-1 focus:ring-accent"
+    />
+  );
+}
+
 export function TopBar({
   context,
   categoryId = null,
@@ -252,8 +299,8 @@ export function TopBar({
 
       <div className="flex-1" />
 
-      {/* Пошук (T-109) */}
-      <span className="font-mono text-xs text-ink-faint">🔍 /</span>
+      {/* Пошук (T-109): хоткей `/` фокусує, Escape закриває, infix по path */}
+      <SearchBox categoryId={categoryId} />
 
       {/* Reap Bar (T-108): спільний кошик сесії, живі лічильники T-102 */}
       <div className="flex items-center gap-2">
