@@ -4,6 +4,7 @@
  * переходи між Cleanup / категоріями / Quarantine / Settings (T-099).
  */
 
+import { useEffect } from "react";
 import { useLocation } from "react-router-dom";
 
 import { CategoryScreen } from "@/features/category/CategoryScreen";
@@ -13,6 +14,7 @@ import { QuarantineScreen } from "@/features/quarantine/QuarantineScreen";
 import { SettingsScreen } from "@/features/settings/SettingsScreen";
 import { CATEGORIES, categoryTitle } from "@/store/categories";
 import type { CategoryId } from "@/ipc/types";
+import { hotkeys } from "@/hotkeys";
 
 import { Sidebar } from "./Sidebar";
 import { TopBar } from "./TopBar";
@@ -38,6 +40,13 @@ export function AppLayout() {
   const isCleanup =
     pathname === "/" ||
     (!activeCategory && !isQuarantine && !isSettings && !isHealth);
+  useEffect(() => {
+    hotkeys.setActiveContexts([
+      ...(activeCategory ? (["grid"] as const) : []),
+      ...(isQuarantine ? (["quarantine"] as const) : []),
+    ]);
+  }, [activeCategory, isQuarantine]);
+
   const context = activeCategory
     ? categoryTitle(activeCategory)
     : isQuarantine

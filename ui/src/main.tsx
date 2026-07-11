@@ -2,6 +2,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { RouterProvider } from "react-router-dom";
 
+import { hotkeys } from "./hotkeys";
 import { command, isTauri, subscribe } from "./ipc/client";
 import type { PingReply, TestEvent, TestStreamAck } from "./ipc/types";
 
@@ -28,6 +29,8 @@ async function ipcSelfCheck(): Promise<void> {
     payload: { count: expected, intervalMs: 10 },
   });
 }
+
+hotkeys.attach(window);
 
 void appStateStore.start().catch((error) =>
   console.warn("Відновлення UI state не пройшло:", error),
