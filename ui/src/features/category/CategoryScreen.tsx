@@ -4,7 +4,7 @@
  * T-101/T-115, позначення — T-116, дублікати групами — T-126.
  */
 
-import { EmptyState } from "@/components/EmptyState";
+import { VirtualCandidateGrid } from "@/components/VirtualCandidateGrid";
 import { categoryTitle } from "@/store/categories";
 import type { CategoryId } from "@/ipc/types";
 
@@ -25,11 +25,11 @@ export function CategoryScreen({ categoryId }: CategoryScreenProps) {
         </span>
       </div>
 
-      {/* Зона віртуалізованої сітки плиток (T-101) */}
+      {/* category.window підключить записи у T-114; grid уже bounded за DOM. */}
       <div className="min-h-0 flex-1">
-        <EmptyState
-          title={`Сітка кандидатів: ${title}`}
-          taskRef="T-101, T-115…T-122"
+        <VirtualCandidateGrid
+          candidates={[]}
+          emptyTitle={`Сітка кандидатів: ${title}`}
         />
       </div>
     </div>

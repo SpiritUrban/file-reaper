@@ -1,0 +1,173 @@
+import { useEffect, useMemo, useRef, useState } from "react";
+
+import type { Candidate } from "@/ipc/types";
+
+import { CandidateTile, type CandidatePreview } from "./CandidateTile";
+import { EmptyState } from "./EmptyState";
+
+export type GridDensity = "compact" | "standard" | "large";
+
+const MIN_TILE_WIDTH: Record<GridDensity, number> = {
+  compact: 140,
+  standard: 190,
+  large: 260,
+};
+const GAP = 4;
+const OVERSCAN_ROWS = 3;
+
+export interface VirtualGridWindow {
+  columns: number;
+  rowHeight: number;
+  totalHeight: number;
+  startIndex: number;
+  endIndex: number;
+  offsetY: number;
+}
+
+/** Pure geometry used by the component and perf/invariant checks. */
+export function calculateVirtualGridWindow(
+  itemCount: number,
+  width: number,
+  viewportHeight: number,
+  scrollTop: number,
+  density: GridDensity,
+): VirtualGridWindow {
+  const safeWidth = Math.max(1, width);
+  const columns = Math.max(
+    1,
+    Math.floor((safeWidth + GAP) / (MIN_TILE_WIDTH[density] + GAP)),
+  );
+  const tileWidth = (safeWidth - GAP * (columns - 1)) / columns;
+  const rowHeight = Math.max(1, tileWidth * 0.75 + GAP);
+  const rowCount = Math.ceil(itemCount / columns);
+  const firstVisibleRow = Math.min(
+    Math.max(0, rowCount - 1),
+    Math.max(0, Math.floor(scrollTop / rowHeight)),
+  );
+  const visibleRows = Math.max(1, Math.ceil(viewportHeight / rowHeight));
+  const startRow = Math.max(0, firstVisibleRow - OVERSCAN_ROWS);
+  const endRow = Math.min(
+    rowCount,
+    firstVisibleRow + visibleRows + OVERSCAN_ROWS,
+  );
+
+  return {
+    columns,
+    rowHeight,
+    totalHeight: Math.max(0, rowCount * rowHeight - GAP),
+    startIndex: startRow * columns,
+    endIndex: Math.min(itemCount, endRow * columns),
+    offsetY: startRow * rowHeight,
+  };
+}
+
+export interface VirtualCandidateGridProps {
+  candidates: Candidate[];
+  density?: GridDensity;
+  focusedId?: number | null;
+  previewFor?: (candidate: Candidate) => CandidatePreview | undefined;
+  onActivate?: (candidate: Candidate) => void;
+  onFocusCandidate?: (candidate: Candidate) => void;
+  emptyTitle?: string;
+}
+
+export function VirtualCandidateGrid({
+  candidates,
+  density = "standard",
+  focusedId = null,
+  previewFor,
+  onActivate,
+  onFocusCandidate,
+  emptyTitle = "Немає кандидатів у цій категорії",
+}: VirtualCandidateGridProps) {
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const frameRef = useRef<number | null>(null);
+  const [viewport, setViewport] = useState({
+    width: 1,
+    height: 1,
+    scrollTop: 0,
+  });
+
+  useEffect(() => {
+    const element = viewportRef.current;
+    if (!element) return;
+
+    const measure = () => {
+      setViewport((current) => ({
+        width: Math.max(1, element.clientWidth - GAP * 2),
+        height: element.clientHeight,
+        scrollTop: current.scrollTop,
+      }));
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(
+    () => () => {
+      if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
+    },
+    [],
+  );
+
+  const window = useMemo(
+    () =>
+      calculateVirtualGridWindow(
+        candidates.length,
+        viewport.width,
+        viewport.height,
+        viewport.scrollTop,
+        density,
+      ),
+    [candidates.length, density, viewport],
+  );
+  const visible = candidates.slice(window.startIndex, window.endIndex);
+
+  if (candidates.length === 0) {
+    return <EmptyState title={emptyTitle} taskRef="category.window" />;
+  }
+
+  return (
+    <div
+      ref={viewportRef}
+      className="h-full overflow-y-auto overscroll-contain p-1"
+      onScroll={(event) => {
+        const scrollTop = event.currentTarget.scrollTop;
+        if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
+        frameRef.current = requestAnimationFrame(() => {
+          frameRef.current = null;
+          setViewport((current) => ({ ...current, scrollTop }));
+        });
+      }}
+    >
+      <div className="relative" style={{ height: window.totalHeight }}>
+        <div
+          className="absolute inset-x-0 top-0 grid gap-1"
+          style={{
+            gridTemplateColumns: `repeat(${window.columns}, minmax(0, 1fr))`,
+            transform: `translateY(${window.offsetY}px)`,
+          }}
+          data-visible-start={window.startIndex}
+          data-visible-end={window.endIndex}
+          data-total={candidates.length}
+        >
+          {visible.map((candidate) => {
+            const preview = previewFor?.(candidate);
+            return (
+              <CandidateTile
+                key={candidate.id}
+                candidate={candidate}
+                focused={candidate.id === focusedId}
+                {...(preview ? { preview } : {})}
+                {...(onActivate ? { onActivate } : {})}
+                {...(onFocusCandidate ? { onFocusCandidate } : {})}
+              />
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
