@@ -392,6 +392,8 @@ export interface VolumeUsageInfo {
 export interface QuarantineBadge {
   heldCount: number;
   heldBytes: number;
+  /** Дата наступного автоочищення у UNIX-секундах, або 0 якщо карантин порожний (T-113). */
+  nextPurgeAtUnix: number;
 }
 
 export interface AppStateSnapshot {

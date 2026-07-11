@@ -35,7 +35,7 @@ const EMPTY_CLEANUP: CleanupTotal = {
   categories: [],
 };
 
-const EMPTY_QUARANTINE: QuarantineBadge = { heldCount: 0, heldBytes: 0 };
+const EMPTY_QUARANTINE: QuarantineBadge = { heldCount: 0, heldBytes: 0, nextPurgeAtUnix: 0 };
 
 const INITIAL_STATE: AppState = {
   status: "idle",
@@ -128,6 +128,7 @@ export class AppStateStore {
               // heldBytes у події authoritative; count коригуємо purge-ами.
               heldCount: Math.max(0, state.quarantine.heldCount - event.purgedCount),
               heldBytes: event.heldBytes,
+              nextPurgeAtUnix: state.quarantine.nextPurgeAtUnix,
             },
           })),
         ),

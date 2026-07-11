@@ -234,17 +234,27 @@ pub fn build_volume_usage() -> Vec<VolumeUsageInfo> {
 pub struct QuarantineBadge {
     pub held_count: u64,
     pub held_bytes: u64,
+    /// Дата наступного автоочищення (найраніше expires_at_unix) у UNIX-секундах, або 0 якщо карантин порожний (T-113).
+    pub next_purge_at_unix: i64,
 }
 
 /// Підсумок manifest-записів зі статусом `Quarantined` (T-078 → бейдж T-106).
 pub fn quarantine_badge(
     manifest: &impl trashradar_app::ports::QuarantineManifest,
 ) -> Result<QuarantineBadge, CoreError> {
-    let mut badge = QuarantineBadge::default();
+    let mut badge = QuarantineBadge {
+        held_count: 0,
+        held_bytes: 0,
+        next_purge_at_unix: 0,
+    };
     for entry in manifest.list_entries()? {
         if entry.status == trashradar_domain::quarantine::QuarantineStatus::Quarantined {
             badge.held_count += 1;
             badge.held_bytes = badge.held_bytes.saturating_add(entry.size.0);
+            // Отримуємо найраніше expires_at_unix
+            if badge.next_purge_at_unix == 0 || entry.expires_at_unix < badge.next_purge_at_unix {
+                badge.next_purge_at_unix = entry.expires_at_unix;
+            }
         }
     }
     Ok(badge)

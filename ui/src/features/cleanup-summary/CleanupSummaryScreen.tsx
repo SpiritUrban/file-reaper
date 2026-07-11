@@ -225,6 +225,12 @@ export function CleanupSummaryScreen() {
               <>
                 <AnimatedInteger value={quarantine.heldCount} /> файлів ·{" "}
                 <AnimatedBytes value={quarantine.heldBytes} />
+                {quarantine.nextPurgeAtUnix > 0 && (
+                  <>
+                    {" "}· автоочищення{" "}
+                    {new Date(quarantine.nextPurgeAtUnix * 1000).toLocaleDateString("uk-UA")}
+                  </>
+                )}
               </>
             ) : (
               "—"
