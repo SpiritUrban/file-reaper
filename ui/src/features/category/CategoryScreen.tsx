@@ -8,7 +8,10 @@
  * T-116: позначення клік/Space (toggle), Shift-клік/Shift+Space (діапазон
  * від останнього toggle до поточного) і A (все видиме) — усі три способи
  * пишуть в один спільний `selectionStore` (T-108), тож Reap Bar і плитки
- * оновлюються ідентично й миттєво. Дублікати групами — T-126.
+ * оновлюються ідентично й миттєво.
+ * T-117: K на сфокусованій плитці — Keep; ховає файл з усіх категорій сесії
+ * одразу (спільний `keepStore`) і персистентно на боці Core (`candidate.keep`).
+ * Дублікати групами — T-126.
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -32,6 +35,7 @@ import {
 } from "@/store/filters";
 import { applySearchQuery, useSearchState } from "@/store/search";
 import { selectionStore, useMarkedSummary } from "@/store/selection";
+import { keepCandidate, useKeptIds } from "@/store/keep";
 import type { Candidate, CategoryId } from "@/ipc/types";
 
 interface CategoryScreenProps {
@@ -100,7 +104,14 @@ export function CategoryScreen({ categoryId }: CategoryScreenProps) {
   const search = useSearchState(categoryId);
   // settings — нова посилання на кожну settings.changed подію (T-098), тому
   // зміна порога детектора перебудовує сітку без ручного тригера (T-115 DoD).
-  const { candidates } = useCategoryWindow(categoryId, settings);
+  const { candidates: fetched } = useCategoryWindow(categoryId, settings);
+  // T-117: Keep ховає файл з усіх категорій сесії одразу — навіть якщо цю
+  // категорію завантажено раніше і сервер про Keep у ній ще не знає.
+  const keptIds = useKeptIds();
+  const candidates = useMemo(
+    () => fetched.filter((c) => !keptIds.has(c.id)),
+    [fetched, keptIds],
+  );
   const visible = useMemo(
     () => {
       const filtered = applyCandidateFilters(candidates, filters);
@@ -167,6 +178,9 @@ export function CategoryScreen({ categoryId }: CategoryScreenProps) {
         }
       } else if (action === "mark_all") {
         selectionStore.markMultiple(list);
+      } else if (action === "keep") {
+        const focused = list.find((c) => c.id === focusedIdRef.current);
+        if (focused) void keepCandidate(focused);
       }
     };
     window.addEventListener("trashradar:hotkey", onHotkey);
