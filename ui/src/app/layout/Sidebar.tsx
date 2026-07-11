@@ -1,20 +1,56 @@
 /**
  * Sidebar — список категорій-детекторів з обсягами (docs/ui.md §1).
- * Каркас: статичний довідник без живих даних; обсяги («—») підключаються
- * до подій cleanup.total_updated у T-105/T-106.
+ * Живі обсяги — проєкція подій cleanup.total_updated / category.updated
+ * (T-105); категорії відсортовані за вагою, порожні — приглушені.
+ * Згортання `[`, бейдж Quarantine і блок дисків — T-106.
  */
 
 import { NavLink } from "react-router-dom";
 
+import { AnimatedBytes } from "@/components/AnimatedCounter";
 import { Meter } from "@/components/Meter";
-import { CATEGORIES } from "@/store/categories";
+import { CATEGORIES, type CategoryDescriptor } from "@/store/categories";
+import { useAppState } from "@/store/appState";
+import type { CategorySummary } from "@/ipc/types";
 
 const itemBase =
   "flex items-center gap-2 rounded px-2 py-1.5 text-sm hover:bg-panel-2";
 const itemActive = "bg-panel-2 text-ink";
 const itemIdle = "text-ink-dim";
+/** Порожня категорія: приглушена, але лишається клікабельною. */
+const itemEmpty = "text-ink-faint";
+
+interface CategoryRow {
+  descriptor: CategoryDescriptor;
+  summary: CategorySummary | undefined;
+}
+
+/**
+ * Порядок Sidebar: непорожні категорії за вагою (спадання байтів),
+ * порожні — у каталожному порядку в кінці. Сортування стабільне,
+ * тож рівні обсяги не «стрибають» між подіями скану.
+ */
+function categoryRowsByWeight(live: CategorySummary[]): CategoryRow[] {
+  const byId = new Map(live.map((summary) => [summary.id, summary]));
+  return CATEGORIES.map((descriptor, catalogIndex) => ({
+    descriptor,
+    summary: byId.get(descriptor.id),
+    catalogIndex,
+  }))
+    .sort((left, right) => {
+      const leftBytes = left.summary?.totalBytes ?? 0;
+      const rightBytes = right.summary?.totalBytes ?? 0;
+      if (leftBytes !== rightBytes) return rightBytes - leftBytes;
+      return left.catalogIndex - right.catalogIndex;
+    })
+    .map(({ descriptor, summary }) => ({ descriptor, summary }));
+}
 
 export function Sidebar() {
+  const { cleanup, scanRunning } = useAppState();
+  const rows = categoryRowsByWeight(cleanup.categories);
+  const hasTotal = cleanup.reclaimableBytes > 0;
+
   return (
     <aside className="flex w-56 shrink-0 flex-col border-r border-line bg-panel">
       {/* Логотип */}
@@ -23,7 +59,7 @@ export function Sidebar() {
         <span className="font-semibold tracking-wide">TrashRadar</span>
       </div>
 
-      {/* Головний екран: Cleanup з живою цифрою */}
+      {/* Головний екран: Cleanup з живою цифрою; ⟳ — активний скан */}
       <nav className="flex flex-col gap-0.5 px-2">
         <NavLink
           to="/"
@@ -34,32 +70,58 @@ export function Sidebar() {
         >
           <span>▦</span>
           <span className="flex-1">Cleanup</span>
-          <span className="font-mono text-xs text-ink-faint">— ГБ</span>
+          {scanRunning ? (
+            <span
+              className="inline-block animate-spin text-xs text-accent"
+              aria-label="сканування триває"
+            >
+              ⟳
+            </span>
+          ) : null}
+          {hasTotal ? (
+            <AnimatedBytes
+              value={cleanup.reclaimableBytes}
+              className="font-mono text-xs text-ink-dim"
+            />
+          ) : (
+            <span className="font-mono text-xs text-ink-faint">—</span>
+          )}
         </NavLink>
       </nav>
 
       <div className="mx-3 my-2 border-t border-line" />
 
-      {/* Категорії: порядок стане «за вагою» після підключення даних (T-105) */}
+      {/* Категорії за вагою: найважча зверху, порожні приглушені (T-105) */}
       <nav className="flex flex-1 flex-col gap-0.5 overflow-y-auto px-2">
-        {CATEGORIES.map((category) => (
-          <NavLink
-            key={category.id}
-            to={`/category/${category.id}`}
-            className={({ isActive }) =>
-              `${itemBase} ${isActive ? itemActive : itemIdle}`
-            }
-          >
-            <span className="w-4 text-center">{category.glyph}</span>
-            <span className="flex-1 truncate">{category.title}</span>
-            <span className="font-mono text-xs text-ink-faint">—</span>
-          </NavLink>
-        ))}
+        {rows.map(({ descriptor, summary }) => {
+          const totalBytes = summary?.totalBytes ?? 0;
+          const isEmpty = totalBytes === 0;
+          return (
+            <NavLink
+              key={descriptor.id}
+              to={`/category/${descriptor.id}`}
+              className={({ isActive }) =>
+                `${itemBase} ${isActive ? itemActive : isEmpty ? itemEmpty : itemIdle}`
+              }
+            >
+              <span className="w-4 text-center">{descriptor.glyph}</span>
+              <span className="flex-1 truncate">{descriptor.title}</span>
+              {isEmpty ? (
+                <span className="font-mono text-xs text-ink-faint">—</span>
+              ) : (
+                <AnimatedBytes
+                  value={totalBytes}
+                  className="font-mono text-xs text-ink-dim"
+                />
+              )}
+            </NavLink>
+          );
+        })}
       </nav>
 
       <div className="mx-3 my-2 border-t border-line" />
 
-      {/* Quarantine з бейджем */}
+      {/* Quarantine з бейджем (живий лічильник — T-106) */}
       <nav className="px-2">
         <NavLink
           to="/quarantine"
