@@ -7,6 +7,7 @@
 import { useEffect } from "react";
 import { useLocation } from "react-router-dom";
 
+import { ToastViewport } from "@/components/ToastViewport";
 import { CategoryScreen } from "@/features/category/CategoryScreen";
 import { CleanupSummaryScreen } from "@/features/cleanup-summary/CleanupSummaryScreen";
 import { HealthScreen } from "@/features/health/HealthScreen";
@@ -96,6 +97,7 @@ export function AppLayout() {
           ) : null}
         </main>
       </div>
+      <ToastViewport />
     </div>
   );
 }
