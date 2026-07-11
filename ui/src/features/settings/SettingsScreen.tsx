@@ -20,7 +20,8 @@ export function SettingsScreen() {
             {section.title}
           </h2>
           <div className="mt-2 rounded border border-line bg-panel px-3 py-4 text-xs text-ink-faint">
-            наповнюється задачею {section.taskRef} · docs/tasks.md
+            наповнюється задачею {section.taskRef} ·{" "}
+            <span className="font-mono">docs/tasks.md</span>
           </div>
         </section>
       ))}

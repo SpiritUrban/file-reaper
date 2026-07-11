@@ -9,7 +9,9 @@ export function QuarantineScreen() {
   return (
     <div className="flex h-full flex-col border-t-2 border-quarantine/60">
       <div className="flex h-8 shrink-0 items-center gap-3 border-b border-line px-3 text-xs">
-        <span className="text-quarantine">— файлів · — · найближче автознищення: —</span>
+        <span className="font-mono text-quarantine">
+          — файлів · — · найближче автознищення: —
+        </span>
         <div className="flex-1" />
         <button
           type="button"

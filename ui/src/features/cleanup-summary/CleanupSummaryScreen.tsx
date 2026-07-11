@@ -15,8 +15,8 @@ export function CleanupSummaryScreen() {
       {/* Головна цифра — найбільший текст у продукті (T-110) */}
       <div className="flex items-baseline justify-between py-6">
         <h1 className="text-5xl font-bold tracking-tight">
-          <span className="font-mono">—</span>{" "}
-          <span className="text-ink-dim text-3xl">ГБ можна звільнити</span>
+          <span className="font-mono">— ГБ</span>{" "}
+          <span className="text-ink-dim text-3xl">можна звільнити</span>
         </h1>
         <span className="text-xs text-ink-faint">скан не запускався</span>
       </div>

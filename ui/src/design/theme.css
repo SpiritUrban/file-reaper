@@ -43,3 +43,8 @@ body,
 body {
   @apply bg-bg text-ink font-sans antialiased overflow-hidden select-none;
 }
+
+/* Розміри та шляхи порівнюються по вертикалі без «стрибків» цифр. */
+:where(.font-mono) {
+  font-variant-numeric: tabular-nums;
+}

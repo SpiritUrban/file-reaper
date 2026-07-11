@@ -246,7 +246,9 @@ export function HealthScreen() {
             </div>
             <div className="text-xs text-ink-faint">
               NTFS volumes:{" "}
-              {state.data?.elevation?.ntfsVolumeCount ?? "—"}
+              <span className="font-mono">
+                {state.data?.elevation?.ntfsVolumeCount ?? "—"}
+              </span>
             </div>
           </div>
           {state.data?.elevation?.message ? (
