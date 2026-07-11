@@ -11,6 +11,9 @@
  * оновлюються ідентично й миттєво.
  * T-117: K на сфокусованій плитці — Keep; ховає файл з усіх категорій сесії
  * одразу (спільний `keepStore`) і персистентно на боці Core (`candidate.keep`).
+ * T-118: щільність сітки `-`/`=` (Compact/Standard/Large) через спільний
+ * `gridDensityStore` — один вибір на сесію, перемикання категорій його не
+ * скидає; позиція фокуса (`focusedId`) від density не залежить.
  * Дублікати групами — T-126.
  */
 
@@ -33,6 +36,7 @@ import {
   hasActiveFilters,
   useCandidateFilters,
 } from "@/store/filters";
+import { gridDensityStore, useGridDensity } from "@/store/gridDensity";
 import { applySearchQuery, useSearchState } from "@/store/search";
 import { selectionStore, useMarkedSummary } from "@/store/selection";
 import { keepCandidate, useKeptIds } from "@/store/keep";
@@ -122,6 +126,7 @@ export function CategoryScreen({ categoryId }: CategoryScreenProps) {
   const hasFilters = hasActiveFilters(filters);
   const hasSearch = search.query.length > 0;
   const thresholdFields = CATEGORY_THRESHOLDS[categoryId] ?? [];
+  const density = useGridDensity();
 
   // T-099: усі 9 CategoryScreen змонтовані постійно, приховані CSS-ом —
   // хук на глобальний хоткей мусить діяти лише для видимої категорії.
@@ -181,6 +186,10 @@ export function CategoryScreen({ categoryId }: CategoryScreenProps) {
       } else if (action === "keep") {
         const focused = list.find((c) => c.id === focusedIdRef.current);
         if (focused) void keepCandidate(focused);
+      } else if (action === "zoom_out") {
+        gridDensityStore.zoomOut();
+      } else if (action === "zoom_in") {
+        gridDensityStore.zoomIn();
       }
     };
     window.addEventListener("trashradar:hotkey", onHotkey);
@@ -211,6 +220,7 @@ export function CategoryScreen({ categoryId }: CategoryScreenProps) {
       <div className="min-h-0 flex-1">
         <VirtualCandidateGrid
           candidates={visible}
+          density={density}
           focusedId={focusedId}
           isMarked={(candidate) => selectionStore.isMarked(candidate.id)}
           onActivate={handleActivate}
