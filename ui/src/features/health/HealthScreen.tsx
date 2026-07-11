@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { command, isTauri } from "@/ipc/client";
+import { command, ipcErrorMessage, isTauri } from "@/ipc/client";
 import type {
   DeclineElevationReply,
   HealthInfo,
@@ -105,7 +105,7 @@ export function HealthScreen() {
       setState((previous) => ({
         status: "error",
         data: previous.data,
-        error: error instanceof Error ? error.message : String(error),
+        error: ipcErrorMessage(error),
       }));
     }
   }, []);
@@ -140,9 +140,7 @@ export function HealthScreen() {
         await refresh();
       }
     } catch (error) {
-      setElevationNote(
-        error instanceof Error ? error.message : String(error),
-      );
+      setElevationNote(ipcErrorMessage(error));
       await refresh();
     } finally {
       setElevationBusy(false);
@@ -161,9 +159,7 @@ export function HealthScreen() {
       );
       await refresh();
     } catch (error) {
-      setElevationNote(
-        error instanceof Error ? error.message : String(error),
-      );
+      setElevationNote(ipcErrorMessage(error));
     } finally {
       setElevationBusy(false);
     }

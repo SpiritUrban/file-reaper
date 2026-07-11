@@ -40,13 +40,33 @@ function isCoreErrorPayload(value: unknown): value is CoreErrorPayload {
   );
 }
 
-/** Нормалізує будь-яке відхилення invoke у CoreIpcError. */
+/** Нормалізує будь-яку помилку IPC у CoreIpcError. */
 export function toCoreIpcError(raw: unknown): CoreIpcError {
   if (raw instanceof CoreIpcError) return raw;
   if (isCoreErrorPayload(raw)) return new CoreIpcError(raw.code, raw.message);
-  const fallback =
-    raw instanceof Error ? raw.message : typeof raw === "string" ? raw : JSON.stringify(raw);
-  return new CoreIpcError("unknown", fallback || "Невідома помилка виклику Core.");
+
+  let fallback: string | undefined;
+  if (raw instanceof Error) {
+    fallback = raw.message;
+  } else if (typeof raw === "string") {
+    fallback = raw;
+  } else {
+    try {
+      fallback = JSON.stringify(raw);
+    } catch {
+      fallback = undefined;
+    }
+  }
+
+  return new CoreIpcError(
+    "unknown",
+    fallback || "Невідома помилка взаємодії з Core.",
+  );
+}
+
+/** Єдиний готовий до показу текст для catch-блоків компонентів. */
+export function ipcErrorMessage(raw: unknown): string {
+  return toCoreIpcError(raw).message;
 }
 
 /** UI запущено всередині Tauri (а не у браузері `npm run dev`). */
@@ -85,7 +105,13 @@ export async function subscribe<TPayload>(
   if (!isTauri()) {
     return () => undefined;
   }
-  // Tauri забороняє крапки в іменах подій: на дроті app.test → app:test.
-  // Дзеркальне перетворення — core/shell/src/events.rs (wire_name).
-  return listen<TPayload>(name.replace(/\./g, ":"), (event) => handler(event.payload));
+  try {
+    // Tauri забороняє крапки в іменах подій: на дроті app.test → app:test.
+    // Дзеркальне перетворення — core/shell/src/events.rs (wire_name).
+    return await listen<TPayload>(name.replace(/\./g, ":"), (event) =>
+      handler(event.payload),
+    );
+  } catch (raw) {
+    throw toCoreIpcError(raw);
+  }
 }
