@@ -15,7 +15,7 @@
     "app.state": {
       "status": "implemented",
       "task": "T-098",
-      "$comment": "Read-only authoritative UI snapshot after webview reload: {cleanup,scanRunning,settings}; never starts a scan"
+      "$comment": "Read-only authoritative UI snapshot after webview reload: {cleanup,scanRunning,settings,volumes:[{volume,capacityBytes,freeBytes}],quarantine:{heldCount,heldBytes}} (volumes+quarantine — T-106 Sidebar); never starts a scan"
     },
     "app.ping": {
       "status": "implemented",

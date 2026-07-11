@@ -52,11 +52,13 @@ fn main() {
 
     let settings = ipc::SettingsRuntime::new(logging::data_profile_dir());
     let cache = ipc::CacheRuntime::new(logging::data_profile_dir());
+    let profile = ipc::ProfileRuntime::new(logging::data_profile_dir());
     let scan = scan_runtime::ScanRuntime::with_settings(settings.current());
     tauri::Builder::default()
         .manage(scan)
         .manage(settings)
         .manage(cache)
+        .manage(profile)
         .invoke_handler(tauri::generate_handler![
             ipc::app_health,
             ipc::app_state,

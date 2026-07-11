@@ -6,8 +6,11 @@ import type {
   AppStateSnapshot,
   CategorySummary,
   CleanupTotal,
+  QuarantineBadge,
+  QuarantineChangedEvent,
   ScanProgressEvent,
   SettingsChangedEvent,
+  VolumeUsageInfo,
 } from "@/ipc/types";
 
 type StoreStatus = "idle" | "hydrating" | "ready" | "error";
@@ -17,6 +20,10 @@ export interface AppState {
   cleanup: CleanupTotal;
   scanRunning: boolean;
   settings: AppSettings | null;
+  /** Живі томи для смужок дисків Sidebar (T-106). */
+  volumes: VolumeUsageInfo[];
+  /** Бейдж Quarantine (T-106): snapshot + події quarantine.changed. */
+  quarantine: QuarantineBadge;
   error: string | null;
 }
 
@@ -26,11 +33,15 @@ const EMPTY_CLEANUP: CleanupTotal = {
   categories: [],
 };
 
+const EMPTY_QUARANTINE: QuarantineBadge = { heldCount: 0, heldBytes: 0 };
+
 const INITIAL_STATE: AppState = {
   status: "idle",
   cleanup: EMPTY_CLEANUP,
   scanRunning: false,
   settings: null,
+  volumes: [],
+  quarantine: EMPTY_QUARANTINE,
   error: null,
 };
 
@@ -107,6 +118,16 @@ export class AppStateStore {
         subscribe<ScanProgressEvent>("scan.progress", (event) =>
           this.project((state) => ({ ...state, scanRunning: !event.done })),
         ),
+        subscribe<QuarantineChangedEvent>("quarantine.changed", (event) =>
+          this.project((state) => ({
+            ...state,
+            quarantine: {
+              // heldBytes у події authoritative; count коригуємо purge-ами.
+              heldCount: Math.max(0, state.quarantine.heldCount - event.purgedCount),
+              heldBytes: event.heldBytes,
+            },
+          })),
+        ),
       ]);
 
       const snapshot = await command<AppStateSnapshot>("app.state");
@@ -115,6 +136,8 @@ export class AppStateStore {
         cleanup: snapshot.cleanup,
         scanRunning: snapshot.scanRunning,
         settings: snapshot.settings,
+        volumes: snapshot.volumes ?? [],
+        quarantine: snapshot.quarantine ?? EMPTY_QUARANTINE,
         error: null,
       };
       for (const update of this.buffered) hydrated = update(hydrated);

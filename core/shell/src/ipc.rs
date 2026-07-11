@@ -197,12 +197,96 @@ pub async fn settings_set<R: Runtime>(
 
 use crate::events;
 
+/// Живе заповнення тому для блоку дисків Sidebar (T-106).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VolumeUsageInfo {
+    /// Літера тому з двокрапкою, напр. `"C:"`.
+    pub volume: String,
+    pub capacity_bytes: u64,
+    pub free_bytes: u64,
+}
+
+/// Заповнення всіх готових томів (том без носія пропускається).
+pub fn build_volume_usage() -> Vec<VolumeUsageInfo> {
+    trashradar_platform_win::list_drive_letters()
+        .into_iter()
+        .filter_map(|letter| {
+            trashradar_platform_win::volume_usage(letter)
+                .ok()
+                .flatten()
+                .map(|usage| VolumeUsageInfo {
+                    volume: usage.volume,
+                    capacity_bytes: usage.capacity_bytes,
+                    free_bytes: usage.free_bytes,
+                })
+        })
+        .collect()
+}
+
+/// Бейдж Quarantine у Sidebar (T-106): скільки зараз тримається в карантині.
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct QuarantineBadge {
+    pub held_count: u64,
+    pub held_bytes: u64,
+}
+
+/// Підсумок manifest-записів зі статусом `Quarantined` (T-078 → бейдж T-106).
+pub fn quarantine_badge(
+    manifest: &impl trashradar_app::ports::QuarantineManifest,
+) -> Result<QuarantineBadge, CoreError> {
+    let mut badge = QuarantineBadge::default();
+    for entry in manifest.list_entries()? {
+        if entry.status == trashradar_domain::quarantine::QuarantineStatus::Quarantined {
+            badge.held_count += 1;
+            badge.held_bytes = badge.held_bytes.saturating_add(entry.size.0);
+        }
+    }
+    Ok(badge)
+}
+
+/// Профіль даних для команд, що читають manifest (інжектується у main;
+/// тести підставляють temp-профіль замість реального `%LOCALAPPDATA%`).
+#[derive(Clone)]
+pub struct ProfileRuntime {
+    profile: Option<std::path::PathBuf>,
+}
+
+impl ProfileRuntime {
+    pub fn new(profile: Option<std::path::PathBuf>) -> Self {
+        Self { profile }
+    }
+}
+
+/// Бейдж з профільного manifest; недоступна БД → порожній бейдж (деградація,
+/// не збій snapshot — той самий принцип, що й health-проби T-089).
+fn read_profile_quarantine_badge(profile: Option<std::path::PathBuf>) -> QuarantineBadge {
+    let Some(profile) = profile else {
+        return QuarantineBadge::default();
+    };
+    match trashradar_index_sqlite::IndexDatabase::open_profile(profile) {
+        Ok(database) => quarantine_badge(&database).unwrap_or_else(|error| {
+            tracing::warn!(%error, "Бейдж Quarantine недоступний");
+            QuarantineBadge::default()
+        }),
+        Err(error) => {
+            tracing::warn!(%error, "Manifest для бейджа Quarantine не відкрився");
+            QuarantineBadge::default()
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppStateSnapshot {
     pub cleanup: events::CleanupTotalEvent,
     pub scan_running: bool,
     pub settings: AppSettings,
+    /// Живе заповнення томів для смужок дисків (T-106).
+    pub volumes: Vec<VolumeUsageInfo>,
+    /// Поточний вміст карантину для бейджа (T-106).
+    pub quarantine: QuarantineBadge,
 }
 
 /// Authoritative UI snapshot for webview reload (T-098). Read-only: never starts a scan.
@@ -210,6 +294,7 @@ pub struct AppStateSnapshot {
 pub async fn app_state(
     scan: tauri::State<'_, crate::scan_runtime::ScanRuntime>,
     settings: tauri::State<'_, SettingsRuntime>,
+    profile: tauri::State<'_, ProfileRuntime>,
 ) -> Result<AppStateSnapshot, CoreError> {
     record_command();
     let cleanup = {
@@ -219,10 +304,19 @@ pub async fn app_state(
             .map_err(|_| CoreError::internal("Live totals lock poisoned."))?;
         events::CleanupTotalEvent::from_summary(&totals.summary())
     };
+    // Дисковий I/O (SQLite manifest) — поза IPC-потоком (§14).
+    let manifest_profile = profile.profile.clone();
+    let quarantine = tauri::async_runtime::spawn_blocking(move || {
+        read_profile_quarantine_badge(manifest_profile)
+    })
+    .await
+    .map_err(|error| CoreError::internal(format!("Quarantine badge task failed: {error}")))?;
     Ok(AppStateSnapshot {
         cleanup,
         scan_running: scan.controller.is_running(),
         settings: settings.current(),
+        volumes: build_volume_usage(),
+        quarantine,
     })
 }
 
@@ -728,11 +822,22 @@ mod tests {
             .unwrap()
             .as_nanos();
         let profile = std::env::temp_dir().join(format!("trashradar-ipc-settings-{nonce}"));
+        test_app_in_profile(profile)
+    }
+
+    /// Як [`test_app`], але з відомим профілем — для тестів manifest (T-106).
+    fn test_app_in_profile(
+        profile: std::path::PathBuf,
+    ) -> (
+        tauri::App<tauri::test::MockRuntime>,
+        tauri::WebviewWindow<tauri::test::MockRuntime>,
+    ) {
         let cache = CacheRuntime::new(Some(profile.clone()));
         let app = mock_builder()
             .manage(crate::scan_runtime::ScanRuntime::new())
-            .manage(SettingsRuntime::new(Some(profile)))
+            .manage(SettingsRuntime::new(Some(profile.clone())))
             .manage(cache)
+            .manage(ProfileRuntime::new(Some(profile)))
             .invoke_handler(tauri::generate_handler![
                 app_health,
                 app_state,
@@ -951,6 +1056,104 @@ mod tests {
             .controller
             .is_running());
     }
+    fn quarantine_entry(
+        id: u64,
+        size: u64,
+        status: trashradar_domain::quarantine::QuarantineStatus,
+    ) -> trashradar_domain::quarantine::QuarantineEntry {
+        trashradar_domain::quarantine::QuarantineEntry {
+            id: trashradar_domain::quarantine::QuarantineEntryId(id),
+            batch_id: None,
+            original_path: format!("C:\\Users\\test\\file-{id}.bin"),
+            surrogate_name: format!("{id:016x}"),
+            size: trashradar_domain::candidate::ByteSize(size),
+            quarantined_at_unix: 1_700_000_000,
+            expires_at_unix: 1_700_000_000 + 86_400,
+            status,
+        }
+    }
+
+    /// T-106: бейдж рахує лише записи зі статусом Quarantined.
+    #[test]
+    fn quarantine_badge_counts_only_quarantined_entries() {
+        use trashradar_app::ports::QuarantineManifest;
+        use trashradar_domain::quarantine::QuarantineStatus;
+
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let profile = std::env::temp_dir().join(format!("trashradar-t106-badge-{nonce}"));
+        let database =
+            trashradar_index_sqlite::IndexDatabase::open_profile(&profile).expect("manifest db");
+        database
+            .insert_entry(&quarantine_entry(1, 100, QuarantineStatus::Quarantined))
+            .unwrap();
+        database
+            .insert_entry(&quarantine_entry(2, 250, QuarantineStatus::Quarantined))
+            .unwrap();
+        database
+            .insert_entry(&quarantine_entry(3, 999, QuarantineStatus::Purged))
+            .unwrap();
+        database
+            .insert_entry(&quarantine_entry(4, 777, QuarantineStatus::Restored))
+            .unwrap();
+
+        let badge = quarantine_badge(&database).expect("badge");
+        assert_eq!(
+            badge,
+            QuarantineBadge {
+                held_count: 2,
+                held_bytes: 350,
+            }
+        );
+        drop(database);
+        let _ = std::fs::remove_dir_all(profile);
+    }
+
+    /// T-106: snapshot містить живі томи (capacity/free) і бейдж карантину.
+    #[test]
+    fn app_state_includes_volume_usage_and_quarantine_badge() {
+        use trashradar_app::ports::QuarantineManifest;
+        use trashradar_domain::quarantine::QuarantineStatus;
+
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let profile = std::env::temp_dir().join(format!("trashradar-t106-state-{nonce}"));
+        {
+            let database = trashradar_index_sqlite::IndexDatabase::open_profile(&profile)
+                .expect("manifest db");
+            database
+                .insert_entry(&quarantine_entry(1, 4096, QuarantineStatus::Quarantined))
+                .unwrap();
+        }
+
+        let (_app, webview) = test_app_in_profile(profile.clone());
+        let response = get_ipc_response(&webview, request("app_state", json!({})))
+            .expect("app.state snapshot");
+        let snapshot = body_json(response);
+
+        assert_eq!(snapshot["quarantine"]["heldCount"], 1);
+        assert_eq!(snapshot["quarantine"]["heldBytes"], 4096);
+
+        let volumes = snapshot["volumes"].as_array().expect("volumes array");
+        assert!(
+            !volumes.is_empty(),
+            "на Windows очікуємо хоча б один готовий том"
+        );
+        for volume in volumes {
+            let label = volume["volume"].as_str().expect("volume label");
+            assert!(label.ends_with(':') && label.len() == 2, "label: {label}");
+            let capacity = volume["capacityBytes"].as_u64().expect("capacity");
+            let free = volume["freeBytes"].as_u64().expect("free");
+            assert!(capacity > 0, "capacity має бути > 0");
+            assert!(free <= capacity, "free ≤ capacity");
+        }
+        let _ = std::fs::remove_dir_all(profile);
+    }
+
     #[test]
     fn ping_roundtrips_ui_core_ui() {
         let (_app, webview) = test_app();

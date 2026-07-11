@@ -11,6 +11,7 @@ use trashradar_app::ports::ScanEnvironment;
 use trashradar_domain::{
     candidate::{ByteSize, FsTimestamp},
     error::CoreError,
+    forecast::VolumeUsage,
     quarantine::FileIdentity,
 };
 
@@ -201,6 +202,26 @@ pub fn is_ntfs_volume(volume: char) -> Result<bool, CoreError> {
     WinScanEnvironment.is_ntfs(volume)
 }
 
+/// Живе заповнення тому (capacity/free) для прогнозу T-056 і Sidebar T-106.
+///
+/// `Ok(None)` — том не готовий (порожній привід, немає носія): не помилка,
+/// UI просто не показує смужку для такого тому.
+pub fn volume_usage(volume: char) -> Result<Option<VolumeUsage>, CoreError> {
+    if !volume.is_ascii_alphabetic() {
+        return Err(CoreError::invalid_argument(format!(
+            "Некоректна літера тому «{volume}»."
+        )));
+    }
+    #[cfg(windows)]
+    {
+        windows::volume_usage(volume)
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(None)
+    }
+}
+
 /// Запит UAC elevation: перезапуск поточного exe з дієсловом `runas` (T-034).
 ///
 /// - `Ok(ElevationRelaunch::Started)` — новий elevated-процес запущено;
@@ -257,6 +278,12 @@ mod windows {
         ) -> i32;
         fn GetLogicalDrives() -> u32;
         fn GetDriveTypeW(root_path_name: *const u16) -> u32;
+        fn GetDiskFreeSpaceExW(
+            directory_name: *const u16,
+            free_bytes_available_to_caller: *mut u64,
+            total_number_of_bytes: *mut u64,
+            total_number_of_free_bytes: *mut u64,
+        ) -> i32;
         fn GetLastError() -> u32;
         fn GetFileAttributesW(file_name: *const u16) -> u32;
         fn SetFileAttributesW(file_name: *const u16, file_attributes: u32) -> i32;
@@ -448,6 +475,25 @@ mod windows {
         }
     }
 
+    /// GetDiskFreeSpaceExW: загальний обсяг і вільне місце тому (T-106).
+    pub fn volume_usage(volume: char) -> Result<Option<super::VolumeUsage>, CoreError> {
+        let root = wide_root(volume);
+        let mut available: u64 = 0;
+        let mut capacity: u64 = 0;
+        let mut free: u64 = 0;
+        let ok =
+            unsafe { GetDiskFreeSpaceExW(root.as_ptr(), &mut available, &mut capacity, &mut free) };
+        if ok == 0 {
+            // Том не готовий / немає носія — як у volume_file_system: не помилка.
+            return Ok(None);
+        }
+        Ok(Some(super::VolumeUsage::new(
+            format!("{}:", volume.to_ascii_uppercase()),
+            capacity,
+            free,
+        )))
+    }
+
     pub fn list_drive_letters() -> Vec<char> {
         let mask = unsafe { GetLogicalDrives() };
         let mut out = Vec::new();
@@ -582,6 +628,29 @@ mod windows {
         #[test]
         fn elevation_probe_does_not_panic() {
             let _ = is_process_elevated();
+        }
+
+        /// T-106: заповнення тому — реальні ненульові цифри, free ≤ capacity.
+        #[test]
+        fn system_drive_reports_usage() {
+            let drives = list_drive_letters();
+            let c = drives
+                .iter()
+                .copied()
+                .find(|&d| d == 'C')
+                .unwrap_or(drives[0]);
+            let usage = super::super::volume_usage(c)
+                .expect("usage probe")
+                .expect("готовий том має usage");
+            assert_eq!(usage.volume, format!("{c}:"));
+            assert!(usage.capacity_bytes > 0, "capacity має бути > 0");
+            assert!(usage.free_bytes <= usage.capacity_bytes);
+        }
+
+        #[test]
+        fn invalid_drive_usage_is_invalid_argument() {
+            let err = super::super::volume_usage('!').expect_err("bad drive");
+            assert_eq!(err.code, ErrorCode::InvalidArgument);
         }
 
         #[test]

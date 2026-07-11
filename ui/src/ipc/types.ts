@@ -364,10 +364,28 @@ export interface SettingsChangedEvent {
   scheduleGeneration: number;
 }
 
+/** Живе заповнення тому для блоку дисків Sidebar (T-106). */
+export interface VolumeUsageInfo {
+  /** Літера тому з двокрапкою, напр. "C:". */
+  volume: string;
+  capacityBytes: number;
+  freeBytes: number;
+}
+
+/** Бейдж Quarantine у Sidebar (T-106): скільки зараз тримається. */
+export interface QuarantineBadge {
+  heldCount: number;
+  heldBytes: number;
+}
+
 export interface AppStateSnapshot {
   cleanup: CleanupTotal;
   scanRunning: boolean;
   settings: AppSettings;
+  /** Живі томи для смужок дисків (T-106). */
+  volumes: VolumeUsageInfo[];
+  /** Поточний вміст карантину для бейджа (T-106). */
+  quarantine: QuarantineBadge;
 }
 export interface QuarantineChangedEvent {
   purgedCount: number;
