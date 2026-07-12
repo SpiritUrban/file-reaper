@@ -18,6 +18,13 @@
  * список автоматично (жодного зсуву позицій) — стрічка «+N нових знахідок ↓»
  * порівнює живий `itemCount` (T-055 cleanup.total_updated/category.updated)
  * з розміром уже завантаженого вікна; клік по стрічці — ручний `refetch()`.
+ * T-122: Ctrl+↑/↓ (AppLayout) перемикає категорію і шле сигнал сфокусувати
+ * першу плитку.
+ * T-123: стрілки рухають фокус по сітці (рядок = кількість колонок з
+ * `VirtualCandidateGrid.onColumnsChange`); Enter відкриває `DetailsPanel`
+ * на сфокусованому кандидаті; поки панель відкрита, та сама навігація
+ * стрілками оновлює її вміст (панель не «краде» фокус сітки — Esc
+ * обробляється в самій панелі через контекст хоткеїв "details").
  * Дублікати групами — T-126.
  */
 
@@ -29,6 +36,7 @@ import type { HotkeyActionEventDetail } from "@/hotkeys";
 import { useAppState } from "@/store/appState";
 import { categoryRule, categoryTitle } from "@/store/categories";
 import { useCategoryWindow } from "@/store/categoryWindow";
+import { detailsPanelStore } from "@/store/detailsPanel";
 import {
   CATEGORY_THRESHOLDS,
   effectiveThreshold,
@@ -158,6 +166,9 @@ export function CategoryScreen({ categoryId }: CategoryScreenProps) {
   const anchorRef = useRef<number | null>(null);
   const visibleRef = useRef<Candidate[]>(visible);
   visibleRef.current = visible;
+  // T-123: геометрія від VirtualCandidateGrid — потрібна лише для ↑/↓
+  // (рядок = стільки позицій, скільки колонок), ре-рендер тут зайвий.
+  const columnsRef = useRef(1);
 
   // Реактивність до selectionStore: будь-яка mark/unmark у будь-якій
   // категорії провокує ре-рендер, тож плитки завжди показують свіжий стан.
@@ -186,6 +197,24 @@ export function CategoryScreen({ categoryId }: CategoryScreenProps) {
     }
   };
 
+  // T-123: перемістити фокус на delta позицій (±1 = ліво/право, ±columns =
+  // верх/низ), затиснуто в межах видимого списку. Якщо панель деталей уже
+  // відкрита — одразу підмінити її вміст новою плиткою (навігація сіткою
+  // оновлює вміст, DoD T-123).
+  const moveFocus = (delta: number) => {
+    const list = visibleRef.current;
+    if (list.length === 0) return;
+    const currentIndex = list.findIndex((c) => c.id === focusedIdRef.current);
+    const nextIndex =
+      currentIndex === -1
+        ? 0
+        : Math.min(list.length - 1, Math.max(0, currentIndex + delta));
+    const next = list[nextIndex];
+    if (!next) return;
+    setFocusedId(next.id);
+    if (detailsPanelStore.isOpen()) detailsPanelStore.open(next);
+  };
+
   useEffect(() => {
     const onHotkey = (event: Event) => {
       if (!isActiveRef.current) return;
@@ -207,6 +236,20 @@ export function CategoryScreen({ categoryId }: CategoryScreenProps) {
         gridDensityStore.zoomOut();
       } else if (action === "zoom_in") {
         gridDensityStore.zoomIn();
+      } else if (action === "navigate_left") {
+        moveFocus(-1);
+      } else if (action === "navigate_right") {
+        moveFocus(1);
+      } else if (action === "navigate_up") {
+        moveFocus(-columnsRef.current);
+      } else if (action === "navigate_down") {
+        moveFocus(columnsRef.current);
+      } else if (action === "details") {
+        const focused = list.find((c) => c.id === focusedIdRef.current) ?? list[0];
+        if (focused) {
+          setFocusedId(focused.id);
+          detailsPanelStore.open(focused);
+        }
       }
     };
     window.addEventListener("trashradar:hotkey", onHotkey);
@@ -265,6 +308,9 @@ export function CategoryScreen({ categoryId }: CategoryScreenProps) {
           isMarked={(candidate) => selectionStore.isMarked(candidate.id)}
           onActivate={handleActivate}
           onFocusCandidate={(candidate) => setFocusedId(candidate.id)}
+          onColumnsChange={(columns) => {
+            columnsRef.current = columns;
+          }}
           emptyTitle={
             (hasFilters || hasSearch) && candidates.length > 0
               ? "Жодного збігу з фільтрами чи пошуком"

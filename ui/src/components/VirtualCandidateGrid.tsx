@@ -70,6 +70,8 @@ export interface VirtualCandidateGridProps {
   isMarked?: (candidate: Candidate) => boolean;
   onActivate?: (candidate: Candidate, event: React.MouseEvent) => void;
   onFocusCandidate?: (candidate: Candidate) => void;
+  /** Поточна кількість колонок геометрії (T-123: клавіатурна навігація ↑/↓). */
+  onColumnsChange?: (columns: number) => void;
   emptyTitle?: string;
 }
 
@@ -81,6 +83,7 @@ export function VirtualCandidateGrid({
   isMarked,
   onActivate,
   onFocusCandidate,
+  onColumnsChange,
   emptyTitle = "Немає кандидатів у цій категорії",
 }: VirtualCandidateGridProps) {
   const viewportRef = useRef<HTMLDivElement>(null);
@@ -127,6 +130,31 @@ export function VirtualCandidateGrid({
     [candidates.length, density, viewport],
   );
   const visible = candidates.slice(window.startIndex, window.endIndex);
+
+  // T-123: батько (CategoryScreen) рахує ↑/↓ від кількості колонок —
+  // геометрія віртуалізації живе тут, назовні віддаємо лише число.
+  useEffect(() => {
+    onColumnsChange?.(window.columns);
+  }, [window.columns, onColumnsChange]);
+
+  // T-123: клавіатурна навігація може перевести фокус за межі відрендереного
+  // вікна — підскролити так, щоб рядок фокусу лишався видимим.
+  useEffect(() => {
+    if (focusedId == null) return;
+    const element = viewportRef.current;
+    if (!element) return;
+    const index = candidates.findIndex((c) => c.id === focusedId);
+    if (index === -1) return;
+    const row = Math.floor(index / window.columns);
+    const rowTop = row * window.rowHeight;
+    const rowBottom = rowTop + window.rowHeight;
+    if (rowTop < element.scrollTop) {
+      element.scrollTop = rowTop;
+    } else if (rowBottom > element.scrollTop + element.clientHeight) {
+      element.scrollTop = rowBottom - element.clientHeight;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusedId, candidates, window.columns, window.rowHeight]);
 
   if (candidates.length === 0) {
     return <EmptyState title={emptyTitle} taskRef="category.window" />;

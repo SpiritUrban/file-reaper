@@ -7,6 +7,7 @@
 import { useEffect, useRef } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
+import { DetailsPanel } from "@/components/DetailsPanel";
 import { ToastViewport } from "@/components/ToastViewport";
 import { CategoryScreen } from "@/features/category/CategoryScreen";
 import { CleanupSummaryScreen } from "@/features/cleanup-summary/CleanupSummaryScreen";
@@ -175,6 +176,8 @@ export function AppLayout() {
           ) : null}
         </main>
       </div>
+      {/* Немодальна панель деталей (T-123): поруч із сіткою, не поверх неї. */}
+      <DetailsPanel />
       <ToastViewport />
     </div>
   );
