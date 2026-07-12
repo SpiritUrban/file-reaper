@@ -60,7 +60,7 @@
     "category.window": {
       "status": "implemented",
       "task": "T-115",
-      "$comment": "{categoryId} → Candidate[] (id,path,kind,unit,sizeBytes,lastAccessAt,decision,explanation,alsoIn); Keep приховано, сортовано за розміром спаданням; живить віртуалізовану сітку категорії. alsoIn заповнюється з T-121 (маркер перетину категорій) — усі категорії кандидата, крім запитаної; порожньо якщо файл лише в одній."
+      "$comment": "{categoryId} → Candidate[] (id,path,kind,unit,sizeBytes,lastAccessAt,createdAt,decision,explanation,alsoIn); Keep приховано, сортовано за розміром спаданням; живить віртуалізовану сітку категорії. alsoIn заповнюється з T-121 (маркер перетину категорій) — усі категорії кандидата, крім запитаної; порожньо якщо файл лише в одній. createdAt — null якщо Core не зміг прочитати дату створення (T-125)."
     },
     "category.set_threshold": {
       "status": "implemented",
@@ -76,6 +76,11 @@
       "status": "implemented",
       "task": "T-057",
       "$comment": "payload {candidateId?, path?, unkeep?:bool} → {updated, decision}; Keep hides file in every category; persists via index upsert"
+    },
+    "candidate.reveal_in_explorer": {
+      "status": "implemented",
+      "task": "T-125",
+      "$comment": "payload {candidateId:u64} → null; open Explorer with the file selected (explorer.exe /select,\"path\"); fire-and-forget, Err only if the candidate is unknown or the process failed to spawn"
     },
     "reap.execute": { "status": "planned", "task": "T-079" },
     "reap.undo_batch": { "status": "planned", "task": "T-081" },

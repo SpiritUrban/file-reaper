@@ -992,10 +992,28 @@ pub struct CandidateDto {
     pub unit: trashradar_domain::candidate::CandidateUnit,
     pub size_bytes: u64,
     pub last_access_at: String,
+    /// `null` — Core не зміг прочитати дату створення (напр. FAT-том без
+    /// цього поля) — панель деталей (T-125) просто не показує рядок.
+    pub created_at: Option<String>,
     pub decision: Decision,
     pub explanation: String,
     /// Інші категорії файла (маркер «також у: …», T-121).
     pub also_in: Vec<CategoryId>,
+}
+
+/// FILETIME (може бути `0`/відсутній) → ISO 8601 або `None`.
+fn optional_filetime_to_iso8601(
+    ticks: Option<trashradar_domain::candidate::FsTimestamp>,
+) -> Option<String> {
+    let ticks = ticks?.0;
+    if ticks == 0 {
+        return None;
+    }
+    let unix = trashradar_index_memory::filetime_to_unix_secs(ticks);
+    if unix == 0 {
+        return None;
+    }
+    Some(unix_secs_to_iso8601(unix))
 }
 
 fn file_record_to_candidate_dto(
@@ -1015,6 +1033,7 @@ fn file_record_to_candidate_dto(
         unit: record.unit,
         size_bytes: record.size.0,
         last_access_at: unix_secs_to_iso8601(last_access_unix),
+        created_at: optional_filetime_to_iso8601(record.created_at),
         decision: record.decision,
         explanation: record.explanation.clone(),
         also_in,
@@ -1156,6 +1175,7 @@ mod tests {
                 crate::scan_runtime::scan_stop,
                 crate::scan_runtime::candidate_keep,
                 crate::scan_runtime::candidate_mark,
+                crate::scan_runtime::candidate_reveal_in_explorer,
             ])
             .build(mock_context(noop_assets()))
             .expect("mock app");
@@ -1754,6 +1774,22 @@ mod tests {
         assert_eq!(unix_secs_to_iso8601(0), "1970-01-01T00:00:00Z");
     }
 
+    /// DoD T-125: дата створення в панелі деталей — `None`/`0` чесно
+    /// дають `None` (не фальшиве 1970-01-01), реальна дата конвертується.
+    #[test]
+    fn optional_filetime_to_iso8601_handles_absent_and_present() {
+        use trashradar_domain::candidate::FsTimestamp;
+        assert_eq!(optional_filetime_to_iso8601(None), None);
+        assert_eq!(optional_filetime_to_iso8601(Some(FsTimestamp(0))), None);
+        // Той самий FILETIME, що й у sample_file_record (accessed_at) — вже
+        // перевірений у category_window-тестах на реальну ISO-дату.
+        assert!(
+            optional_filetime_to_iso8601(Some(FsTimestamp(133_500_000_000_000_000)))
+                .unwrap()
+                .ends_with('Z')
+        );
+    }
+
     #[test]
     fn category_window_returns_full_candidates_sorted_desc_and_hides_keep() {
         let (app, webview) = test_app();
@@ -1801,6 +1837,11 @@ mod tests {
         assert_eq!(list[0]["unit"], "file");
         assert_eq!(list[0]["decision"], "undecided");
         assert!(list[0]["lastAccessAt"].as_str().unwrap().ends_with('Z'));
+        assert_eq!(
+            list[0]["createdAt"],
+            serde_json::Value::Null,
+            "sample_file_record не задає created_at — DTO чесно віддає null, не 1970-01-01"
+        );
         assert_eq!(list[0]["alsoIn"], json!([]));
     }
 
@@ -2070,5 +2111,23 @@ mod tests {
         assert_eq!(ack["status"], "sharp_scheduled_only");
         assert_eq!(ack["quality"], serde_json::Value::Null);
         assert_eq!(ack["dataUrl"], serde_json::Value::Null);
+    }
+
+    /// DoD T-125: невідомий кандидат — типізована відмова, не паніка.
+    /// Успішний шлях (реальний `explorer.exe /select,...`) свідомо НЕ
+    /// тестується тут — він і справді відкрив би вікно Провідника під час
+    /// `cargo test` (той самий принцип, що й T-034: реальний UAC-діалог не
+    /// викликається в CI, лише branch, що його не відкриває).
+    #[test]
+    fn candidate_reveal_in_explorer_rejects_unknown_candidate() {
+        let (_app, webview) = test_app();
+        let result = get_ipc_response(
+            &webview,
+            request(
+                "candidate_reveal_in_explorer",
+                json!({ "payload": { "candidateId": 999 } }),
+            ),
+        );
+        assert!(result.is_err());
     }
 }

@@ -677,6 +677,36 @@ pub async fn candidate_mark<R: Runtime>(
     })
 }
 
+/// Параметри `candidate.reveal_in_explorer`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RevealInExplorerPayload {
+    pub candidate_id: u64,
+}
+
+/// «Показати у провіднику» (T-125, docs/ui.md §6): відкрити Explorer із
+/// виділеним файлом кандидата. Той самий лукап за candidate_id, що й
+/// `preview.thumbnail`/`preview.large` (T-120/T-124) — жодного дублювання.
+#[tauri::command]
+pub fn candidate_reveal_in_explorer(
+    payload: RevealInExplorerPayload,
+    scan: State<'_, ScanRuntime>,
+) -> Result<(), CoreError> {
+    record_command();
+    let record = match crate::preview_runtime::find_record(&scan, payload.candidate_id) {
+        Ok(r) => r,
+        Err(e) => {
+            record_command_error();
+            return Err(e);
+        }
+    };
+    if let Err(e) = trashradar_platform_win::reveal_in_explorer(&record.path) {
+        record_command_error();
+        return Err(e);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

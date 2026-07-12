@@ -188,7 +188,9 @@ fn to_data_url(png_bytes: &[u8]) -> String {
     )
 }
 
-fn find_record(
+/// `pub(crate)` — перевикористовується `candidate.reveal_in_explorer` (T-125,
+/// `scan_runtime.rs`): той самий лукап за candidate_id, без дублювання.
+pub(crate) fn find_record(
     scan: &crate::scan_runtime::ScanRuntime,
     candidate_id: u64,
 ) -> Result<trashradar_domain::candidate::FileRecord, CoreError> {

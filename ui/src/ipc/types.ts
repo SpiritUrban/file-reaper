@@ -40,6 +40,8 @@ export interface Candidate {
   unit: "file" | "folder";
   sizeBytes: number;
   lastAccessAt: string; // ISO 8601
+  /** `null` — Core не зміг прочитати дату створення (T-125). */
+  createdAt: string | null; // ISO 8601 | null
   decision: Decision;
   /** Пояснення детектора: «відео 4.2 ГБ, останній доступ 8 міс тому». */
   explanation: string;
@@ -300,6 +302,7 @@ export type CommandName =
   | "category.all_candidates"
   | "candidate.mark"
   | "candidate.keep"
+  | "candidate.reveal_in_explorer"
   | "reap.execute"
   | "reap.undo_batch"
   | "quarantine.restore_batch"

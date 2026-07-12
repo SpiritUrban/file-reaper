@@ -257,6 +257,28 @@ pub enum ElevationRelaunch {
     AlreadyElevated,
 }
 
+/// «Показати у провіднику» (T-125): відкрити Explorer із виділеним файлом.
+/// Fire-and-forget за задумом виклику (spawn, не чекаємо завершення Explorer);
+/// `Err` — лише якщо сам процес не вдалося запустити (шлях не існує чи
+/// видалений — Explorer сам покаже свою помилку, ми цього не перевіряємо).
+pub fn reveal_in_explorer(path: &str) -> Result<(), CoreError> {
+    if path.is_empty() {
+        return Err(CoreError::invalid_argument("Порожній шлях до файла."));
+    }
+    #[cfg(windows)]
+    {
+        windows::reveal_in_explorer(path)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        Err(CoreError::new(
+            trashradar_domain::error::ErrorCode::NotImplemented,
+            "Показ у провіднику підтримується лише на Windows.",
+        ))
+    }
+}
+
 #[cfg(windows)]
 mod windows {
     use super::*;
@@ -591,6 +613,24 @@ mod windows {
             }
         }
         Ok(ElevationRelaunch::Started)
+    }
+
+    /// Відкрити Explorer з виділеним файлом (T-125): `explorer.exe /select,"path"`.
+    ///
+    /// `raw_arg` (не `.arg()`) навмисно: `/select,` і шлях мають прийти
+    /// Explorer-у як **один** аргумент командного рядка з лапками навколо
+    /// шляху — так Explorer коректно парсить пробіли в шляху. Звичайний
+    /// `.arg()` заекранував би вбудовані лапки й зламав парсинг.
+    pub fn reveal_in_explorer(path: &str) -> Result<(), CoreError> {
+        use std::os::windows::process::CommandExt;
+        // Explorer — GUI-підсистема, не консоль: CREATE_NO_WINDOW (як для
+        // ffmpeg sidecar, T-071) тут ні до чого, не додаємо.
+        let arg = format!("/select,\"{path}\"");
+        std::process::Command::new("explorer.exe")
+            .raw_arg(&arg)
+            .spawn()
+            .map(|_| ())
+            .map_err(|err| CoreError::io(err.to_string()))
     }
 
     #[cfg(test)]
