@@ -5,7 +5,7 @@
  */
 
 import { useEffect, useRef } from "react";
-import { useLocation } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 
 import { ToastViewport } from "@/components/ToastViewport";
 import { CategoryScreen } from "@/features/category/CategoryScreen";
@@ -13,11 +13,11 @@ import { CleanupSummaryScreen } from "@/features/cleanup-summary/CleanupSummaryS
 import { HealthScreen } from "@/features/health/HealthScreen";
 import { QuarantineScreen } from "@/features/quarantine/QuarantineScreen";
 import { SettingsScreen } from "@/features/settings/SettingsScreen";
-import { CATEGORIES, categoryTitle } from "@/store/categories";
+import { CATEGORIES, categoryRowsByWeight, categoryTitle } from "@/store/categories";
 import { useMarkedSummary } from "@/store/selection";
 import { useAppState } from "@/store/appState";
 import type { CategoryId } from "@/ipc/types";
-import { hotkeys } from "@/hotkeys";
+import { hotkeys, type HotkeyActionEventDetail } from "@/hotkeys";
 import { command } from "@/ipc/client";
 
 import { Sidebar } from "./Sidebar";
@@ -37,6 +37,7 @@ function screenClass(active: boolean): string {
 
 export function AppLayout() {
   const { pathname } = useLocation();
+  const navigate = useNavigate();
   const marked = useMarkedSummary();
   const appState = useAppState();
   const firstRunHandledRef = useRef(false);
@@ -69,6 +70,56 @@ export function AppLayout() {
       ...(isQuarantine ? (["quarantine"] as const) : []),
     ]);
   }, [activeCategory, isQuarantine]);
+
+  // T-122: Ctrl+↑/↓ — перемикання категорій за тим самим порядком ваги,
+  // що бачить користувач у Sidebar (T-105); "global" контекст — працює і
+  // з Cleanup Summary. Позначення (selectionStore, T-108) спільні на сесію
+  // й самі переживають навігацію; фокус на першій плитці — сигнал для
+  // CategoryScreen, що вже змонтований (T-099), а не новий рендер.
+  //
+  // Ref-и, не значення в deps: два Ctrl+↓ поспіль (швидкий auto-repeat)
+  // можуть дати другий keydown до того, як React встигне пере-рендерити
+  // AppLayout і перепідписати onHotkey зі свіжим activeCategory — застарілий
+  // closure тоді порахував би індекс від попередньої категорії. Ref завжди
+  // читає значення на момент самого keydown, не на момент підписки.
+  const activeCategoryRef = useRef(activeCategory);
+  activeCategoryRef.current = activeCategory;
+  const categoriesRef = useRef(appState.cleanup.categories);
+  categoriesRef.current = appState.cleanup.categories;
+
+  useEffect(() => {
+    const onHotkey = (event: Event) => {
+      const { action } = (event as CustomEvent<HotkeyActionEventDetail>).detail;
+      if (action !== "category_previous" && action !== "category_next") return;
+
+      const ids = categoryRowsByWeight(categoriesRef.current).map(
+        (row) => row.descriptor.id,
+      );
+      const current = activeCategoryRef.current;
+      const currentIndex = current ? ids.indexOf(current) : -1;
+      const delta = action === "category_next" ? 1 : -1;
+      const nextIndex =
+        currentIndex === -1
+          ? action === "category_next"
+            ? 0
+            : ids.length - 1
+          : (currentIndex + delta + ids.length) % ids.length;
+      const nextId = ids[nextIndex];
+      if (!nextId) return;
+
+      // Синхронно оновити ref: без цього другий keydown у тому самому тіку
+      // (перед ре-рендером) знову порахував би від тієї самої current.
+      activeCategoryRef.current = nextId;
+      navigate(`/category/${nextId}`);
+      window.dispatchEvent(
+        new CustomEvent("trashradar:focus-category-first", {
+          detail: { categoryId: nextId },
+        }),
+      );
+    };
+    window.addEventListener("trashradar:hotkey", onHotkey);
+    return () => window.removeEventListener("trashradar:hotkey", onHotkey);
+  }, [navigate]);
 
   const context = activeCategory
     ? categoryTitle(activeCategory)

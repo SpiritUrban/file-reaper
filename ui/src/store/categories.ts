@@ -4,7 +4,7 @@
  * (cleanup.total_updated, T-055) і сортують Sidebar за вагою.
  */
 
-import type { CategoryId } from "@/ipc/types";
+import type { CategoryId, CategorySummary } from "@/ipc/types";
 
 export interface CategoryDescriptor {
   id: CategoryId;
@@ -45,4 +45,31 @@ const CATEGORY_RULES: Record<CategoryId, string> = {
 
 export function categoryRule(id: CategoryId): string {
   return CATEGORY_RULES[id] ?? "";
+}
+
+export interface CategoryRow {
+  descriptor: CategoryDescriptor;
+  summary: CategorySummary | undefined;
+}
+
+/**
+ * Порядок Sidebar і Ctrl+↑/↓ (T-105/T-122): непорожні категорії за вагою
+ * (спадання байтів), порожні — у каталожному порядку в кінці. Сортування
+ * стабільне, тож рівні обсяги не «стрибають» між подіями скану — той самий
+ * порядок, що бачить користувач, а не окрема послідовність для клавіатури.
+ */
+export function categoryRowsByWeight(live: CategorySummary[]): CategoryRow[] {
+  const byId = new Map(live.map((summary) => [summary.id, summary]));
+  return CATEGORIES.map((descriptor, catalogIndex) => ({
+    descriptor,
+    summary: byId.get(descriptor.id),
+    catalogIndex,
+  }))
+    .sort((left, right) => {
+      const leftBytes = left.summary?.totalBytes ?? 0;
+      const rightBytes = right.summary?.totalBytes ?? 0;
+      if (leftBytes !== rightBytes) return rightBytes - leftBytes;
+      return left.catalogIndex - right.catalogIndex;
+    })
+    .map(({ descriptor, summary }) => ({ descriptor, summary }));
 }

@@ -213,6 +213,20 @@ export function CategoryScreen({ categoryId }: CategoryScreenProps) {
     return () => window.removeEventListener("trashradar:hotkey", onHotkey);
   }, []);
 
+  // T-122: Ctrl+↑/↓ (AppLayout) навігує сюди й одразу шле сигнал фокусу —
+  // перша плитка видимого списку стає ціллю Space/K без зайвого кліку.
+  useEffect(() => {
+    const onFocusFirst = (event: Event) => {
+      const detail = (event as CustomEvent<{ categoryId: CategoryId }>).detail;
+      if (detail.categoryId !== categoryId) return;
+      const first = visibleRef.current[0];
+      setFocusedId(first ? first.id : null);
+    };
+    window.addEventListener("trashradar:focus-category-first", onFocusFirst);
+    return () =>
+      window.removeEventListener("trashradar:focus-category-first", onFocusFirst);
+  }, [categoryId]);
+
   return (
     <div className="flex h-full flex-col">
       {/* Рядок детектора: пояснення правила + редаговані пороги (T-115) */}

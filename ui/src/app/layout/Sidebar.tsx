@@ -11,16 +11,12 @@ import { NavLink } from "react-router-dom";
 
 import { AnimatedBytes, AnimatedInteger } from "@/components/AnimatedCounter";
 import { Meter } from "@/components/Meter";
-import { CATEGORIES, type CategoryDescriptor } from "@/store/categories";
+import { categoryRowsByWeight } from "@/store/categories";
 import { toast } from "@/store/toasts";
 import { useAppState } from "@/store/appState";
 import { command, ipcErrorMessage } from "@/ipc/client";
 import type { HotkeyActionEventDetail } from "@/hotkeys";
-import type {
-  CategorySummary,
-  ScanStartAck,
-  VolumeUsageInfo,
-} from "@/ipc/types";
+import type { ScanStartAck, VolumeUsageInfo } from "@/ipc/types";
 
 const itemBase =
   "flex items-center gap-2 rounded px-2 py-1.5 text-sm hover:bg-panel-2";
@@ -30,32 +26,6 @@ const itemIdle = "text-ink-dim";
 const itemEmpty = "text-ink-faint";
 /** Диск «гарячий» — заповнення понад поріг підсвічує смужку heat-шкалою. */
 const DISK_HOT_FRACTION = 0.85;
-
-interface CategoryRow {
-  descriptor: CategoryDescriptor;
-  summary: CategorySummary | undefined;
-}
-
-/**
- * Порядок Sidebar: непорожні категорії за вагою (спадання байтів),
- * порожні — у каталожному порядку в кінці. Сортування стабільне,
- * тож рівні обсяги не «стрибають» між подіями скану.
- */
-function categoryRowsByWeight(live: CategorySummary[]): CategoryRow[] {
-  const byId = new Map(live.map((summary) => [summary.id, summary]));
-  return CATEGORIES.map((descriptor, catalogIndex) => ({
-    descriptor,
-    summary: byId.get(descriptor.id),
-    catalogIndex,
-  }))
-    .sort((left, right) => {
-      const leftBytes = left.summary?.totalBytes ?? 0;
-      const rightBytes = right.summary?.totalBytes ?? 0;
-      if (leftBytes !== rightBytes) return rightBytes - leftBytes;
-      return left.catalogIndex - right.catalogIndex;
-    })
-    .map(({ descriptor, summary }) => ({ descriptor, summary }));
-}
 
 function usedFraction(volume: VolumeUsageInfo): number | null {
   if (volume.capacityBytes <= 0) return null;
