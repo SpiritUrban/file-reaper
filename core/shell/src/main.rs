@@ -9,6 +9,7 @@
 mod events;
 mod ipc;
 mod logging;
+mod preview_runtime;
 mod scan_runtime;
 
 fn recover_quarantine_at_startup() {
@@ -53,12 +54,14 @@ fn main() {
     let settings = ipc::SettingsRuntime::new(logging::data_profile_dir());
     let cache = ipc::CacheRuntime::new(logging::data_profile_dir());
     let profile = ipc::ProfileRuntime::new(logging::data_profile_dir());
+    let preview = preview_runtime::PreviewRuntime::new(logging::data_profile_dir());
     let scan = scan_runtime::ScanRuntime::with_settings(settings.current());
     tauri::Builder::default()
         .manage(scan)
         .manage(settings)
         .manage(cache)
         .manage(profile)
+        .manage(preview)
         .invoke_handler(tauri::generate_handler![
             ipc::app_health,
             ipc::app_state,
@@ -74,6 +77,8 @@ fn main() {
             ipc::category_all_candidates,
             ipc::category_window,
             ipc::category_set_threshold,
+            preview_runtime::preview_thumbnail,
+            preview_runtime::preview_scrub_strip,
             scan_runtime::scan_start,
             scan_runtime::scan_stop,
             scan_runtime::candidate_keep,

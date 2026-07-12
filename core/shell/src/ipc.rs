@@ -1128,7 +1128,8 @@ mod tests {
             .manage(crate::scan_runtime::ScanRuntime::new())
             .manage(SettingsRuntime::new(Some(profile.clone())))
             .manage(cache)
-            .manage(ProfileRuntime::new(Some(profile)))
+            .manage(ProfileRuntime::new(Some(profile.clone())))
+            .manage(crate::preview_runtime::PreviewRuntime::new(Some(profile)))
             .invoke_handler(tauri::generate_handler![
                 app_health,
                 app_state,
@@ -1142,6 +1143,8 @@ mod tests {
                 category_all_candidates,
                 category_window,
                 category_set_threshold,
+                crate::preview_runtime::preview_thumbnail,
+                crate::preview_runtime::preview_scrub_strip,
                 crate::scan_runtime::scan_start,
                 crate::scan_runtime::scan_stop,
                 crate::scan_runtime::candidate_keep,
@@ -1854,5 +1857,104 @@ mod tests {
             result.is_err(),
             "temp_files не має редагованих порогів (реєстрова, не предикатна категорія)"
         );
+    }
+
+    /// DoD T-120: невідомий кандидат — типізована відмова, не паніка.
+    #[test]
+    fn preview_thumbnail_rejects_unknown_candidate() {
+        let (_app, webview) = test_app();
+        let result = get_ipc_response(
+            &webview,
+            request(
+                "preview_thumbnail",
+                json!({ "payload": { "candidateId": 999 } }),
+            ),
+        );
+        assert!(result.is_err());
+    }
+
+    /// Кандидат без валідного кешу (перший запит) → "scheduled", ack
+    /// повертається одразу — команда неблокуюча (architecture.md §1.2),
+    /// незалежно від того, встигне фонова генерація завершитись чи ні
+    /// (файл `C:\test\file-1.bin` у тесті не існує на диску).
+    #[test]
+    fn preview_thumbnail_schedules_generation_when_cache_miss() {
+        use tauri::Manager;
+        let (app, webview) = test_app();
+        app.state::<crate::scan_runtime::ScanRuntime>()
+            .index
+            .insert_batch(vec![sample_file_record(
+                1,
+                1024,
+                CategoryId::LargeFiles,
+                Decision::Undecided,
+            )])
+            .unwrap();
+
+        let response = get_ipc_response(
+            &webview,
+            request(
+                "preview_thumbnail",
+                json!({ "payload": { "candidateId": 1 } }),
+            ),
+        )
+        .expect("preview.thumbnail");
+        let ack = body_json(response);
+        assert_eq!(ack["status"], "scheduled");
+        assert_eq!(ack["dataUrl"], serde_json::Value::Null);
+    }
+
+    /// Папка-одиниця (T-053) — немає єдиного файла для мініатюри (DoD T-120).
+    #[test]
+    fn preview_thumbnail_unavailable_for_folder_unit() {
+        use tauri::Manager;
+        let (app, webview) = test_app();
+        let mut folder_record =
+            sample_file_record(2, 2048, CategoryId::DevArtifacts, Decision::Undecided);
+        folder_record.unit = trashradar_domain::candidate::CandidateUnit::Folder;
+        app.state::<crate::scan_runtime::ScanRuntime>()
+            .index
+            .insert_batch(vec![folder_record])
+            .unwrap();
+
+        let response = get_ipc_response(
+            &webview,
+            request(
+                "preview_thumbnail",
+                json!({ "payload": { "candidateId": 2 } }),
+            ),
+        )
+        .expect("preview.thumbnail");
+        let ack = body_json(response);
+        assert_eq!(ack["status"], "unavailable");
+    }
+
+    /// Скраб для файла-фантома (без ffmpeg/недоступного шляху) деградує до
+    /// порожньої смуги, а не помилки — UI лишається на статичній мініатюрі.
+    #[test]
+    fn preview_scrub_strip_degrades_to_empty_for_unavailable_video() {
+        use tauri::Manager;
+        let (app, webview) = test_app();
+        app.state::<crate::scan_runtime::ScanRuntime>()
+            .index
+            .insert_batch(vec![sample_file_record(
+                3,
+                4096,
+                CategoryId::ForgottenVideos,
+                Decision::Undecided,
+            )])
+            .unwrap();
+
+        let response = get_ipc_response(
+            &webview,
+            request(
+                "preview_scrub_strip",
+                json!({ "payload": { "candidateId": 3 } }),
+            ),
+        )
+        .expect("preview.scrub_strip");
+        let ack = body_json(response);
+        assert_eq!(ack["frameCount"], 0);
+        assert_eq!(ack["frames"], json!([]));
     }
 }

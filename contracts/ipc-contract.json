@@ -97,6 +97,16 @@
     },
     "cache.get_usage": { "status": "implemented", "task": "T-094", "$comment": "{} → {bytes,files}; only TrashRadar profile/cache" },
     "cache.clear": { "status": "implemented", "task": "T-094", "$comment": "{} → cleared {bytes,files}; preserves cache root" },
+    "preview.thumbnail": {
+      "status": "implemented",
+      "task": "T-120",
+      "$comment": "{candidateId, maxEdge?:16..1024=160} → {status: cached|scheduled|unavailable, dataUrl?}; cached — data:image/png;base64 synchronous; scheduled — P1 job, final delivery via preview.ready event keyed by path; unavailable — folder unit (no single file). First preview.* command — bridges Core pipeline T-067..T-076 to UI."
+    },
+    "preview.scrub_strip": {
+      "status": "implemented",
+      "task": "T-120",
+      "$comment": "{candidateId, maxEdge?:64..1920=480, frames?:2..20=16} → {frameCount, frames: data:image/png;base64[]} in timeline order; empty array = not a video / ffmpeg unavailable. Not disk-cached (raw scrub cache format from T-068 isn't self-describing for dims yet); UI client-side cache covers repeat hovers."
+    },
     "search.candidates": { "status": "planned", "task": "T-018" }
   },
   "events": {
@@ -140,7 +150,11 @@
       "task": "T-061",
       "$comment": "Duplicate cascade progress: {phase, confidence: preliminary|confirmed, refining, reclaimableBytes, groupCount, filesInGroups, cancelled}. After stage 2: preliminary+refining; after stage 3: confirmed, refining=false"
     },
-    "preview.ready": { "status": "planned", "task": "T-067" },
+    "preview.ready": {
+      "status": "implemented",
+      "task": "T-120",
+      "$comment": "{path, kind: \"thumbnail\", dataUrl} — delivers a background-generated tile thumbnail (P1 job) after preview.thumbnail returned status=scheduled; matched client-side by path"
+    },
     "quarantine.restored": {
       "status": "implemented",
       "task": "T-080",

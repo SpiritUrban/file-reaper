@@ -47,6 +47,21 @@ pub mod topic {
     #[allow(dead_code)] // lifecycle wiring starts with Quarantine screen T-131
     pub const QUARANTINE_ENTRY_EXPIRED: &str = "quarantine.entry_expired";
     pub const SETTINGS_CHANGED: &str = "settings.changed";
+    /// Мініатюра плитки готова після фонової P1-генерації (T-067/T-120).
+    pub const PREVIEW_READY: &str = "preview.ready";
+}
+
+/// Payload `preview.ready` (T-120): мініатюра, згенерована в фоні, готова
+/// до показу. `path` — ключ доставки (той самий, яким плитка запитувала
+/// `preview.thumbnail`); `dataUrl` — вже закодований PNG (base64).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewReadyEvent {
+    pub path: String,
+    /// Наразі завжди `"thumbnail"` — скраб-кадри (T-120) доставляються
+    /// синхронно відповіддю команди, не подією.
+    pub kind: String,
+    pub data_url: String,
 }
 
 /// Payload `index.updated` (T-032): дельта після USN-тика.

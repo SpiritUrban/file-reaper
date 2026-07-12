@@ -1,0 +1,334 @@
+//! Прев'ю-міст UI↔Core (T-120): перша IPC-поверхня над готовим Core-конвеєром
+//! превью (T-067…T-076 — `PreviewScheduler`, ланцюжок `ThumbnailSource`,
+//! `PngThumbnailEncoder`, ffmpeg-скраб). До цієї задачі жодна `preview.*`
+//! команда не існувала — плитки показували лише гліфи-заглушки.
+//!
+//! Дві команди:
+//! - `preview.thumbnail` — статична мініатюра плитки (T-100/T-111): кеш
+//!   (T-068) синхронно, інакше генерація P1-задачею + подія `preview.ready`;
+//! - `preview.scrub_strip` — скраб-смуга кадрів відео (T-072) на вимогу
+//!   (перший hover плитки, T-120); не кешується на диску в цій версії —
+//!   формат raw BGRA у `PreviewCacheManager` (T-068) не самоописовий за
+//!   розмірами кадру, а конвеєр читання його назад ще не спроєктовано
+//!   (той самий пробіл, що й у T-124 «велике превью зі скрабом», яке ще не
+//!   реалізовано); клієнтський кеш у `ui/src/store/preview.ts` покриває
+//!   DoD «без декодування на льоту» повторних скрабів у сесії.
+
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use base64::Engine;
+use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, Runtime};
+
+use trashradar_app::ports::{
+    PreviewCache, PreviewCacheEntry, PreviewKind, RawThumbnail, ThumbnailEncoder, ThumbnailSource,
+    VideoFrameSource, DEFAULT_SCRUB_FRAME_COUNT,
+};
+use trashradar_app::preview::{
+    encode_thumbnail, generate_from_chain, PreviewCacheManager, PreviewPriority, PreviewScheduler,
+};
+use trashradar_domain::candidate::{ByteSize, CandidateId, FsTimestamp};
+use trashradar_domain::error::CoreError;
+use trashradar_preview::{FfmpegVideoFrameSource, ImageThumbnailSource, PngThumbnailEncoder};
+
+use crate::events;
+use crate::ipc::record_command;
+
+/// Кеш превью-заглушка: профіль недоступний (тести / LOCALAPPDATA відсутня)
+/// → повна деградація без кешу, а не крах (той самий принцип, що й
+/// `read_profile_quarantine_badge` у `ipc.rs`).
+struct NullPreviewCache;
+
+impl PreviewCache for NullPreviewCache {
+    fn get_preview_entry(
+        &self,
+        _source_path: &str,
+        _kind: PreviewKind,
+    ) -> Result<Option<PreviewCacheEntry>, CoreError> {
+        Ok(None)
+    }
+
+    fn put_preview_entry(&self, _entry: &PreviewCacheEntry) -> Result<(), CoreError> {
+        Ok(())
+    }
+
+    fn delete_preview_entry(
+        &self,
+        _source_path: &str,
+        _kind: PreviewKind,
+    ) -> Result<(), CoreError> {
+        Ok(())
+    }
+
+    fn delete_all_previews_for_path(&self, _source_path: &str) -> Result<(), CoreError> {
+        Ok(())
+    }
+}
+
+/// Керований Tauri-стан прев'ю-конвеєра (кеш + черга + ланцюжок джерел).
+pub struct PreviewRuntime {
+    cache: Arc<PreviewCacheManager>,
+    scheduler: Arc<PreviewScheduler>,
+    chain: Vec<Arc<dyn ThumbnailSource>>,
+    encoder: Arc<dyn ThumbnailEncoder>,
+    video: Arc<FfmpegVideoFrameSource>,
+}
+
+impl PreviewRuntime {
+    pub fn new(profile: Option<PathBuf>) -> Self {
+        let cache_dir = profile
+            .as_ref()
+            .map(|path| path.join("cache").join("previews"))
+            .unwrap_or_else(|| std::env::temp_dir().join("trashradar-previews"));
+        let db: Arc<dyn PreviewCache> = match &profile {
+            Some(path) => match trashradar_index_sqlite::ThreadSafePreviewCache::open_profile(path)
+            {
+                Ok(db) => Arc::new(db),
+                Err(error) => {
+                    tracing::warn!(%error, "Preview cache DB недоступна — деградація без кешу");
+                    Arc::new(NullPreviewCache)
+                }
+            },
+            None => Arc::new(NullPreviewCache),
+        };
+        let video = Arc::new(FfmpegVideoFrameSource::new());
+        // Ланцюжок за спаданням швидкості (architecture.md §5.2): системний
+        // кеш мініатюр Windows → власне декодування зображень → ключовий
+        // кадр відео (VideoKeyFrameSource — той самий міст, що й T-073).
+        let chain: Vec<Arc<dyn ThumbnailSource>> = vec![
+            Arc::new(trashradar_preview::WindowsShellThumbnailSource::new()),
+            Arc::new(ImageThumbnailSource::new()),
+            Arc::new(trashradar_app::preview::VideoKeyFrameSource(
+                Arc::clone(&video) as Arc<dyn VideoFrameSource>,
+            )),
+        ];
+        Self {
+            cache: Arc::new(PreviewCacheManager::new(cache_dir, db)),
+            // 2 воркери: превью — фонове навантаження, не має конкурувати
+            // з IPC-потоком чи скан-воркерами (architecture.md §13).
+            scheduler: Arc::new(PreviewScheduler::new(2, 0.05)),
+            chain,
+            encoder: Arc::new(PngThumbnailEncoder::new()),
+            video,
+        }
+    }
+
+    /// Клон дескриптора кешу для перенесення у `spawn_blocking` (architecture.md §14:
+    /// будь-який дисковий I/O — асинхронний навіть для маленького файла кешу).
+    fn cache_handle(&self) -> Arc<PreviewCacheManager> {
+        Arc::clone(&self.cache)
+    }
+
+    /// Запланувати генерацію мініатюри P1-задачею; доставка — подія
+    /// `preview.ready` (T-067 черга, T-074 панік-бар'єр уже в
+    /// `generate_from_chain`/`encode_thumbnail`).
+    fn schedule_thumbnail<R: Runtime>(
+        &self,
+        app: AppHandle<R>,
+        path: String,
+        size: ByteSize,
+        modified_at: Option<FsTimestamp>,
+        max_edge: u32,
+    ) {
+        let cache = Arc::clone(&self.cache);
+        let chain = self.chain.clone();
+        let encoder = Arc::clone(&self.encoder);
+        self.scheduler
+            .submit(path.clone(), PreviewPriority::P1, move |token| {
+                if token.is_cancelled() {
+                    return;
+                }
+                let Some(raw) = generate_from_chain(&chain, &path, max_edge) else {
+                    return;
+                };
+                if token.is_cancelled() {
+                    return;
+                }
+                let Some(bytes) = encode_thumbnail(encoder.as_ref(), &raw) else {
+                    return;
+                };
+                if cache
+                    .save_preview(&path, PreviewKind::Thumbnail, size, modified_at, &bytes)
+                    .is_ok()
+                {
+                    events::emit(
+                        &app,
+                        events::topic::PREVIEW_READY,
+                        &events::PreviewReadyEvent {
+                            path: path.clone(),
+                            kind: "thumbnail".into(),
+                            data_url: to_data_url(&bytes),
+                        },
+                    );
+                }
+            });
+    }
+}
+
+fn to_data_url(png_bytes: &[u8]) -> String {
+    format!(
+        "data:image/png;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(png_bytes)
+    )
+}
+
+fn find_record(
+    scan: &crate::scan_runtime::ScanRuntime,
+    candidate_id: u64,
+) -> Result<trashradar_domain::candidate::FileRecord, CoreError> {
+    scan.index
+        .get_all()
+        .into_iter()
+        .find(|r| r.candidate_id == CandidateId(candidate_id))
+        .ok_or_else(|| CoreError::invalid_argument("Кандидата не знайдено в індексі."))
+}
+
+/// Параметри `preview.thumbnail`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewThumbnailPayload {
+    pub candidate_id: u64,
+    #[serde(default)]
+    pub max_edge: Option<u32>,
+}
+
+/// Відповідь `preview.thumbnail`: або готовий `dataUrl` з кешу, або
+/// підтвердження, що генерація заплановано — фінал прийде подією
+/// `preview.ready` (architecture.md §1.2, команда неблокуюча).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewThumbnailAck {
+    /// `"cached"` — `dataUrl` заповнено; `"scheduled"` — чекати `preview.ready`.
+    pub status: String,
+    pub data_url: Option<String>,
+}
+
+/// Статична мініатюра плитки (T-100/T-111 → T-120): кеш синхронно,
+/// інакше P1-генерація в фоні через ланцюжок джерел (architecture.md §5.2).
+#[tauri::command]
+pub async fn preview_thumbnail<R: Runtime>(
+    app: AppHandle<R>,
+    payload: PreviewThumbnailPayload,
+    scan: tauri::State<'_, crate::scan_runtime::ScanRuntime>,
+    preview: tauri::State<'_, PreviewRuntime>,
+) -> Result<PreviewThumbnailAck, CoreError> {
+    record_command();
+    let record = find_record(&scan, payload.candidate_id)?;
+    if record.unit != trashradar_domain::candidate::CandidateUnit::File {
+        // Папка-одиниця (T-053) — немає єдиного файла для мініатюри.
+        return Ok(PreviewThumbnailAck {
+            status: "unavailable".into(),
+            data_url: None,
+        });
+    }
+    let max_edge = payload.max_edge.unwrap_or(160).clamp(16, 1024);
+    let path = record.path.clone();
+    let size = record.size;
+    let modified_at = record.modified_at;
+
+    let cache = preview.cache_handle();
+    let lookup_path = path.clone();
+    let cached = tauri::async_runtime::spawn_blocking(move || {
+        let cached_path = cache.get_valid_preview_path(
+            &lookup_path,
+            PreviewKind::Thumbnail,
+            size,
+            modified_at,
+        )?;
+        std::fs::read(cached_path).ok()
+    })
+    .await
+    .map_err(|error| CoreError::internal(format!("Preview cache lookup task failed: {error}")))?;
+
+    if let Some(bytes) = cached {
+        return Ok(PreviewThumbnailAck {
+            status: "cached".into(),
+            data_url: Some(to_data_url(&bytes)),
+        });
+    }
+
+    preview.schedule_thumbnail(app, path, size, modified_at, max_edge);
+    Ok(PreviewThumbnailAck {
+        status: "scheduled".into(),
+        data_url: None,
+    })
+}
+
+/// Параметри `preview.scrub_strip`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewScrubStripPayload {
+    pub candidate_id: u64,
+    #[serde(default)]
+    pub max_edge: Option<u32>,
+    #[serde(default)]
+    pub frames: Option<u32>,
+}
+
+/// Відповідь `preview.scrub_strip`: кадри в порядку таймлайну; порожній
+/// масив — не відео/декодер недоступний (UI лишається на статичній мініатюрі).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewScrubStripAck {
+    pub frame_count: u32,
+    pub frames: Vec<String>,
+}
+
+/// Скраб-смуга кадрів відео на вимогу (T-072 → T-120: рух курсора = кадри).
+/// Один прохід ffmpeg (T-072 DoD); не в P0/P1-бюджеті §15 — запитується
+/// лише при першому наведенні на відео-плитку, клієнтський кеш (T-120 UI)
+/// покриває повторні наведення без повторного виклику.
+#[tauri::command]
+pub async fn preview_scrub_strip(
+    payload: PreviewScrubStripPayload,
+    scan: tauri::State<'_, crate::scan_runtime::ScanRuntime>,
+    preview: tauri::State<'_, PreviewRuntime>,
+) -> Result<PreviewScrubStripAck, CoreError> {
+    record_command();
+    let record = find_record(&scan, payload.candidate_id)?;
+    let max_edge = payload.max_edge.unwrap_or(480).clamp(64, 1920);
+    let frame_count = payload
+        .frames
+        .unwrap_or(DEFAULT_SCRUB_FRAME_COUNT)
+        .clamp(2, 20);
+
+    let video = Arc::clone(&preview.video);
+    let encoder = Arc::clone(&preview.encoder);
+    let path = record.path;
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let strip = video
+            .scrub_strip(&path, max_edge, frame_count)
+            .ok()
+            .flatten();
+        match strip {
+            None => PreviewScrubStripAck {
+                frame_count: 0,
+                frames: Vec::new(),
+            },
+            Some(strip) => {
+                let mut frames = Vec::with_capacity(strip.frame_count as usize);
+                for index in 0..strip.frame_count {
+                    let Some(slice) = strip.frame_slice(index) else {
+                        continue;
+                    };
+                    let raw = RawThumbnail {
+                        width: strip.frame_width,
+                        height: strip.frame_height,
+                        bgra: slice.to_vec(),
+                    };
+                    if let Ok(bytes) = encoder.encode(&raw) {
+                        frames.push(to_data_url(&bytes));
+                    }
+                }
+                PreviewScrubStripAck {
+                    frame_count: frames.len() as u32,
+                    frames,
+                }
+            }
+        }
+    })
+    .await
+    .map_err(|error| CoreError::internal(format!("Scrub strip task failed: {error}")))
+}

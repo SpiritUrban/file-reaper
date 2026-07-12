@@ -24,6 +24,11 @@ trashradar-scan-walk = { path = "../infra/scan-walk" }
 trashradar-quarantine-fs = { path = "../infra/quarantine-fs" }
 trashradar-index-sqlite = { path = "../infra/index-sqlite" }
 trashradar-settings-json = { path = "../infra/settings-json" }
+trashradar-preview = { path = "../infra/preview" }
+# base64: кодування превью-мініатюр у data URL для IPC (T-120). Вже в
+# дереві залежностей транзитивно через webview2-com — нової завантаженої
+# версії немає, лише прямий dependency на вже наявний крейт.
+base64 = "0.22"
 
 [dev-dependencies]
 # Mock-рантайм Tauri: наскрізні тести диспетчеризації команд без вікна.

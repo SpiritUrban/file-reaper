@@ -1,5 +1,8 @@
+import { useRef, useState } from "react";
+
 import type { Candidate, FileKind } from "@/ipc/types";
 import { formatBytes } from "@/store/format";
+import { loadScrubStrip, useThumbnail } from "@/store/preview";
 
 export type TileHeat = 1 | 2 | 3;
 
@@ -73,7 +76,7 @@ function heatClass(heat: TileHeat): string {
 
 export function CandidateTile({
   candidate,
-  preview,
+  preview: previewProp,
   heat = inferredHeat(candidate.sizeBytes),
   focused = false,
   marked: markedOverride,
@@ -90,6 +93,47 @@ export function CandidateTile({
       : "border-line hover:border-ink-dim";
   const focusClass = focused ? "ring-2 ring-accent/70" : "";
 
+  // T-120: коли батьківський компонент не передав preview явно (звичайний
+  // шлях сітки категорії), плитка сама запитує статичну мініатюру.
+  const fetchedThumbnail = useThumbnail(candidate);
+  const preview: CandidatePreview | undefined =
+    previewProp ?? (fetchedThumbnail ? { src: fetchedThumbnail } : undefined);
+
+  // T-120: скраб-смуга відео на вимогу — перше наведення тягне кадри,
+  // рух курсора по X лише індексує вже отриманий масив (без декодування
+  // на льоту, DoD T-072/T-120).
+  const isVideo = candidate.kind === "video";
+  const [scrubFrames, setScrubFrames] = useState<string[] | null>(null);
+  const [scrubIndex, setScrubIndex] = useState(0);
+  const scrubLoadingRef = useRef(false);
+
+  const handleMouseMove = (event: React.MouseEvent<HTMLButtonElement>) => {
+    if (!isVideo) return;
+    if (!scrubFrames) {
+      if (!scrubLoadingRef.current) {
+        scrubLoadingRef.current = true;
+        loadScrubStrip(candidate).then((frames) => {
+          scrubLoadingRef.current = false;
+          if (frames.length > 0) setScrubFrames(frames);
+        });
+      }
+      return;
+    }
+    const rect = event.currentTarget.getBoundingClientRect();
+    const ratio = Math.min(
+      0.999,
+      Math.max(0, (event.clientX - rect.left) / rect.width),
+    );
+    setScrubIndex(Math.floor(ratio * scrubFrames.length));
+  };
+
+  const handleMouseLeave = () => {
+    setScrubIndex(0);
+  };
+
+  const scrubbing = isVideo && scrubFrames !== null && scrubFrames.length > 0;
+  const displaySrc = scrubbing ? scrubFrames[scrubIndex] : preview?.src;
+
   return (
     <button
       type="button"
@@ -99,16 +143,19 @@ export function CandidateTile({
       data-decision={candidate.decision}
       data-marked={marked || undefined}
       data-focused={focused || undefined}
+      data-scrubbing={scrubbing || undefined}
       onClick={(event) => onActivate?.(candidate, event)}
       onFocus={() => onFocusCandidate?.(candidate)}
+      onMouseMove={handleMouseMove}
+      onMouseLeave={handleMouseLeave}
     >
       <span className={`absolute inset-x-0 top-0 z-30 h-1 ${heatClass(heat)}`} />
 
       <span className="absolute inset-0 flex items-center justify-center overflow-hidden bg-panel-2">
-        {preview ? (
+        {displaySrc ? (
           <img
-            src={preview.src}
-            alt={preview.alt ?? ""}
+            src={displaySrc}
+            alt={preview?.alt ?? ""}
             className="h-full w-full object-cover"
             draggable={false}
           />
@@ -127,7 +174,7 @@ export function CandidateTile({
         )}
       </span>
 
-      {candidate.kind === "video" && preview?.duration ? (
+      {isVideo && preview?.duration ? (
         <span className="absolute bottom-[17%] right-1.5 z-20 rounded bg-bg/80 px-1.5 py-0.5 font-mono text-xs text-ink">
           ▶ {preview.duration}
         </span>

@@ -308,11 +308,26 @@ export type CommandName =
   | "settings.set"
   | "cache.get_usage"
   | "cache.clear"
+  | "preview.thumbnail"
+  | "preview.scrub_strip"
   | "search.candidates";
 
 export interface CacheUsage {
   bytes: number;
   files: number;
+}
+
+/** Відповідь preview.thumbnail (T-120). */
+export interface PreviewThumbnailAck {
+  status: "cached" | "scheduled" | "unavailable";
+  /** `data:image/png;base64,…`; заповнено лише коли status="cached". */
+  dataUrl?: string | null;
+}
+
+/** Відповідь preview.scrub_strip (T-120): кадри в порядку таймлайну. */
+export interface PreviewScrubStripAck {
+  frameCount: number;
+  frames: string[];
 }
 
 /** Імена подій (contracts/ipc-contract.json → events). */
@@ -330,6 +345,13 @@ export type EventName =
   | "quarantine.changed"
   | "quarantine.entry_expired"
   | "settings.changed";
+
+/** Подія preview.ready (T-120): фонова мініатюра готова (P1-задача завершилась). */
+export interface PreviewReadyEvent {
+  path: string;
+  kind: "thumbnail";
+  dataUrl: string;
+}
 
 /** Подія scan.journal_stale (T-031): USN застарів → повний рескан. */
 export interface JournalStaleEvent {

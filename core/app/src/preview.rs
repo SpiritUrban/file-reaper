@@ -653,7 +653,11 @@ impl TwoStagePreviewer {
 
 /// Пройти ланцюжок джерел: перше `Some` виграє; `Ok(None)`, помилка
 /// та panic окремого джерела не зривають ланцюжок (T-074).
-fn generate_from_chain(
+///
+/// `pub`: перевикористовується прев'ю-мостом IPC (T-120, `core/shell`) для
+/// статичних мініатюр плиток — той самий ланцюжок і той самий панік-бар'єр,
+/// без дублювання логіки поза `TwoStagePreviewer`.
+pub fn generate_from_chain(
     sources: &[Arc<dyn ThumbnailSource>],
     path: &str,
     max_edge: u32,
@@ -667,7 +671,8 @@ fn generate_from_chain(
     None
 }
 
-fn encode_thumbnail(encoder: &dyn ThumbnailEncoder, raw: &RawThumbnail) -> Option<Vec<u8>> {
+/// `pub` — див. [`generate_from_chain`] (T-120 IPC-міст).
+pub fn encode_thumbnail(encoder: &dyn ThumbnailEncoder, raw: &RawThumbnail) -> Option<Vec<u8>> {
     match panic::catch_unwind(AssertUnwindSafe(|| encoder.encode(raw))) {
         Ok(Ok(bytes)) => Some(bytes),
         Ok(Err(_)) | Err(_) => None,
