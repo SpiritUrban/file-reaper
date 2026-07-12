@@ -60,7 +60,7 @@
     "category.window": {
       "status": "implemented",
       "task": "T-115",
-      "$comment": "{categoryId} → Candidate[] (id,path,kind,unit,sizeBytes,lastAccessAt,decision,explanation,alsoIn); Keep приховано, сортовано за розміром спаданням; живить віртуалізовану сітку категорії"
+      "$comment": "{categoryId} → Candidate[] (id,path,kind,unit,sizeBytes,lastAccessAt,decision,explanation,alsoIn); Keep приховано, сортовано за розміром спаданням; живить віртуалізовану сітку категорії. alsoIn заповнюється з T-121 (маркер перетину категорій) — усі категорії кандидата, крім запитаної; порожньо якщо файл лише в одній."
     },
     "category.set_threshold": {
       "status": "implemented",

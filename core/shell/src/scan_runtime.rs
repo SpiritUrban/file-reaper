@@ -3,6 +3,7 @@
 //! Бізнес-логіка сесії — `trashradar_app::scan_control`; тут лише
 //! Tauri State, фоновий потік і адаптери MFT/walk.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -10,7 +11,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Runtime, State};
 use trashradar_app::detectors::{
-    DetectorId, DetectorOrchestrator, DetectorRegistry, ThresholdValue,
+    DetectorHit, DetectorId, DetectorOrchestrator, DetectorRegistry, ThresholdValue,
 };
 use trashradar_app::ports::{HotIndex, ScanEnvironment};
 use trashradar_app::scan_control::{
@@ -22,7 +23,7 @@ use trashradar_app::{mvp_predicate_registry, DecisionSelector, LiveTotals};
 use trashradar_domain::candidate::{
     CandidateId, CandidateUnit, Decision, FileKind, FileRecord, SafetyLevel,
 };
-use trashradar_domain::category::CategoryId;
+use trashradar_domain::category::{CategoryId, CategoryMask};
 use trashradar_domain::error::{CoreError, ErrorCode};
 use trashradar_domain::scan::ScanStrategy;
 use trashradar_domain::settings::AppSettings;
@@ -39,6 +40,11 @@ pub struct ScanRuntime {
     pub index: Arc<InMemoryIndex>,
     /// Останній live-підсумок (T-055) — для health/діагностики.
     pub last_totals: Arc<Mutex<LiveTotals>>,
+    /// Усі категорії кожного кандидата (T-121: «також у: …»), а не лише
+    /// primary hit, що живе на `FileRecord.category`. Транзиентно — як і
+    /// `last_totals`, перебудовується при кожному скані/перерахунку порогів,
+    /// не персистується (той самий принцип, що й `CategoryId::Uncategorized`).
+    also_in: Arc<Mutex<HashMap<u64, CategoryMask>>>,
     settings: Arc<RwLock<AppSettings>>,
 }
 
@@ -52,6 +58,7 @@ impl ScanRuntime {
             controller: Arc::new(ScanController::new()),
             index: Arc::new(InMemoryIndex::new()),
             last_totals: Arc::new(Mutex::new(LiveTotals::new())),
+            also_in: Arc::new(Mutex::new(HashMap::new())),
             settings: Arc::new(RwLock::new(settings)),
         }
     }
@@ -62,10 +69,49 @@ impl ScanRuntime {
             .recalculate_index(self.index.as_ref(), &CancellationToken::new())?;
         *self.settings.write().expect("scan settings lock") = settings.clone();
         let records = self.index.get_all();
+
+        // T-121: перерахунок «також у» після зміни порогів — recalculate_index
+        // уже прогнав ці ж hits і відкинув усі, крім primary; друга легка
+        // вибірка (evaluate_record без запису в індекс) збирає повний набір
+        // категорій на кандидата.
+        {
+            let mut also_in = self.also_in.lock().expect("also_in lock");
+            also_in.clear();
+            for record in &records {
+                if record.decision == Decision::Keep {
+                    continue;
+                }
+                record_hits(&mut also_in, &registry.evaluate_record(record));
+            }
+        }
+
         let mut totals = self.last_totals.lock().expect("live totals lock");
         totals.clear();
         totals.ingest_primary(&records);
         Ok(stats.records_seen)
+    }
+
+    /// Категорії кандидата за винятком `primary` (маркер «також у: …», T-121).
+    pub fn also_in_categories(
+        &self,
+        candidate_id: CandidateId,
+        primary: CategoryId,
+    ) -> Vec<CategoryId> {
+        let also_in = self.also_in.lock().expect("also_in lock");
+        match also_in.get(&candidate_id.0) {
+            Some(mask) => mask.iter_excluding(primary).collect(),
+            None => Vec::new(),
+        }
+    }
+}
+
+/// Згорнути hits (T-121) у карту candidateId→CategoryMask.
+fn record_hits(also_in: &mut HashMap<u64, CategoryMask>, hits: &[DetectorHit]) {
+    for hit in hits {
+        also_in
+            .entry(hit.candidate_id.0)
+            .or_default()
+            .insert(hit.verdict.category);
     }
 }
 
@@ -382,15 +428,19 @@ pub async fn scan_start<R: Runtime>(
     let controller = Arc::clone(&state.controller);
     let index = Arc::clone(&state.index);
     let last_totals = Arc::clone(&state.last_totals);
+    let also_in = Arc::clone(&state.also_in);
     let settings = Arc::clone(&state.settings);
     let app2 = app.clone();
 
     if let Err(e) = thread::Builder::new()
         .name("trashradar-scan".into())
         .spawn(move || {
-            // Свіжий live-стан на старті сесії (T-055).
+            // Свіжий live-стан на старті сесії (T-055 / T-121).
             if let Ok(mut live) = last_totals.lock() {
                 live.clear();
+            }
+            if let Ok(mut also_in) = also_in.lock() {
+                also_in.clear();
             }
             let settings = settings.read().expect("scan settings lock").clone();
             let farm = match configured_registry(&settings) {
@@ -422,7 +472,12 @@ pub async fn scan_start<R: Runtime>(
                     if !cat.updated.is_empty() {
                         index.upsert_batch(cat.updated)?;
                     }
-                    // 3) live totals + throttled UI events (≤10/с)
+                    // 3) «також у» з тих самих hits (T-121) — жодного зайвого
+                    // прогону детекторів, лише запам'ятати повний набір категорій.
+                    if let Ok(mut also_in) = also_in.lock() {
+                        record_hits(&mut also_in, &cat.hits);
+                    }
+                    // 4) live totals + throttled UI events (≤10/с)
                     if let Ok(mut live) = last_totals.lock() {
                         live.ingest_hits(&cat.hits, &batch);
                         let summary = live.summary();

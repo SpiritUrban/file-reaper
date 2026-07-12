@@ -57,3 +57,74 @@ impl CategoryId {
         }
     }
 }
+
+/// Бітова маска категорій-детекторів (T-121: маркер перетину «також у: …»).
+/// Біт `i` = присутність `CategoryId::ALL[i]`; `Uncategorized` не кодується
+/// (не входить у [`CategoryId::ALL`]/[`CategoryId::mvp_index`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CategoryMask(pub u16);
+
+impl CategoryMask {
+    pub const EMPTY: CategoryMask = CategoryMask(0);
+
+    pub fn insert(&mut self, category: CategoryId) {
+        if let Some(index) = category.mvp_index() {
+            self.0 |= 1 << index;
+        }
+    }
+
+    pub fn contains(self, category: CategoryId) -> bool {
+        category
+            .mvp_index()
+            .is_some_and(|index| self.0 & (1 << index) != 0)
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// Категорії маски за винятком `exclude` (типово — власна категорія
+    /// плитки: «також у: …» не повторює поточну категорію).
+    pub fn iter_excluding(self, exclude: CategoryId) -> impl Iterator<Item = CategoryId> {
+        CategoryId::ALL
+            .into_iter()
+            .filter(move |category| *category != exclude && self.contains(*category))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn category_mask_insert_contains_roundtrip() {
+        let mut mask = CategoryMask::EMPTY;
+        assert!(mask.is_empty());
+        mask.insert(CategoryId::Duplicates);
+        mask.insert(CategoryId::OldFiles);
+        assert!(mask.contains(CategoryId::Duplicates));
+        assert!(mask.contains(CategoryId::OldFiles));
+        assert!(!mask.contains(CategoryId::LargeFiles));
+        assert!(!mask.is_empty());
+    }
+
+    #[test]
+    fn category_mask_iter_excluding_skips_primary() {
+        let mut mask = CategoryMask::EMPTY;
+        mask.insert(CategoryId::OldFiles);
+        mask.insert(CategoryId::Duplicates);
+        mask.insert(CategoryId::ForgottenVideos);
+        let others: Vec<_> = mask.iter_excluding(CategoryId::OldFiles).collect();
+        assert_eq!(
+            others,
+            vec![CategoryId::ForgottenVideos, CategoryId::Duplicates]
+        );
+    }
+
+    #[test]
+    fn category_mask_uncategorized_is_never_set() {
+        let mut mask = CategoryMask::EMPTY;
+        mask.insert(CategoryId::Uncategorized);
+        assert!(mask.is_empty(), "Uncategorized не кодується маскою");
+    }
+}

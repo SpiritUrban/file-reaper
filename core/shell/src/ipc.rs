@@ -994,11 +994,14 @@ pub struct CandidateDto {
     pub last_access_at: String,
     pub decision: Decision,
     pub explanation: String,
-    /// Інші категорії файла (маркер «також у: …») — T-121, поки завжди порожньо.
+    /// Інші категорії файла (маркер «також у: …», T-121).
     pub also_in: Vec<CategoryId>,
 }
 
-fn file_record_to_candidate_dto(record: &trashradar_domain::candidate::FileRecord) -> CandidateDto {
+fn file_record_to_candidate_dto(
+    record: &trashradar_domain::candidate::FileRecord,
+    also_in: Vec<CategoryId>,
+) -> CandidateDto {
     let last_access_ticks = record
         .accessed_at
         .or(record.modified_at)
@@ -1014,7 +1017,7 @@ fn file_record_to_candidate_dto(record: &trashradar_domain::candidate::FileRecor
         last_access_at: unix_secs_to_iso8601(last_access_unix),
         decision: record.decision,
         explanation: record.explanation.clone(),
-        also_in: Vec::new(),
+        also_in,
     }
 }
 
@@ -1037,7 +1040,10 @@ pub fn category_window(
 
     Ok(candidates_in_category(&scan, category_id)
         .iter()
-        .map(file_record_to_candidate_dto)
+        .map(|record| {
+            let also_in = scan.also_in_categories(record.candidate_id, category_id);
+            file_record_to_candidate_dto(record, also_in)
+        })
         .collect())
 }
 
@@ -1795,6 +1801,47 @@ mod tests {
         assert_eq!(list[0]["decision"], "undecided");
         assert!(list[0]["lastAccessAt"].as_str().unwrap().ends_with('Z'));
         assert_eq!(list[0]["alsoIn"], json!([]));
+    }
+
+    /// DoD T-121: файл, що заслуговує на кілька категорій, несе маркер
+    /// «також у: …» у кожній з них — окрім себе самої.
+    #[test]
+    fn category_window_includes_also_in_from_multi_hit_categories() {
+        use tauri::Manager;
+        let (app, webview) = test_app();
+        let scan = app.state::<crate::scan_runtime::ScanRuntime>();
+        // 200 МіБ + давній accessed_at (sample_file_record) задовольняє
+        // одразу large_files (≥100 МіБ) і old_files (≥365 дн) дефолтів.
+        scan.index
+            .insert_batch(vec![sample_file_record(
+                10,
+                200 * 1024 * 1024,
+                CategoryId::Uncategorized,
+                Decision::Undecided,
+            )])
+            .unwrap();
+        // apply_settings прогонить реєстр детекторів і побудує also_in (T-121),
+        // так само як реальний settings.set/scan.start.
+        scan.apply_settings(&AppSettings::default())
+            .expect("apply_settings");
+
+        let response = get_ipc_response(
+            &webview,
+            request(
+                "category_window",
+                json!({ "payload": { "categoryId": "large_files" } }),
+            ),
+        )
+        .expect("category.window");
+        let list = body_json(response);
+        let candidates = list.as_array().expect("масив кандидатів");
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0]["alsoIn"],
+            json!(["old_files"]),
+            "primary — large_files (перший у реєстрі); old_files лишається \
+             маркером перетину, файл живе лише в сітці своєї primary-категорії"
+        );
     }
 
     #[test]

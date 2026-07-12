@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
 
 import type { Candidate, FileKind } from "@/ipc/types";
+import { categoryTitle } from "@/store/categories";
 import { formatBytes } from "@/store/format";
 import { loadScrubStrip, useThumbnail } from "@/store/preview";
 
@@ -177,6 +178,16 @@ export function CandidateTile({
       {isVideo && preview?.duration ? (
         <span className="absolute bottom-[17%] right-1.5 z-20 rounded bg-bg/80 px-1.5 py-0.5 font-mono text-xs text-ink">
           ▶ {preview.duration}
+        </span>
+      ) : null}
+
+      {candidate.alsoIn[0] ? (
+        <span
+          className="absolute left-2 top-2 z-30 max-w-[75%] truncate rounded-full bg-bg/85 px-2 py-0.5 text-xs text-ink-dim backdrop-blur-sm"
+          title={`Також у: ${candidate.alsoIn.map(categoryTitle).join(", ")}`}
+        >
+          ⧉ також у: {categoryTitle(candidate.alsoIn[0])}
+          {candidate.alsoIn.length > 1 ? ` +${candidate.alsoIn.length - 1}` : ""}
         </span>
       ) : null}
 
