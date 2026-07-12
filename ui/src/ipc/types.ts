@@ -310,6 +310,7 @@ export type CommandName =
   | "cache.clear"
   | "preview.thumbnail"
   | "preview.scrub_strip"
+  | "preview.large"
   | "search.candidates";
 
 export interface CacheUsage {
@@ -330,6 +331,17 @@ export interface PreviewScrubStripAck {
   frames: string[];
 }
 
+/** Відповідь preview.large (T-124): усе, що доставлено синхронно (draft/sharp з кешу). */
+export interface PreviewLargeAck {
+  status:
+    | "sharp_from_cache"
+    | "draft_then_sharp_scheduled"
+    | "sharp_scheduled_only"
+    | "unavailable";
+  quality?: "draft" | "sharp" | null;
+  dataUrl?: string | null;
+}
+
 /** Імена подій (contracts/ipc-contract.json → events). */
 export type EventName =
   | "app.test"
@@ -346,10 +358,14 @@ export type EventName =
   | "quarantine.entry_expired"
   | "settings.changed";
 
-/** Подія preview.ready (T-120): фонова мініатюра готова (P1-задача завершилась). */
+/**
+ * Подія preview.ready: фонова генерація завершилась. `"thumbnail"` — T-120
+ * (P1-задача мініатюри плитки); `"large_sharp"` — T-124 (P0-задача великого
+ * превью панелі деталей, підміняє draft).
+ */
 export interface PreviewReadyEvent {
   path: string;
-  kind: "thumbnail";
+  kind: "thumbnail" | "large_sharp";
   dataUrl: string;
 }
 

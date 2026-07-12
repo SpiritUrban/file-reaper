@@ -3,19 +3,22 @@
 //! `PngThumbnailEncoder`, ffmpeg-скраб). До цієї задачі жодна `preview.*`
 //! команда не існувала — плитки показували лише гліфи-заглушки.
 //!
-//! Дві команди:
+//! Три команди:
 //! - `preview.thumbnail` — статична мініатюра плитки (T-100/T-111): кеш
 //!   (T-068) синхронно, інакше генерація P1-задачею + подія `preview.ready`;
 //! - `preview.scrub_strip` — скраб-смуга кадрів відео (T-072) на вимогу
 //!   (перший hover плитки, T-120); не кешується на диску в цій версії —
 //!   формат raw BGRA у `PreviewCacheManager` (T-068) не самоописовий за
-//!   розмірами кадру, а конвеєр читання його назад ще не спроєктовано
-//!   (той самий пробіл, що й у T-124 «велике превью зі скрабом», яке ще не
-//!   реалізовано); клієнтський кеш у `ui/src/store/preview.ts` покриває
-//!   DoD «без декодування на льоту» повторних скрабів у сесії.
+//!   розмірами кадру, а конвеєр читання його назад ще не спроєктовано;
+//!   клієнтський кеш у `ui/src/store/preview.ts` покриває DoD «без
+//!   декодування на льоту» повторних скрабів у сесії;
+//! - `preview.large` — велике превью панелі деталей (T-073 → T-124):
+//!   обгортка над уже готовим `TwoStagePreviewer` — Draft із дискового
+//!   кешу синхронно (<100 мс, DoD T-124), Sharp генерується P0-задачею у
+//!   фоні й доставляється тією самою подією `preview.ready`.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use base64::Engine;
 use serde::{Deserialize, Serialize};
@@ -26,9 +29,10 @@ use trashradar_app::ports::{
     VideoFrameSource, DEFAULT_SCRUB_FRAME_COUNT,
 };
 use trashradar_app::preview::{
-    encode_thumbnail, generate_from_chain, PreviewCacheManager, PreviewPriority, PreviewScheduler,
+    encode_thumbnail, generate_from_chain, PreviewCacheManager, PreviewDelivery, PreviewDeliveryFn,
+    PreviewPriority, PreviewQuality, PreviewScheduler, TwoStageOutcome, TwoStagePreviewer,
 };
-use trashradar_domain::candidate::{ByteSize, CandidateId, FsTimestamp};
+use trashradar_domain::candidate::{ByteSize, CandidateId, CandidateUnit, FsTimestamp};
 use trashradar_domain::error::CoreError;
 use trashradar_preview::{FfmpegVideoFrameSource, ImageThumbnailSource, PngThumbnailEncoder};
 
@@ -118,6 +122,17 @@ impl PreviewRuntime {
     /// будь-який дисковий I/O — асинхронний навіть для маленького файла кешу).
     fn cache_handle(&self) -> Arc<PreviewCacheManager> {
         Arc::clone(&self.cache)
+    }
+
+    /// Свіжий `TwoStagePreviewer` (T-073) над спільними кешем/чергою/ланцюжком
+    /// (T-124) — сам він не тримає стану, лише переносить наявні `Arc`.
+    fn two_stage_previewer(&self) -> TwoStagePreviewer {
+        TwoStagePreviewer::new(
+            Arc::clone(&self.cache),
+            Arc::clone(&self.scheduler),
+            self.chain.clone(),
+            Arc::clone(&self.encoder),
+        )
     }
 
     /// Запланувати генерацію мініатюри P1-задачею; доставка — подія
@@ -331,4 +346,114 @@ pub async fn preview_scrub_strip(
     })
     .await
     .map_err(|error| CoreError::internal(format!("Scrub strip task failed: {error}")))
+}
+
+/// Параметри `preview.large`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewLargePayload {
+    pub candidate_id: u64,
+    #[serde(default)]
+    pub max_edge: Option<u32>,
+}
+
+/// Відповідь `preview.large`: усе, що `TwoStagePreviewer` доставив
+/// **синхронно** в межах цього виклику (T-073 ступінь 1 — Draft з кешу,
+/// або вже готовий Sharp). Будь-яка пізніша доставка (P0-генерація Sharp
+/// у фоні) — подія `preview.ready` з `kind: "large_sharp"`.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewLargeAck {
+    /// `sharp_from_cache` | `draft_then_sharp_scheduled` | `sharp_scheduled_only` | `unavailable`.
+    pub status: String,
+    /// `"draft"` | `"sharp"` — якість `dataUrl`, якщо він є.
+    pub quality: Option<String>,
+    pub data_url: Option<String>,
+}
+
+fn two_stage_outcome_wire(outcome: TwoStageOutcome) -> &'static str {
+    match outcome {
+        TwoStageOutcome::SharpFromCache => "sharp_from_cache",
+        TwoStageOutcome::DraftThenSharpScheduled => "draft_then_sharp_scheduled",
+        TwoStageOutcome::SharpScheduledOnly => "sharp_scheduled_only",
+    }
+}
+
+/// Велике превью панелі деталей (T-124): Draft миттєво з кешу (<100 мс,
+/// architecture.md §5.3), Sharp — P0-задача у фоні з доставкою-підміною.
+#[tauri::command]
+pub async fn preview_large<R: Runtime>(
+    app: AppHandle<R>,
+    payload: PreviewLargePayload,
+    scan: tauri::State<'_, crate::scan_runtime::ScanRuntime>,
+    preview: tauri::State<'_, PreviewRuntime>,
+) -> Result<PreviewLargeAck, CoreError> {
+    record_command();
+    let record = find_record(&scan, payload.candidate_id)?;
+    if record.unit != CandidateUnit::File {
+        // Папка-одиниця (T-053) — немає єдиного файла для превью.
+        return Ok(PreviewLargeAck {
+            status: "unavailable".into(),
+            quality: None,
+            data_url: None,
+        });
+    }
+    let max_edge = payload.max_edge.unwrap_or(1024).clamp(64, 4096);
+    let path = record.path.clone();
+    let size = record.size;
+    let modified_at = record.modified_at;
+
+    // Синхронна доставка (Draft і/або вже готовий Sharp з кешу) повертається
+    // прямо у відповідь команди — жодного зайвого проходу через подію для
+    // того, що вже доступно зараз (DoD «<100 мс»). Перша доставка в межах
+    // виклику — сюди; будь-яка наступна (P0-генерація у фоні) — подією.
+    let sync_delivery: Arc<Mutex<Option<(&'static str, String)>>> = Arc::new(Mutex::new(None));
+    let sync_delivery_for_cb = Arc::clone(&sync_delivery);
+    let app_for_cb = app.clone();
+    let on_delivery: PreviewDeliveryFn = Arc::new(move |delivery: PreviewDelivery| {
+        let quality = match delivery.quality {
+            PreviewQuality::Draft => "draft",
+            PreviewQuality::Sharp => "sharp",
+        };
+        let Ok(bytes) = std::fs::read(&delivery.preview_path) else {
+            return;
+        };
+        let data_url = to_data_url(&bytes);
+        let mut guard = sync_delivery_for_cb.lock().expect("sync delivery lock");
+        if guard.is_none() {
+            *guard = Some((quality, data_url));
+        } else {
+            drop(guard);
+            events::emit(
+                &app_for_cb,
+                events::topic::PREVIEW_READY,
+                &events::PreviewReadyEvent {
+                    path: delivery.source_path.clone(),
+                    kind: format!("large_{quality}"),
+                    data_url,
+                },
+            );
+        }
+    });
+
+    let previewer = preview.two_stage_previewer();
+    let path_for_blocking = path.clone();
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
+        previewer.request_large_preview(
+            &path_for_blocking,
+            size,
+            modified_at,
+            max_edge,
+            on_delivery,
+        )
+    })
+    .await
+    .map_err(|error| CoreError::internal(format!("Large preview task failed: {error}")))??;
+
+    let sync = sync_delivery.lock().expect("sync delivery lock").take();
+    Ok(PreviewLargeAck {
+        status: two_stage_outcome_wire(outcome).into(),
+        quality: sync.as_ref().map(|(q, _)| (*q).to_string()),
+        data_url: sync.map(|(_, d)| d),
+    })
 }

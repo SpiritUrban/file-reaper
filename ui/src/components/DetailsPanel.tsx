@@ -1,13 +1,15 @@
 /**
- * Панель деталей (T-123, docs/ui.md §6): немодальна колонка праворуч —
+ * Панель деталей (T-123/T-124, docs/ui.md §6): немодальна колонка праворуч —
  * сітка лишається видимою й керованою (не рендериться поверх, а поруч,
  * у AppLayout). `Esc` закриває через контекст хоткеїв "details" (T-103):
  * реєстр уже мав дію `dismiss` на цей контекст, бракувало лише того, хто
  * його активує і хто на неї реагує.
  *
- * Вміст навмисно мінімальний: велике превью зі скрабом — T-124; блок
- * метаданих (дати створення/зміни) і дії [Позначити]/[Залишити]/[Папка] —
- * T-125. Тут лише те, що вже є в Candidate DTO (T-115/T-121).
+ * T-124: велике превью — `useLargePreview` (draft з кешу <100 мс, sharp
+ * підміняє його), для відео — той самий `useVideoScrub`, що й на плитці
+ * (T-120), лише більша площа наведення.
+ *
+ * Блок дат створення/зміни і дії [Позначити]/[Залишити]/[Папка] — T-125.
  */
 
 import { useEffect } from "react";
@@ -16,6 +18,7 @@ import { hotkeys, type HotkeyActionEventDetail } from "@/hotkeys";
 import { formatBytes } from "@/store/format";
 import { categoryTitle } from "@/store/categories";
 import { detailsPanelStore, useDetailsPanelCandidate } from "@/store/detailsPanel";
+import { useLargePreview, useVideoScrub } from "@/store/preview";
 
 function fileName(path: string): string {
   const normalized = path.replace(/\\/g, "/");
@@ -42,6 +45,12 @@ export function DetailsPanel() {
     return () => window.removeEventListener("trashradar:hotkey", onHotkey);
   }, []);
 
+  // T-124: draft/sharp великого превью і скраб — хуки викликаються завжди
+  // (правило hooks), самі толерантні до candidate === null.
+  const largeSrc = useLargePreview(candidate);
+  const { displaySrc, scrubbing, handleMouseMove, handleMouseLeave } =
+    useVideoScrub(candidate, largeSrc);
+
   if (!candidate) return null;
 
   return (
@@ -64,9 +73,24 @@ export function DetailsPanel() {
         </button>
       </div>
 
-      {/* Велике превью (для відео — скраб) — T-124 */}
-      <div className="flex aspect-[4/3] items-center justify-center border-b border-line bg-panel-2 text-ink-faint">
-        <span className="text-xs">превью — T-124</span>
+      {/* Велике превью — T-124: draft з кешу <100 мс, sharp підміняє;
+          для відео рух курсора по X скрабить уже отриману смугу кадрів. */}
+      <div
+        className="flex aspect-[4/3] items-center justify-center overflow-hidden border-b border-line bg-panel-2 text-ink-faint"
+        onMouseMove={handleMouseMove}
+        onMouseLeave={handleMouseLeave}
+        data-scrubbing={scrubbing || undefined}
+      >
+        {displaySrc ? (
+          <img
+            src={displaySrc}
+            alt={fileName(candidate.path)}
+            className="h-full w-full object-contain"
+            draggable={false}
+          />
+        ) : (
+          <span className="text-xs">завантаження превью…</span>
+        )}
       </div>
 
       <div className="flex flex-col gap-1.5 px-3 py-3">

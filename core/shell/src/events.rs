@@ -51,15 +51,16 @@ pub mod topic {
     pub const PREVIEW_READY: &str = "preview.ready";
 }
 
-/// Payload `preview.ready` (T-120): мініатюра, згенерована в фоні, готова
-/// до показу. `path` — ключ доставки (той самий, яким плитка запитувала
-/// `preview.thumbnail`); `dataUrl` — вже закодований PNG (base64).
+/// Payload `preview.ready` (T-120/T-124): превью, згенероване в фоні, готове
+/// до показу. `path` — ключ доставки (той самий, яким запитували
+/// `preview.thumbnail`/`preview.large`); `dataUrl` — вже закодований PNG
+/// (base64). `kind`: `"thumbnail"` (T-120) або `"large_sharp"` (T-124 —
+/// підміна Draft на різке після P0-генерації); скраб-кадри доставляються
+/// синхронно відповіддю команди, не подією.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PreviewReadyEvent {
     pub path: String,
-    /// Наразі завжди `"thumbnail"` — скраб-кадри (T-120) доставляються
-    /// синхронно відповіддю команди, не подією.
     pub kind: String,
     pub data_url: String,
 }

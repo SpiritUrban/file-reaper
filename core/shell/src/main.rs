@@ -79,6 +79,7 @@ fn main() {
             ipc::category_set_threshold,
             preview_runtime::preview_thumbnail,
             preview_runtime::preview_scrub_strip,
+            preview_runtime::preview_large,
             scan_runtime::scan_start,
             scan_runtime::scan_stop,
             scan_runtime::candidate_keep,

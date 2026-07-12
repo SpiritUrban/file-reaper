@@ -1,9 +1,7 @@
-import { useRef, useState } from "react";
-
 import type { Candidate, FileKind } from "@/ipc/types";
 import { categoryTitle } from "@/store/categories";
 import { formatBytes } from "@/store/format";
-import { loadScrubStrip, useThumbnail } from "@/store/preview";
+import { useThumbnail, useVideoScrub } from "@/store/preview";
 
 export type TileHeat = 1 | 2 | 3;
 
@@ -100,40 +98,11 @@ export function CandidateTile({
   const preview: CandidatePreview | undefined =
     previewProp ?? (fetchedThumbnail ? { src: fetchedThumbnail } : undefined);
 
-  // T-120: скраб-смуга відео на вимогу — перше наведення тягне кадри,
-  // рух курсора по X лише індексує вже отриманий масив (без декодування
-  // на льоту, DoD T-072/T-120).
+  // T-120/T-124: скраб-смуга відео на вимогу — спільний хук з великим
+  // превью панелі деталей (store/preview.ts), без дублювання логіки.
   const isVideo = candidate.kind === "video";
-  const [scrubFrames, setScrubFrames] = useState<string[] | null>(null);
-  const [scrubIndex, setScrubIndex] = useState(0);
-  const scrubLoadingRef = useRef(false);
-
-  const handleMouseMove = (event: React.MouseEvent<HTMLButtonElement>) => {
-    if (!isVideo) return;
-    if (!scrubFrames) {
-      if (!scrubLoadingRef.current) {
-        scrubLoadingRef.current = true;
-        loadScrubStrip(candidate).then((frames) => {
-          scrubLoadingRef.current = false;
-          if (frames.length > 0) setScrubFrames(frames);
-        });
-      }
-      return;
-    }
-    const rect = event.currentTarget.getBoundingClientRect();
-    const ratio = Math.min(
-      0.999,
-      Math.max(0, (event.clientX - rect.left) / rect.width),
-    );
-    setScrubIndex(Math.floor(ratio * scrubFrames.length));
-  };
-
-  const handleMouseLeave = () => {
-    setScrubIndex(0);
-  };
-
-  const scrubbing = isVideo && scrubFrames !== null && scrubFrames.length > 0;
-  const displaySrc = scrubbing ? scrubFrames[scrubIndex] : preview?.src;
+  const { displaySrc, scrubbing, handleMouseMove, handleMouseLeave } =
+    useVideoScrub(candidate, preview?.src);
 
   return (
     <button

@@ -1151,6 +1151,7 @@ mod tests {
                 category_set_threshold,
                 crate::preview_runtime::preview_thumbnail,
                 crate::preview_runtime::preview_scrub_strip,
+                crate::preview_runtime::preview_large,
                 crate::scan_runtime::scan_start,
                 crate::scan_runtime::scan_stop,
                 crate::scan_runtime::candidate_keep,
@@ -2003,5 +2004,71 @@ mod tests {
         let ack = body_json(response);
         assert_eq!(ack["frameCount"], 0);
         assert_eq!(ack["frames"], json!([]));
+    }
+
+    /// DoD T-124: невідомий кандидат — типізована відмова, не паніка.
+    #[test]
+    fn preview_large_rejects_unknown_candidate() {
+        let (_app, webview) = test_app();
+        let result = get_ipc_response(
+            &webview,
+            request(
+                "preview_large",
+                json!({ "payload": { "candidateId": 999 } }),
+            ),
+        );
+        assert!(result.is_err());
+    }
+
+    /// Папка-одиниця (T-053) — немає єдиного файла для превью.
+    #[test]
+    fn preview_large_unavailable_for_folder_unit() {
+        use tauri::Manager;
+        let (app, webview) = test_app();
+        let mut folder_record =
+            sample_file_record(4, 2048, CategoryId::DevArtifacts, Decision::Undecided);
+        folder_record.unit = trashradar_domain::candidate::CandidateUnit::Folder;
+        app.state::<crate::scan_runtime::ScanRuntime>()
+            .index
+            .insert_batch(vec![folder_record])
+            .unwrap();
+
+        let response = get_ipc_response(
+            &webview,
+            request("preview_large", json!({ "payload": { "candidateId": 4 } })),
+        )
+        .expect("preview.large");
+        let ack = body_json(response);
+        assert_eq!(ack["status"], "unavailable");
+        assert_eq!(ack["dataUrl"], serde_json::Value::Null);
+    }
+
+    /// Кандидат без валідного кешу (перший запит, файл `C:\test\...` не
+    /// існує на диску в тесті) → жодної синхронної доставки, лише фонову
+    /// P0-задачу заплановано — команда все одно повертається одразу
+    /// (architecture.md §1.2, неблокуюча).
+    #[test]
+    fn preview_large_schedules_when_no_cache_available() {
+        use tauri::Manager;
+        let (app, webview) = test_app();
+        app.state::<crate::scan_runtime::ScanRuntime>()
+            .index
+            .insert_batch(vec![sample_file_record(
+                5,
+                1024,
+                CategoryId::LargeFiles,
+                Decision::Undecided,
+            )])
+            .unwrap();
+
+        let response = get_ipc_response(
+            &webview,
+            request("preview_large", json!({ "payload": { "candidateId": 5 } })),
+        )
+        .expect("preview.large");
+        let ack = body_json(response);
+        assert_eq!(ack["status"], "sharp_scheduled_only");
+        assert_eq!(ack["quality"], serde_json::Value::Null);
+        assert_eq!(ack["dataUrl"], serde_json::Value::Null);
     }
 }
