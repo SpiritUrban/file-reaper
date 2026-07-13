@@ -11,8 +11,12 @@
  * (той самий каскад іде у фоні після скану, T-126) підхоплює й попередню
  * (preliminary), і згодом підтверджену (confirmed) розмітку.
  *
- * «Прийняти» на групу / «Прийняти всі дефолти» (T-127) і клік по копії, щоб
- * змінити ✓ (T-128), — окремі задачі; тут кнопок дії навмисно немає.
+ * T-127: «Прийняти» на групу / «Прийняти всі дефолти» — обидві пишуть у той
+ * самий сесійний `selectionStore` (T-108), що й Space/A в `CategoryScreen`
+ * (T-116): жодної нової логіки позначення, лише масовий виклик `markMultiple`
+ * на ╳-екземплярах групи (кандидат на видалення, T-065). Reap Bar (TopBar)
+ * уже підписаний на цей стор — оновлюється миттєво без додаткового коду.
+ * Клік по копії, щоб змінити ✓ (T-128), — окрема задача.
  */
 
 import { useCallback, useEffect, useState } from "react";
@@ -20,6 +24,7 @@ import { useCallback, useEffect, useState } from "react";
 import { CandidateTile } from "@/components/CandidateTile";
 import { command, ipcErrorMessage, subscribe } from "@/ipc/client";
 import { formatBytes } from "@/store/format";
+import { selectionStore, useMarkedSummary } from "@/store/selection";
 import type {
   Candidate,
   DuplicatesGroupsAck,
@@ -53,12 +58,51 @@ function memberToCandidate(member: MarkedDuplicateMember, sizeBytes: number): Ca
   };
 }
 
+/** ╳-екземпляри групи (кандидати на видалення) — те, що позначає «Прийняти». */
+function reapMembers(group: MarkedDuplicateGroup): MarkedDuplicateMember[] {
+  return group.members.filter((m) => !m.keep);
+}
+
+function acceptGroup(group: MarkedDuplicateGroup): void {
+  selectionStore.markMultiple(
+    reapMembers(group).map((m) => ({ id: m.candidateId, sizeBytes: group.size })),
+  );
+}
+
+/** «Прийняти всі дефолти» (ui.md §4): одним кліком по всіх групах екрана. */
+function acceptAllDefaults(groups: MarkedDuplicateGroup[]): void {
+  selectionStore.markMultiple(
+    groups.flatMap((g) => reapMembers(g).map((m) => ({ id: m.candidateId, sizeBytes: g.size }))),
+  );
+}
+
 function GroupRow({ group }: { group: MarkedDuplicateGroup }) {
+  // Реактивність до selectionStore (T-108): кнопка «Прийнято» одразу після
+  // прийняття — той самий механізм, що вже рухає Reap Bar і плитки сітки.
+  useMarkedSummary();
+  const reap = reapMembers(group);
+  const accepted = reap.length > 0 && reap.every((m) => selectionStore.isMarked(m.candidateId));
+
   return (
     <div className="flex flex-col gap-1.5">
-      <div className="text-xs text-ink-dim">
-        ГРУПА · {fileName(group.members[0]?.path ?? "")} · {group.members.length} копії ·{" "}
-        {formatBytes(group.size)} кожна
+      <div className="flex items-center gap-3 text-xs text-ink-dim">
+        <span>
+          ГРУПА · {fileName(group.members[0]?.path ?? "")} · {group.members.length} копії ·{" "}
+          {formatBytes(group.size)} кожна
+        </span>
+        <button
+          type="button"
+          disabled={accepted}
+          onClick={() => acceptGroup(group)}
+          title="Позначити всі ╳-копії цієї групи до видалення"
+          className={`ml-auto rounded px-2 py-0.5 text-xs font-medium transition-colors ${
+            accepted
+              ? "cursor-not-allowed border border-keep/30 text-keep/60"
+              : "border border-line text-ink-dim hover:bg-panel-2 hover:text-ink"
+          }`}
+        >
+          {accepted ? "Прийнято ✓" : "Прийняти ✓"}
+        </button>
       </div>
       <div className="flex flex-wrap gap-2">
         {group.members.map((member) => (
@@ -104,6 +148,12 @@ export function DuplicatesScreen() {
   const groups = ack?.groups ?? [];
   const state = ack?.state;
 
+  // Реактивність до selectionStore (T-108) — «Прийняти всі дефолти» показує
+  // «Прийнято» коли жодного ╳-екземпляра по всіх групах ще не лишилось.
+  useMarkedSummary();
+  const allReap = groups.flatMap(reapMembers);
+  const allAccepted = allReap.length > 0 && allReap.every((m) => selectionStore.isMarked(m.candidateId));
+
   return (
     <div className="flex h-full flex-col">
       <div className="flex h-8 shrink-0 items-center gap-3 border-b border-line px-3 text-xs text-ink-dim">
@@ -115,6 +165,21 @@ export function DuplicatesScreen() {
             · {groups.length} {groups.length === 1 ? "група" : "груп"} ·{" "}
             {formatBytes(state?.reclaimableBytes ?? 0)}
           </span>
+        ) : null}
+        {groups.length > 0 ? (
+          <button
+            type="button"
+            disabled={allAccepted}
+            onClick={() => acceptAllDefaults(groups)}
+            title="Позначити всі ╳-копії в усіх групах до видалення"
+            className={`ml-auto rounded px-2 py-0.5 text-xs font-medium transition-colors ${
+              allAccepted
+                ? "cursor-not-allowed border border-keep/30 text-keep/60"
+                : "border border-line text-ink-dim hover:bg-panel-2 hover:text-ink"
+            }`}
+          >
+            {allAccepted ? "Усі прийнято ✓" : "Прийняти всі дефолти"}
+          </button>
         ) : null}
       </div>
 
