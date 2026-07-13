@@ -26,6 +26,15 @@
  * candidateId, решта членів групи автоматично ╳ (немає стану «нуль ✓»).
  * Якщо новообраний ✓ уже був позначений на reap (`selectionStore`) — знімається
  * (файл, який лишаємо, не може лишитись у кошику на видалення).
+ *
+ * T-129: `state.refining` (T-061, true від кінця щабля 2 до кінця щабля 3)
+ * означає, що показані зараз `groups` — це ЩЕ ПОПЕРЕДНІЙ підтверджений набір
+ * (Core оновлює кешовані групи лише після повного BLAKE3, T-126); поки триває
+ * новий каскад, цифри можуть змінитись. Непідтверджений стан — амбер-банер
+ * («уточнюється») + приглушені групи (`opacity`), а «Прийняти всі дефолти»
+ * тимчасово недоступне (масова дія на дані, що от-от заміняться); окрема
+ * «Прийняти ✓» на вже показаній групі лишається доступною — це свідомий
+ * вибір користувача щодо конкретної групи, не масова дія.
  */
 
 import { useCallback, useEffect, useState } from "react";
@@ -174,6 +183,9 @@ export function DuplicatesScreen() {
 
   const groups = ack?.groups ?? [];
   const state = ack?.state;
+  // T-129: показані groups — ще попередній підтверджений набір, поки триває
+  // новий каскад (T-061 refining). Не плутати з "0 груп ще ніколи не було".
+  const refining = state?.refining ?? false;
 
   const effectiveKeepId = useCallback(
     (group: MarkedDuplicateGroup) => keepOverrides[group.contentHash] ?? group.keepId,
@@ -199,7 +211,6 @@ export function DuplicatesScreen() {
       <div className="flex h-8 shrink-0 items-center gap-3 border-b border-line px-3 text-xs text-ink-dim">
         <span>Детектор:</span>
         <span className="text-ink-faint">побайтово ідентичні файли (BLAKE3)</span>
-        {state?.refining ? <span className="text-ink-faint">· уточнюється…</span> : null}
         {groups.length > 0 ? (
           <span className="text-ink-faint">
             · {groups.length} {groups.length === 1 ? "група" : "груп"} ·{" "}
@@ -209,19 +220,33 @@ export function DuplicatesScreen() {
         {groups.length > 0 ? (
           <button
             type="button"
-            disabled={allAccepted}
+            disabled={allAccepted || refining}
             onClick={() => acceptAllDefaults(groups, effectiveKeepId)}
-            title="Позначити всі ╳-копії в усіх групах до видалення"
+            title={
+              refining
+                ? "Каскад ще уточнює групи — масова дія тимчасово недоступна"
+                : "Позначити всі ╳-копії в усіх групах до видалення"
+            }
             className={`ml-auto rounded px-2 py-0.5 text-xs font-medium transition-colors ${
               allAccepted
                 ? "cursor-not-allowed border border-keep/30 text-keep/60"
-                : "border border-line text-ink-dim hover:bg-panel-2 hover:text-ink"
+                : refining
+                  ? "cursor-not-allowed border border-quarantine/30 text-quarantine/60"
+                  : "border border-line text-ink-dim hover:bg-panel-2 hover:text-ink"
             }`}
           >
             {allAccepted ? "Усі прийнято ✓" : "Прийняти всі дефолти"}
           </button>
         ) : null}
       </div>
+
+      {/* T-129: непідтверджені групи візуально відрізняються — банер +
+          приглушення нижче, доки триває новий каскад (T-061 refining). */}
+      {refining ? (
+        <div className="border-b border-line bg-quarantine/10 px-3 py-1 text-xs text-quarantine">
+          Уточнюється: каскад ще перевіряє повним хешем — числа й групи нижче можуть змінитися.
+        </div>
+      ) : null}
 
       <div className="min-h-0 flex-1 overflow-y-auto p-3">
         {error ? (
@@ -233,7 +258,9 @@ export function DuplicatesScreen() {
               : "Сітка кандидатів: Дублікати"}
           </div>
         ) : (
-          <div className="flex flex-col gap-4">
+          <div
+            className={`flex flex-col gap-4 transition-opacity ${refining ? "opacity-60" : ""}`}
+          >
             {groups.map((group) => (
               <GroupRow
                 key={group.contentHash}
