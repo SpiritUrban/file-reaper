@@ -16,7 +16,16 @@
  * (T-116): жодної нової логіки позначення, лише масовий виклик `markMultiple`
  * на ╳-екземплярах групи (кандидат на видалення, T-065). Reap Bar (TopBar)
  * уже підписаний на цей стор — оновлюється миттєво без додаткового коду.
- * Клік по копії, щоб змінити ✓ (T-128), — окрема задача.
+ *
+ * T-128: клік по будь-якій плитці групи робить її ✓ (keep), решта — ╳; хто
+ * саме ✓ — клієнтський override `keepOverrides` (id контент-хешу → candidateId),
+ * піднятий на рівень екрана (не в `GroupRow`), бо header-кнопка «Прийняти всі
+ * дефолти» рахує ╳-набір по ВСІХ групах і мусить бачити ті самі overrides, що
+ * й кнопка окремої групи. Дефолт без overrides — `group.keepId` з Core (T-065).
+ * Інваріант «мінімум одна ✓ завжди» — структурний: `keepId` завжди рівно один
+ * candidateId, решта членів групи автоматично ╳ (немає стану «нуль ✓»).
+ * Якщо новообраний ✓ уже був позначений на reap (`selectionStore`) — знімається
+ * (файл, який лишаємо, не може лишитись у кошику на видалення).
  */
 
 import { useCallback, useEffect, useState } from "react";
@@ -41,9 +50,10 @@ function fileName(path: string): string {
  * Синтетичний `Candidate` для перевикористання `CandidateTile` без зміни
  * компонента: `decision="keep"` для ✓-екземпляра вмикає зелену позначку,
  * `marked` override для ╳-екземпляра — червону (той самий проп, що й T-116
- * дає сітці категорії локальне оптимістичне позначення).
+ * дає сітці категорії локальне оптимістичне позначення). `keepId` — ЕФЕКТИВНЕ
+ * ✓ (дефолт Core або клієнтський override, T-128), не голе `member.keep`.
  */
-function memberToCandidate(member: MarkedDuplicateMember, sizeBytes: number): Candidate {
+function memberToCandidate(member: MarkedDuplicateMember, sizeBytes: number, keepId: number): Candidate {
   return {
     id: member.candidateId,
     path: member.path,
@@ -52,35 +62,48 @@ function memberToCandidate(member: MarkedDuplicateMember, sizeBytes: number): Ca
     sizeBytes,
     lastAccessAt: "",
     createdAt: null,
-    decision: member.keep ? "keep" : "undecided",
+    decision: member.candidateId === keepId ? "keep" : "undecided",
     explanation: "",
     alsoIn: [],
   };
 }
 
-/** ╳-екземпляри групи (кандидати на видалення) — те, що позначає «Прийняти». */
-function reapMembers(group: MarkedDuplicateGroup): MarkedDuplicateMember[] {
-  return group.members.filter((m) => !m.keep);
+/** ╳-екземпляри групи за ЕФЕКТИВНИМ keepId (Core-дефолт або T-128 override). */
+function reapMembers(group: MarkedDuplicateGroup, keepId: number): MarkedDuplicateMember[] {
+  return group.members.filter((m) => m.candidateId !== keepId);
 }
 
-function acceptGroup(group: MarkedDuplicateGroup): void {
+function acceptGroup(group: MarkedDuplicateGroup, keepId: number): void {
   selectionStore.markMultiple(
-    reapMembers(group).map((m) => ({ id: m.candidateId, sizeBytes: group.size })),
+    reapMembers(group, keepId).map((m) => ({ id: m.candidateId, sizeBytes: group.size })),
   );
 }
 
 /** «Прийняти всі дефолти» (ui.md §4): одним кліком по всіх групах екрана. */
-function acceptAllDefaults(groups: MarkedDuplicateGroup[]): void {
+function acceptAllDefaults(
+  groups: MarkedDuplicateGroup[],
+  keepIdFor: (group: MarkedDuplicateGroup) => number,
+): void {
   selectionStore.markMultiple(
-    groups.flatMap((g) => reapMembers(g).map((m) => ({ id: m.candidateId, sizeBytes: g.size }))),
+    groups.flatMap((g) =>
+      reapMembers(g, keepIdFor(g)).map((m) => ({ id: m.candidateId, sizeBytes: g.size })),
+    ),
   );
 }
 
-function GroupRow({ group }: { group: MarkedDuplicateGroup }) {
+function GroupRow({
+  group,
+  keepId,
+  onSelectKeep,
+}: {
+  group: MarkedDuplicateGroup;
+  keepId: number;
+  onSelectKeep: (candidateId: number) => void;
+}) {
   // Реактивність до selectionStore (T-108): кнопка «Прийнято» одразу після
   // прийняття — той самий механізм, що вже рухає Reap Bar і плитки сітки.
   useMarkedSummary();
-  const reap = reapMembers(group);
+  const reap = reapMembers(group, keepId);
   const accepted = reap.length > 0 && reap.every((m) => selectionStore.isMarked(m.candidateId));
 
   return (
@@ -93,7 +116,7 @@ function GroupRow({ group }: { group: MarkedDuplicateGroup }) {
         <button
           type="button"
           disabled={accepted}
-          onClick={() => acceptGroup(group)}
+          onClick={() => acceptGroup(group, keepId)}
           title="Позначити всі ╳-копії цієї групи до видалення"
           className={`ml-auto rounded px-2 py-0.5 text-xs font-medium transition-colors ${
             accepted
@@ -108,8 +131,9 @@ function GroupRow({ group }: { group: MarkedDuplicateGroup }) {
         {group.members.map((member) => (
           <div key={member.candidateId} className="w-40" title={member.path}>
             <CandidateTile
-              candidate={memberToCandidate(member, group.size)}
-              marked={!member.keep}
+              candidate={memberToCandidate(member, group.size, keepId)}
+              marked={member.candidateId !== keepId}
+              onActivate={() => onSelectKeep(member.candidateId)}
             />
           </div>
         ))}
@@ -121,6 +145,9 @@ function GroupRow({ group }: { group: MarkedDuplicateGroup }) {
 export function DuplicatesScreen() {
   const [ack, setAck] = useState<DuplicatesGroupsAck | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // T-128: contentHash → обраний ✓ candidateId; піднято на рівень екрана, бо
+  // header-кнопка «Прийняти всі дефолти» рахує ╳-набір по всіх групах разом.
+  const [keepOverrides, setKeepOverrides] = useState<Record<string, number>>({});
 
   const load = useCallback(() => {
     command<DuplicatesGroupsAck>("duplicates.groups")
@@ -148,10 +175,23 @@ export function DuplicatesScreen() {
   const groups = ack?.groups ?? [];
   const state = ack?.state;
 
+  const effectiveKeepId = useCallback(
+    (group: MarkedDuplicateGroup) => keepOverrides[group.contentHash] ?? group.keepId,
+    [keepOverrides],
+  );
+
+  // T-128: клік по копії → вона стає ✓. Якщо новообраний ✓ уже був у кошику
+  // на видалення (selectionStore) — знімаємо: файл, який лишаємо, не може
+  // лишитись позначеним на reap.
+  const selectKeep = useCallback((group: MarkedDuplicateGroup, candidateId: number) => {
+    setKeepOverrides((prev) => ({ ...prev, [group.contentHash]: candidateId }));
+    if (selectionStore.isMarked(candidateId)) selectionStore.unmark(candidateId);
+  }, []);
+
   // Реактивність до selectionStore (T-108) — «Прийняти всі дефолти» показує
   // «Прийнято» коли жодного ╳-екземпляра по всіх групах ще не лишилось.
   useMarkedSummary();
-  const allReap = groups.flatMap(reapMembers);
+  const allReap = groups.flatMap((g) => reapMembers(g, effectiveKeepId(g)));
   const allAccepted = allReap.length > 0 && allReap.every((m) => selectionStore.isMarked(m.candidateId));
 
   return (
@@ -170,7 +210,7 @@ export function DuplicatesScreen() {
           <button
             type="button"
             disabled={allAccepted}
-            onClick={() => acceptAllDefaults(groups)}
+            onClick={() => acceptAllDefaults(groups, effectiveKeepId)}
             title="Позначити всі ╳-копії в усіх групах до видалення"
             className={`ml-auto rounded px-2 py-0.5 text-xs font-medium transition-colors ${
               allAccepted
@@ -195,7 +235,12 @@ export function DuplicatesScreen() {
         ) : (
           <div className="flex flex-col gap-4">
             {groups.map((group) => (
-              <GroupRow key={group.contentHash} group={group} />
+              <GroupRow
+                key={group.contentHash}
+                group={group}
+                keepId={effectiveKeepId(group)}
+                onSelectKeep={(candidateId) => selectKeep(group, candidateId)}
+              />
             ))}
           </div>
         )}
