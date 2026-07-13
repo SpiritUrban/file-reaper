@@ -367,8 +367,8 @@ fn quarantine_entry_to_dto(
 
 /// Вміст журналу карантину (T-130): лише статус `Quarantined` (той самий
 /// фільтр, що й бейдж T-106) — не покинуто in_flight/restored/purged.
-/// Сортовано за найближчим автознищенням (wireframe ui.md §7); повне
-/// сортування за розміром/шляхом/датою — T-131.
+/// Сортовано за найближчим автознищенням (wireframe ui.md §7) як дефолт;
+/// решта критеріїв (розмір/шлях/дата) — клієнтський пікер, T-131.
 fn read_profile_quarantine_entries(profile: Option<std::path::PathBuf>) -> Vec<QuarantineEntryDto> {
     use trashradar_app::ports::QuarantineManifest;
     let Some(database) = open_profile_manifest(profile) else {
@@ -397,17 +397,135 @@ pub async fn quarantine_window(
 
 /// Один запис за id (T-130: `preview_runtime::quarantine_thumbnail` резолвить
 /// сурогатний шлях перед генерацією мініатюри) — не фільтрує за статусом,
-/// на відміну від `read_profile_quarantine_entries` (список екрана).
+/// на відміну від `read_profile_quarantine_entries` (список екрана). Відкриває
+/// manifest на кожен виклик; батч (T-132 `restore_profile_quarantine_entries`)
+/// відкриває один раз і реюзає `find_quarantine_entry_in`.
 pub(crate) fn find_quarantine_entry(
     profile: Option<std::path::PathBuf>,
     entry_id: u64,
 ) -> Result<trashradar_domain::quarantine::QuarantineEntry, CoreError> {
-    use trashradar_app::ports::QuarantineManifest;
     let database = open_profile_manifest(profile)
         .ok_or_else(|| CoreError::invalid_argument("Профіль Quarantine недоступний."))?;
+    find_quarantine_entry_in(&database, entry_id)
+}
+
+/// Параметри `quarantine.restore_batch` (T-132: клавіша R/кнопка шле один
+/// entryId; масовий undo батчу — T-081, той самий use case).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QuarantineRestoreBatchPayload {
+    pub entry_ids: Vec<u64>,
+}
+
+/// Дзеркало `RestoreOutcome` (T-080) для UI: тост «Відновлено у … [Показати]».
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuarantineRestoredDto {
+    pub entry_id: u64,
+    pub original_path: String,
+    pub restored_path: String,
+    pub used_suffix: bool,
+}
+
+/// `quarantine.restore_batch` (T-132): відновити один чи кілька записів на
+/// оригінальний шлях. Use case (`QuarantineRestorer`, T-080) вже вміє все —
+/// FS-move + manifest→Restored + аудит; тут лише резолв сурогатного шляху
+/// (той самий примітив, що й `quarantine.thumbnail`, T-130) і подія-міст.
+#[tauri::command]
+pub async fn quarantine_restore_batch<R: Runtime>(
+    app: AppHandle<R>,
+    payload: QuarantineRestoreBatchPayload,
+    profile: tauri::State<'_, ProfileRuntime>,
+) -> Result<Vec<QuarantineRestoredDto>, CoreError> {
+    record_command();
+    if payload.entry_ids.is_empty() {
+        record_command_error();
+        return Err(CoreError::invalid_argument("Список entryIds порожній."));
+    }
+    let profile_dir = profile.profile_dir();
+    let entry_ids = payload.entry_ids.clone();
+    let outcomes = tauri::async_runtime::spawn_blocking(move || {
+        restore_profile_quarantine_entries(profile_dir, &entry_ids)
+    })
+    .await
+    .map_err(|error| CoreError::internal(format!("Quarantine restore task failed: {error}")))?;
+    let outcomes = match outcomes {
+        Ok(outcomes) => outcomes,
+        Err(error) => {
+            record_command_error();
+            return Err(error);
+        }
+    };
+
+    let mut dtos = Vec::with_capacity(outcomes.len());
+    for outcome in &outcomes {
+        events::emit_quarantine_restored(&app, outcome);
+        dtos.push(QuarantineRestoredDto {
+            entry_id: outcome.entry.id.0,
+            original_path: outcome.entry.original_path.clone(),
+            restored_path: outcome.restored_path.clone(),
+            used_suffix: outcome.used_suffix,
+        });
+    }
+    Ok(dtos)
+}
+
+fn restore_profile_quarantine_entries(
+    profile: Option<std::path::PathBuf>,
+    entry_ids: &[u64],
+) -> Result<Vec<trashradar_app::RestoreOutcome>, CoreError> {
+    use trashradar_domain::quarantine::QuarantineEntryId;
+
+    let database = open_profile_manifest(profile)
+        .ok_or_else(|| CoreError::invalid_argument("Профіль Quarantine недоступний."))?;
+    let filesystem = trashradar_quarantine_fs::NativeQuarantineFs;
+    let restorer = trashradar_app::QuarantineRestorer::new(&filesystem, &database);
+
+    let mut outcomes = Vec::with_capacity(entry_ids.len());
+    for &id in entry_ids {
+        let entry = find_quarantine_entry_in(&database, id)?;
+        let surrogate = filesystem.surrogate_path(&entry.original_path, &entry.surrogate_name)?;
+        outcomes.push(restorer.restore_one(trashradar_app::RestoreRequest {
+            entry_id: QuarantineEntryId(id),
+            surrogate_path: surrogate.to_string_lossy().into_owned(),
+        })?);
+    }
+    Ok(outcomes)
+}
+
+/// Той самий лукап, що й `find_quarantine_entry`, але над уже відкритою
+/// `database` (батч відновлення не відкриває manifest на кожен запис).
+fn find_quarantine_entry_in(
+    database: &trashradar_index_sqlite::IndexDatabase,
+    entry_id: u64,
+) -> Result<trashradar_domain::quarantine::QuarantineEntry, CoreError> {
+    use trashradar_app::ports::QuarantineManifest;
     database
         .get_entry(trashradar_domain::quarantine::QuarantineEntryId(entry_id))?
-        .ok_or_else(|| CoreError::invalid_argument("Запис Quarantine не знайдено."))
+        .ok_or_else(|| {
+            CoreError::invalid_argument(format!("Запис Quarantine {entry_id} не знайдено."))
+        })
+}
+
+/// Параметри `quarantine.reveal_path`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuarantineRevealPathPayload {
+    pub path: String,
+}
+
+/// «Показати» на тості відновлення (T-132, docs/ui.md §7): відкрити Explorer
+/// із виділеним файлом за вже відомим шляхом. Той самий примітив, що й
+/// `candidate.reveal_in_explorer` (T-125), але без лукапу за candidateId —
+/// щойно відновлений файл не обов'язково є кандидатом у HotIndex.
+#[tauri::command]
+pub fn quarantine_reveal_path(payload: QuarantineRevealPathPayload) -> Result<(), CoreError> {
+    record_command();
+    if let Err(e) = trashradar_platform_win::reveal_in_explorer(&payload.path) {
+        record_command_error();
+        return Err(e);
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1258,6 +1376,8 @@ mod tests {
                 category_window,
                 category_set_threshold,
                 quarantine_window,
+                quarantine_restore_batch,
+                quarantine_reveal_path,
                 crate::preview_runtime::preview_thumbnail,
                 crate::preview_runtime::preview_scrub_strip,
                 crate::preview_runtime::preview_large,
@@ -1618,6 +1738,53 @@ mod tests {
             ),
         );
         assert!(result.is_err());
+    }
+
+    /// DoD T-132: порожній список entryIds — типізована відмова до будь-якого I/O.
+    #[test]
+    fn quarantine_restore_batch_rejects_empty_entry_ids() {
+        let (_app, webview) = test_app();
+        let envelope = get_ipc_response(
+            &webview,
+            request(
+                "quarantine_restore_batch",
+                json!({ "payload": { "entryIds": [] } }),
+            ),
+        )
+        .expect_err("порожній список мусить відмовити");
+        assert_eq!(envelope["code"], "invalid_argument");
+    }
+
+    /// DoD T-132: невідомий запис — типізована відмова, не паніка (той самий
+    /// принцип, що й `quarantine_thumbnail_rejects_unknown_entry`).
+    #[test]
+    fn quarantine_restore_batch_rejects_unknown_entry() {
+        let (_app, webview) = test_app();
+        let result = get_ipc_response(
+            &webview,
+            request(
+                "quarantine_restore_batch",
+                json!({ "payload": { "entryIds": [999] } }),
+            ),
+        );
+        assert!(result.is_err());
+    }
+
+    /// DoD T-132: порожній шлях — типізована відмова; реальний виклик
+    /// `explorer.exe` свідомо не тестується тут (він і справді відкрив би
+    /// вікно Провідника під час `cargo test`, той самий принцип, що й T-034/T-125).
+    #[test]
+    fn quarantine_reveal_path_rejects_empty_path() {
+        let (_app, webview) = test_app();
+        let envelope = get_ipc_response(
+            &webview,
+            request(
+                "quarantine_reveal_path",
+                json!({ "payload": { "path": "" } }),
+            ),
+        )
+        .expect_err("порожній шлях мусить відмовити");
+        assert_eq!(envelope["code"], "invalid_argument");
     }
 
     /// T-106: snapshot містить живі томи (capacity/free) і бейдж карантину.

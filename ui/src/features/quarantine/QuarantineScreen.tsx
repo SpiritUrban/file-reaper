@@ -17,8 +17,15 @@
  * дата видалення/розмір/шлях — той самий патерн, що й фільтр-чипси T-107
  * (сортування над уже завантаженим `entries`, без повторного запиту).
  *
- * Пошук (T-134) і дії Відновити/Знищити (T-132/T-133) — окремі задачі; тут
- * лише читання, показ і сортування.
+ * T-132: Restore — клавіша `R` (контекст "quarantine", вже в реєстрі T-103,
+ * активується AppLayout, коли цей екран видимий) на сфокусованій плитці, або
+ * кнопка «R Відновити» на будь-якій. `quarantine.restore_batch` (Core
+ * use case T-080, щойно підключений) — FS move + manifest→Restored + аудит,
+ * тут лише виклик з одним entryId; тост «Відновлено у …» з дією «Показати»
+ * (T-104) → `quarantine.reveal_path`. Відновлений запис прибирається зі
+ * списку локально (той самий `entries`, без повторного фетчу).
+ *
+ * Пошук (T-134) і Знищити (T-133) — окремі задачі.
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -27,7 +34,9 @@ import { command, ipcErrorMessage } from "@/ipc/client";
 import { formatBytes } from "@/store/format";
 import { useAppState } from "@/store/appState";
 import { useQuarantineThumbnail } from "@/store/preview";
-import type { QuarantineEntry } from "@/ipc/types";
+import { toast } from "@/store/toasts";
+import type { HotkeyActionEventDetail } from "@/hotkeys";
+import type { QuarantineEntry, QuarantineRestoreOutcome } from "@/ipc/types";
 
 function fileName(path: string): string {
   const normalized = path.replace(/\\/g, "/");
@@ -90,12 +99,29 @@ function sortEntries(entries: QuarantineEntry[], sort: SortKey): QuarantineEntry
   return sorted;
 }
 
-function QuarantineTile({ entry, now }: { entry: QuarantineEntry; now: number }) {
+function QuarantineTile({
+  entry,
+  now,
+  focused,
+  onFocusEntry,
+  onRestore,
+}: {
+  entry: QuarantineEntry;
+  now: number;
+  focused: boolean;
+  onFocusEntry: (id: number) => void;
+  onRestore: (entry: QuarantineEntry) => void;
+}) {
   const thumbnail = useQuarantineThumbnail(entry);
   return (
     <div
-      className="relative flex aspect-[4/3] w-full flex-col overflow-hidden rounded-sm border border-quarantine/40 bg-panel"
+      tabIndex={0}
+      onFocus={() => onFocusEntry(entry.id)}
+      data-focused={focused || undefined}
       title={entry.originalPath}
+      className={`relative flex aspect-[4/3] w-full flex-col overflow-hidden rounded-sm border bg-panel outline-none transition-colors focus-visible:border-accent focus-visible:ring-2 focus-visible:ring-accent/70 ${
+        focused ? "border-quarantine" : "border-quarantine/40"
+      }`}
     >
       <span className="absolute inset-0 flex items-center justify-center overflow-hidden bg-panel-2">
         {thumbnail ? (
@@ -114,6 +140,17 @@ function QuarantineTile({ entry, now }: { entry: QuarantineEntry; now: number })
       <span className="absolute left-2 top-2 z-10 rounded-full bg-bg/85 px-2 py-0.5 text-xs text-quarantine backdrop-blur-sm">
         ⏳ {timeUntilExpiry(entry.expiresAt, now)}
       </span>
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          onRestore(entry);
+        }}
+        title="Відновити на початкове місце (R)"
+        className="absolute right-1 top-1 z-20 rounded bg-keep/90 px-1.5 py-0.5 text-xs font-medium text-bg hover:bg-keep"
+      >
+        R Відновити
+      </button>
       <span className="absolute inset-x-0 bottom-0 z-10 flex h-[15%] min-h-7 items-center gap-1.5 bg-bg/85 px-2 backdrop-blur-sm">
         <strong className="shrink-0 font-mono text-sm font-semibold text-ink">
           {formatBytes(entry.sizeBytes)}
@@ -131,6 +168,7 @@ export function QuarantineScreen() {
   const [entries, setEntries] = useState<QuarantineEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [sort, setSort] = useState<SortKey>("expiry");
+  const [focusedId, setFocusedId] = useState<number | null>(null);
   const now = useLiveNow();
 
   const load = useCallback(() => {
@@ -147,6 +185,46 @@ export function QuarantineScreen() {
   useEffect(() => {
     load();
   }, [load, quarantine.heldCount, quarantine.heldBytes]);
+
+  // T-132: Restore — Core вже робить move+manifest+аудит (`QuarantineRestorer`,
+  // T-080); тут лише виклик з одним entryId, локальне видалення з `entries`
+  // (без повторного фетчу) і тост із дією «Показати» → quarantine.reveal_path.
+  const restoreEntry = useCallback((entry: QuarantineEntry) => {
+    command<QuarantineRestoreOutcome[]>("quarantine.restore_batch", {
+      payload: { entryIds: [entry.id] },
+    })
+      .then((outcomes) => {
+        const outcome = outcomes[0];
+        if (!outcome) return;
+        setEntries((prev) => prev.filter((e) => e.id !== entry.id));
+        toast({
+          message: `Відновлено у ${outcome.restoredPath}`,
+          tone: "success",
+          action: {
+            label: "Показати",
+            run: () =>
+              command<void>("quarantine.reveal_path", {
+                payload: { path: outcome.restoredPath },
+              }).catch((err) => {
+                toast({ message: ipcErrorMessage(err), tone: "warning" });
+              }),
+          },
+        });
+      })
+      .catch((err) => toast({ message: ipcErrorMessage(err), tone: "warning" }));
+  }, []);
+
+  // R (контекст "quarantine", T-103) — відновити сфокусовану плитку.
+  useEffect(() => {
+    const onHotkey = (event: Event) => {
+      const { action } = (event as CustomEvent<HotkeyActionEventDetail>).detail;
+      if (action !== "restore" || focusedId === null) return;
+      const entry = entries.find((e) => e.id === focusedId);
+      if (entry) restoreEntry(entry);
+    };
+    window.addEventListener("trashradar:hotkey", onHotkey);
+    return () => window.removeEventListener("trashradar:hotkey", onHotkey);
+  }, [focusedId, entries, restoreEntry]);
 
   const sorted = useMemo(() => sortEntries(entries, sort), [entries, sort]);
 
@@ -200,7 +278,14 @@ export function QuarantineScreen() {
         ) : (
           <div className="grid grid-cols-[repeat(auto-fill,minmax(10rem,1fr))] gap-2">
             {sorted.map((entry) => (
-              <QuarantineTile key={entry.id} entry={entry} now={now} />
+              <QuarantineTile
+                key={entry.id}
+                entry={entry}
+                now={now}
+                focused={focusedId === entry.id}
+                onFocusEntry={setFocusedId}
+                onRestore={restoreEntry}
+              />
             ))}
           </div>
         )}

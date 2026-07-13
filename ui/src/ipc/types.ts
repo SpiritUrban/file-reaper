@@ -312,6 +312,7 @@ export type CommandName =
   | "reap.execute"
   | "reap.undo_batch"
   | "quarantine.restore_batch"
+  | "quarantine.reveal_path"
   | "quarantine.purge"
   | "quarantine.window"
   | "quarantine.thumbnail"
@@ -408,6 +409,14 @@ export interface QuarantineRestoredEvent {
   usedSuffix: boolean;
   /** Попередження для показу — лише коли usedSuffix=true. */
   message?: string;
+}
+
+/** Відповідь `quarantine.restore_batch` (T-132): один запис на кожен entryId. */
+export interface QuarantineRestoreOutcome {
+  entryId: number;
+  originalPath: string;
+  restoredPath: string;
+  usedSuffix: boolean;
 }
 
 export interface AppSettings {

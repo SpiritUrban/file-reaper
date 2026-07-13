@@ -155,10 +155,9 @@ pub fn emit_journal_stale<R: Runtime>(
     );
 }
 
-/// Payload `quarantine.restored` (T-080).
+/// Payload `quarantine.restored` (T-080, підключено `quarantine.restore_batch` T-132).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)] // emit path: команда quarantine.restore_batch (T-132 wiring)
 pub struct QuarantineRestoredEvent {
     pub entry_id: u64,
     pub original_path: String,
@@ -172,7 +171,6 @@ pub struct QuarantineRestoredEvent {
 }
 
 impl QuarantineRestoredEvent {
-    #[allow(dead_code)] // emit path: T-132 wiring
     pub fn from_outcome(outcome: &trashradar_app::RestoreOutcome) -> Self {
         let message = outcome.used_suffix.then(|| {
             format!(
@@ -191,7 +189,6 @@ impl QuarantineRestoredEvent {
 }
 
 /// Емісія результату відновлення (T-080 DoD: подія-попередження при суфіксі).
-#[allow(dead_code)] // wired by quarantine.restore_batch command (T-132)
 pub fn emit_quarantine_restored<R: Runtime>(
     app: &AppHandle<R>,
     outcome: &trashradar_app::RestoreOutcome,

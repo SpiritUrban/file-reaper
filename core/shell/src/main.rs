@@ -78,6 +78,8 @@ fn main() {
             ipc::category_window,
             ipc::category_set_threshold,
             ipc::quarantine_window,
+            ipc::quarantine_restore_batch,
+            ipc::quarantine_reveal_path,
             preview_runtime::preview_thumbnail,
             preview_runtime::preview_scrub_strip,
             preview_runtime::preview_large,
