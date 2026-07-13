@@ -1176,6 +1176,7 @@ mod tests {
                 crate::scan_runtime::candidate_keep,
                 crate::scan_runtime::candidate_mark,
                 crate::scan_runtime::candidate_reveal_in_explorer,
+                crate::scan_runtime::duplicates_groups,
             ])
             .build(mock_context(noop_assets()))
             .expect("mock app");

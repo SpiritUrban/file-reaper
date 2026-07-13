@@ -3814,6 +3814,7 @@ dependencies = [
  "tracing-subscriber",
  "trashradar-app",
  "trashradar-domain",
+ "trashradar-hash",
  "trashradar-index-memory",
  "trashradar-index-sqlite",
  "trashradar-platform-win",

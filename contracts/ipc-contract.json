@@ -117,7 +117,12 @@
       "task": "T-124",
       "$comment": "{candidateId, maxEdge?:64..4096=1024} → {status: sharp_from_cache|draft_then_sharp_scheduled|sharp_scheduled_only|unavailable, quality?: draft|sharp, dataUrl?}; wraps TwoStagePreviewer (T-073) — draft synchronously if cached (<100ms), sharp generated as P0 job and delivered via preview.ready {kind:\"large_sharp\"} if not already synchronous"
     },
-    "search.candidates": { "status": "planned", "task": "T-018" }
+    "search.candidates": { "status": "planned", "task": "T-018" },
+    "duplicates.groups": {
+      "status": "implemented",
+      "task": "T-126",
+      "$comment": "{} → {state: DuplicatesCascadeEvent shape, groups: MarkedDuplicateGroup[] (size,contentHash:hex string,members:[{candidateId,path,role,keep}],keepId,policy,potentialReclaimBytes)}; last cached result of the post-scan duplicate cascade (T-058..066); empty/idle before the first scan that found ≥2 comparable files. Feeds the Duplicates group-row screen instead of category.window."
+    }
   },
   "events": {
     "app.test": {
@@ -158,7 +163,7 @@
     "duplicates.cascade_updated": {
       "status": "implemented",
       "task": "T-061",
-      "$comment": "Duplicate cascade progress: {phase, confidence: preliminary|confirmed, refining, reclaimableBytes, groupCount, filesInGroups, cancelled}. After stage 2: preliminary+refining; after stage 3: confirmed, refining=false"
+      "$comment": "Duplicate cascade progress: {phase, confidence: preliminary|confirmed, refining, reclaimableBytes, groupCount, filesInGroups, cancelled}. After stage 2: preliminary+refining; after stage 3: confirmed, refining=false. Emitted from scan_runtime post-scan (T-126) — same shape as duplicates.groups' state field."
     },
     "preview.ready": {
       "status": "implemented",

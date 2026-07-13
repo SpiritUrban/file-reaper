@@ -11,6 +11,7 @@ import { DetailsPanel } from "@/components/DetailsPanel";
 import { ToastViewport } from "@/components/ToastViewport";
 import { CategoryScreen } from "@/features/category/CategoryScreen";
 import { CleanupSummaryScreen } from "@/features/cleanup-summary/CleanupSummaryScreen";
+import { DuplicatesScreen } from "@/features/duplicates/DuplicatesScreen";
 import { HealthScreen } from "@/features/health/HealthScreen";
 import { QuarantineScreen } from "@/features/quarantine/QuarantineScreen";
 import { SettingsScreen } from "@/features/settings/SettingsScreen";
@@ -155,7 +156,13 @@ export function AppLayout() {
                 className={screenClass(active)}
                 aria-hidden={!active}
               >
-                <CategoryScreen categoryId={category.id} />
+                {/* T-126: Дублікати — сітка групами (свій екран), не
+                    стандартний per-file category.window (ui.md §4). */}
+                {category.id === "duplicates" ? (
+                  <DuplicatesScreen />
+                ) : (
+                  <CategoryScreen categoryId={category.id} />
+                )}
               </section>
             );
           })}

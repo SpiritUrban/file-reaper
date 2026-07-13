@@ -19,14 +19,19 @@ use trashradar_app::scan_control::{
 };
 use trashradar_app::scan_strategy::{choose_scan_strategy, VolumeCapabilities};
 use trashradar_app::workers::CancellationToken;
-use trashradar_app::{mvp_predicate_registry, DecisionSelector, LiveTotals};
+use trashradar_app::{
+    mark_confirmed_groups, mvp_predicate_registry, run_duplicate_cascade_with_cache,
+    DecisionSelector, KeepPolicy, LiveTotals, MarkedDuplicateGroup, MemoryHashCache,
+};
 use trashradar_domain::candidate::{
     CandidateId, CandidateUnit, Decision, FileKind, FileRecord, SafetyLevel,
 };
 use trashradar_domain::category::{CategoryId, CategoryMask};
+use trashradar_domain::duplicates::DuplicatesCategoryState;
 use trashradar_domain::error::{CoreError, ErrorCode};
 use trashradar_domain::scan::ScanStrategy;
 use trashradar_domain::settings::AppSettings;
+use trashradar_hash::FileHasher;
 use trashradar_index_memory::InMemoryIndex;
 use trashradar_platform_win::WinScanEnvironment;
 use trashradar_scan_walk::{full_path, PathExclusions, WalkConfig};
@@ -46,6 +51,20 @@ pub struct ScanRuntime {
     /// не персистується (той самий принцип, що й `CategoryId::Uncategorized`).
     also_in: Arc<Mutex<HashMap<u64, CategoryMask>>>,
     settings: Arc<RwLock<AppSettings>>,
+    /// Останній стан + підтверджені групи каскаду дублікатів (T-058…066,
+    /// зібрано в T-126). Транзиентно, як і `also_in` — перебудовується
+    /// щоразу на новому скані, не персистується.
+    duplicates: Arc<Mutex<DuplicatesRuntimeState>>,
+    /// Кеш хешів size+mtime (T-062) — переживає повторні каскади в межах
+    /// сесії застосунку; окремий крейт `trashradar-hash` дає сам `Hasher`.
+    hash_cache: Arc<MemoryHashCache>,
+}
+
+/// Кешований результат останнього каскаду дублікатів для `duplicates.groups` (T-126).
+#[derive(Default)]
+struct DuplicatesRuntimeState {
+    state: DuplicatesCategoryState,
+    groups: Vec<MarkedDuplicateGroup>,
 }
 
 impl ScanRuntime {
@@ -60,6 +79,8 @@ impl ScanRuntime {
             last_totals: Arc::new(Mutex::new(LiveTotals::new())),
             also_in: Arc::new(Mutex::new(HashMap::new())),
             settings: Arc::new(RwLock::new(settings)),
+            duplicates: Arc::new(Mutex::new(DuplicatesRuntimeState::default())),
+            hash_cache: Arc::new(MemoryHashCache::new()),
         }
     }
 
@@ -103,6 +124,13 @@ impl ScanRuntime {
             None => Vec::new(),
         }
     }
+
+    /// Останній кешований результат каскаду дублікатів (T-126, `duplicates.groups`).
+    /// Порожньо/idle до завершення першого скану, що знайшов ≥2 файли для порівняння.
+    pub fn duplicates_snapshot(&self) -> (DuplicatesCategoryState, Vec<MarkedDuplicateGroup>) {
+        let dup = self.duplicates.lock().expect("duplicates lock");
+        (dup.state.clone(), dup.groups.clone())
+    }
 }
 
 /// Згорнути hits (T-121) у карту candidateId→CategoryMask.
@@ -113,6 +141,97 @@ fn record_hits(also_in: &mut HashMap<u64, CategoryMask>, hits: &[DetectorHit]) {
             .or_default()
             .insert(hit.verdict.category);
     }
+}
+
+/// T-126: каскад пошуку дублікатів (T-058…066) над свіжим індексом по
+/// завершенні основного проходу скану.
+///
+/// Кожна НЕ-keep (╳) позиція групи, що ще не мала своєї категорії
+/// (`Uncategorized`), отримує primary `CategoryId::Duplicates` — той самий
+/// принцип «перший власник категорії», що й будь-який детектор T-037, лише
+/// джерело hit'ів не ферма, а каскад. Учасник з іншою primary-категорією
+/// лишається там, отримуючи лише «також у: Дублікати» (T-121-стиль
+/// `also_in`). Keep-екземпляр (✓) НІКОЛИ не чіпається — інакше збережена
+/// копія рахувалась би в «можна звільнити» (T-054).
+fn run_duplicates_cascade<R: Runtime>(
+    app: &AppHandle<R>,
+    index: &InMemoryIndex,
+    last_totals: &Mutex<LiveTotals>,
+    also_in: &Mutex<HashMap<u64, CategoryMask>>,
+    duplicates: &Mutex<DuplicatesRuntimeState>,
+    hash_cache: &MemoryHashCache,
+    cancel: &CancellationToken,
+) {
+    let records: Vec<FileRecord> = index
+        .get_all()
+        .into_iter()
+        .filter(|r| r.unit == CandidateUnit::File && r.decision != Decision::Keep)
+        .collect();
+    if records.len() < 2 {
+        return;
+    }
+
+    let hasher = FileHasher::new();
+    let result =
+        run_duplicate_cascade_with_cache(&records, &hasher, cancel, 0, Some(hash_cache), |state| {
+            events::emit_duplicates_cascade(app, state)
+        });
+    if let Ok(mut dup) = duplicates.lock() {
+        dup.state = result.state.clone();
+    }
+    if result.confirmed_groups.is_empty() {
+        return;
+    }
+
+    let marked = mark_confirmed_groups(&result.confirmed_groups, &records, KeepPolicy::default());
+
+    let by_id: HashMap<CandidateId, &FileRecord> =
+        records.iter().map(|r| (r.candidate_id, r)).collect();
+    let mut promoted = Vec::new();
+    if let Ok(mut also_in_guard) = also_in.lock() {
+        for group in &marked {
+            for member in &group.members {
+                if member.keep {
+                    continue; // збережена копія — не reclaimable, не чіпаємо
+                }
+                also_in_guard
+                    .entry(member.candidate_id.0)
+                    .or_default()
+                    .insert(CategoryId::Duplicates);
+                if let Some(rec) = by_id.get(&member.candidate_id) {
+                    if rec.category == CategoryId::Uncategorized {
+                        let mut promoted_rec = (*rec).clone();
+                        promoted_rec.category = CategoryId::Duplicates;
+                        promoted_rec.safety = SafetyLevel::SafeToBulk;
+                        promoted_rec.detector_id = "duplicates_cascade".into();
+                        promoted_rec.explanation =
+                            duplicate_explanation(group.size.0, group.members.len());
+                        promoted.push(promoted_rec);
+                    }
+                }
+            }
+        }
+    }
+    if !promoted.is_empty() {
+        if let Err(e) = index.upsert_batch(promoted) {
+            tracing::warn!(error = %e, "T-126: не вдалося застосувати категорію Дублікати");
+        }
+    }
+    if let Ok(mut live) = last_totals.lock() {
+        // Додатково (не reset): нові Duplicates-записи раніше були
+        // Uncategorized і не мали внеску в жодну категорію — для решти
+        // ingest_primary лише підтверджує вже наявний внесок (no-op).
+        live.ingest_primary(&index.get_all());
+        events::emit_cleanup_totals(app, &live.summary());
+    }
+    if let Ok(mut dup) = duplicates.lock() {
+        dup.groups = marked;
+    }
+}
+
+fn duplicate_explanation(group_size_bytes: u64, member_count: usize) -> String {
+    let gb = group_size_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+    format!("дублікат · {member_count} копії по {gb:.1} ГБ")
 }
 
 fn configured_registry(settings: &AppSettings) -> Result<DetectorRegistry, CoreError> {
@@ -430,6 +549,8 @@ pub async fn scan_start<R: Runtime>(
     let last_totals = Arc::clone(&state.last_totals);
     let also_in = Arc::clone(&state.also_in);
     let settings = Arc::clone(&state.settings);
+    let duplicates = Arc::clone(&state.duplicates);
+    let hash_cache = Arc::clone(&state.hash_cache);
     let app2 = app.clone();
 
     if let Err(e) = thread::Builder::new()
@@ -488,6 +609,18 @@ pub async fn scan_start<R: Runtime>(
                     Ok(())
                 },
             );
+            // T-126: каскад пошуку дублікатів (T-058…066) над свіжим індексом —
+            // той самий `token`, тому `scan.stop` скасовує і хешування.
+            run_duplicates_cascade(
+                &app2,
+                index.as_ref(),
+                &last_totals,
+                &also_in,
+                &duplicates,
+                &hash_cache,
+                &token,
+            );
+
             // Фінальний snapshot без втрати підсумку (T-055 / T-006 flush).
             let _ = throttle.flush(Instant::now());
             if let Ok(live) = last_totals.lock() {
@@ -707,14 +840,80 @@ pub fn candidate_reveal_in_explorer(
     Ok(())
 }
 
+// --- T-126: duplicates.groups -------------------------------------------------
+
+/// Дзеркало домену `MarkedDuplicateGroup` для UI (`ui/src/ipc/types.ts`):
+/// лише `contentHash` відрізняється — `ContentHash([u8;32])` серіалізувався б
+/// як JSON-масив 32 чисел, тут — hex-рядок. Решта полів (`MarkedDuplicateMember`,
+/// `KeepPolicy`) уже серіалізуються як треба (camelCase/snake_case), тому
+/// членів групи переносимо без перетворення.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarkedDuplicateGroupDto {
+    pub size: u64,
+    pub content_hash: String,
+    pub members: Vec<trashradar_domain::duplicates::MarkedDuplicateMember>,
+    pub keep_id: u64,
+    pub policy: KeepPolicy,
+    pub potential_reclaim_bytes: u64,
+}
+
+impl From<&MarkedDuplicateGroup> for MarkedDuplicateGroupDto {
+    fn from(g: &MarkedDuplicateGroup) -> Self {
+        Self {
+            size: g.size.0,
+            content_hash: g.content_hash.to_hex(),
+            members: g.members.clone(),
+            keep_id: g.keep_id.0,
+            policy: g.policy,
+            potential_reclaim_bytes: g.potential_reclaim_bytes,
+        }
+    }
+}
+
+/// Відповідь `duplicates.groups` (T-126): останній кешований результат
+/// каскаду T-058…066 + дефолтна розмітка ✓/╳ (T-065). `state` — той самий
+/// знімок, що й подія `duplicates.cascade_updated` (T-061), для екрана, який
+/// відкрився вже після завершення каскаду (подія проґавлена).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DuplicatesGroupsAck {
+    pub state: events::DuplicatesCascadeEvent,
+    pub groups: Vec<MarkedDuplicateGroupDto>,
+}
+
+/// `duplicates.groups` — групи для «Дублікати» (T-126, docs/ui.md §4):
+/// сітка групами замість стандартної `category.window`. Порожньо/idle до
+/// першого завершеного скану, що знайшов ≥2 файли для порівняння.
+#[tauri::command]
+pub fn duplicates_groups(scan: State<'_, ScanRuntime>) -> Result<DuplicatesGroupsAck, CoreError> {
+    record_command();
+    let (state, groups) = scan.duplicates_snapshot();
+    Ok(DuplicatesGroupsAck {
+        state: events::DuplicatesCascadeEvent::from_state(&state),
+        groups: groups.iter().map(MarkedDuplicateGroupDto::from).collect(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+    use std::io::Write;
     use trashradar_app::scan_control::SteppedTestScanner;
-    use trashradar_domain::candidate::{ByteSize, FileAttributes};
+    use trashradar_domain::candidate::{ByteSize, FileAttributes, FsTimestamp};
+    use trashradar_domain::duplicates::DuplicateConfidence;
     use trashradar_domain::scan::ScanStrategy;
     use trashradar_domain::settings::DetectorSettings;
+
+    /// Мінімальний mock-застосунок лише для `AppHandle` (T-126: `events::emit`
+    /// потребує рантайм, але не потребує вікна — той самий примітив, що й
+    /// важчий `test_app()` в `ipc::tests`, без webview/invoke_handler).
+    fn mock_app() -> tauri::App<tauri::test::MockRuntime> {
+        tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app")
+    }
 
     #[test]
     fn parse_volume_accepts_drive_forms() {
@@ -797,5 +996,103 @@ mod tests {
         let n = HotIndex::len(runtime.index.as_ref()).unwrap();
         assert!(n > 0);
         assert_eq!(n as u64, summary.files_indexed);
+    }
+
+    /// DoD T-126: каскад дублікатів над реальними файлами (real FileHasher I/O)
+    /// підтверджує групу, дефолтна ✓/╳-розмітка приходить із Core, не-keep
+    /// (╳) учасник, що був `Uncategorized`, промотується у primary
+    /// `CategoryId::Duplicates`; keep-екземпляр (✓) лишається недоторканим і
+    /// не рахується в «можна звільнити».
+    #[test]
+    fn duplicates_cascade_confirms_group_and_promotes_reap_member_only() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("trashradar-dup-cascade-{nonce}"));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path_a = dir.join("a.bin");
+        let path_b = dir.join("b.bin");
+        let content = vec![7u8; 200_000]; // > 64 КіБ — partial і full обидва читають реальні байти
+        std::fs::File::create(&path_a)
+            .unwrap()
+            .write_all(&content)
+            .unwrap();
+        std::fs::File::create(&path_b)
+            .unwrap()
+            .write_all(&content)
+            .unwrap();
+
+        fn rec(id: u64, path: &std::path::Path, size: u64, mtime: i64) -> FileRecord {
+            FileRecord {
+                candidate_id: CandidateId(id),
+                path: path.to_string_lossy().into_owned(),
+                size: ByteSize(size),
+                created_at: None,
+                modified_at: Some(FsTimestamp(mtime)),
+                accessed_at: None,
+                kind: FileKind::Other,
+                unit: CandidateUnit::File,
+                category: CategoryId::Uncategorized,
+                safety: SafetyLevel::ReviewRecommended,
+                decision: Decision::Undecided,
+                detector_id: String::new(),
+                explanation: String::new(),
+                attributes: FileAttributes::default(),
+            }
+        }
+
+        let runtime = ScanRuntime::new();
+        runtime
+            .index
+            .insert_batch(vec![
+                rec(1, &path_a, content.len() as u64, 100),
+                rec(2, &path_b, content.len() as u64, 200),
+            ])
+            .unwrap();
+
+        let app = mock_app();
+        run_duplicates_cascade(
+            app.handle(),
+            runtime.index.as_ref(),
+            &runtime.last_totals,
+            &runtime.also_in,
+            &runtime.duplicates,
+            &runtime.hash_cache,
+            &CancellationToken::new(),
+        );
+
+        let (state, groups) = runtime.duplicates_snapshot();
+        assert_eq!(state.confidence, DuplicateConfidence::Confirmed);
+        assert_eq!(groups.len(), 1, "рівно одна група дублікатів");
+        assert_eq!(groups[0].members.len(), 2);
+        assert_eq!(groups[0].members.iter().filter(|m| m.keep).count(), 1);
+
+        let records = runtime.index.get_all();
+        let reap_id = groups[0]
+            .members
+            .iter()
+            .find(|m| !m.keep)
+            .expect("reap member")
+            .candidate_id;
+        let keep_id = groups[0].keep_id;
+        let reap_record = records.iter().find(|r| r.candidate_id == reap_id).unwrap();
+        let keep_record = records.iter().find(|r| r.candidate_id == keep_id).unwrap();
+        assert_eq!(
+            reap_record.category,
+            CategoryId::Duplicates,
+            "не-keep учасник, що був Uncategorized, промотується"
+        );
+        assert_eq!(
+            keep_record.category,
+            CategoryId::Uncategorized,
+            "keep-екземпляр не чіпається"
+        );
+
+        let summary = runtime.last_totals.lock().unwrap().summary();
+        assert_eq!(summary.unique_files, 1, "лише не-keep копія reclaimable");
+        assert_eq!(summary.unique_bytes.0, content.len() as u64);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

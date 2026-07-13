@@ -368,13 +368,12 @@ pub fn emit_cleanup_totals<R: Runtime>(
     }
 }
 
-// --- T-061: каскад дублікатів -------------------------------------------------
-// Емісія з scan_runtime / post-scan worker — коли UI підхопить цифру (T-110/T-126).
+// --- T-061/T-126: каскад дублікатів -------------------------------------------
+// Емісія зі scan_runtime post-scan (T-126); те саме DTO — тіло duplicates.groups.
 
 /// Payload `duplicates.cascade_updated` (дзеркало domain `DuplicatesCategoryState`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)] // emit: post-scan cascade wiring (T-061 API ready)
 pub struct DuplicatesCascadeEvent {
     pub phase: String,
     pub confidence: String,
@@ -412,8 +411,8 @@ impl DuplicatesCascadeEvent {
     }
 }
 
-/// Емісія прогресу каскаду дублікатів (T-061).
-#[allow(dead_code)] // post-scan cascade wiring
+/// Емісія прогресу каскаду дублікатів (T-061), викликається з
+/// `scan_runtime::run_duplicates_cascade` (T-126) на preliminary/confirmed.
 pub fn emit_duplicates_cascade<R: Runtime>(
     app: &AppHandle<R>,
     state: &trashradar_domain::DuplicatesCategoryState,

@@ -136,6 +136,12 @@ export interface DuplicatesCascadeEvent {
   cancelled: boolean;
 }
 
+/** Відповідь `duplicates.groups` (T-126): останній кешований результат каскаду. */
+export interface DuplicatesGroupsAck {
+  state: DuplicatesCascadeEvent;
+  groups: MarkedDuplicateGroup[];
+}
+
 export interface ScanProgress {
   volume: string;
   strategy: "mft" | "directory_walk" | "usn_delta";
@@ -314,7 +320,8 @@ export type CommandName =
   | "preview.thumbnail"
   | "preview.scrub_strip"
   | "preview.large"
-  | "search.candidates";
+  | "search.candidates"
+  | "duplicates.groups";
 
 export interface CacheUsage {
   bytes: number;

@@ -25,6 +25,8 @@ trashradar-quarantine-fs = { path = "../infra/quarantine-fs" }
 trashradar-index-sqlite = { path = "../infra/index-sqlite" }
 trashradar-settings-json = { path = "../infra/settings-json" }
 trashradar-preview = { path = "../infra/preview" }
+# T-126: адаптер Hasher (partial+full BLAKE3) для каскаду дублікатів (T-058..066).
+trashradar-hash = { path = "../infra/hash" }
 # base64: кодування превью-мініатюр у data URL для IPC (T-120). Вже в
 # дереві залежностей транзитивно через webview2-com — нової завантаженої
 # версії немає, лише прямий dependency на вже наявний крейт.
