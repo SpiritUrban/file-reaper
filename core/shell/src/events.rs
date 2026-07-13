@@ -204,9 +204,11 @@ pub fn emit_quarantine_restored<R: Runtime>(
     emit(app, topic::QUARANTINE_RESTORED, &payload);
 }
 
+/// Payload `quarantine.changed`: тримання Quarantine змінилось — TTL-sweeper
+/// (T-082, `emit_quarantine_sweep`, ще не підключений до lifecycle) або
+/// ручний `quarantine.purge` (T-133, підключено).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)] // emitted by scheduled shell lifecycle once T-131 wires Quarantine UI
 pub struct QuarantineChangedEvent {
     pub purged_count: u64,
     pub purged_bytes: u64,

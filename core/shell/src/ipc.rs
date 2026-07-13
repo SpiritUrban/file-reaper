@@ -528,6 +528,102 @@ pub fn quarantine_reveal_path(payload: QuarantineRevealPathPayload) -> Result<()
     Ok(())
 }
 
+/// Параметри `quarantine.purge` (T-133): `entryIds` — вибіркове знищення
+/// («Знищити позначені»); відсутнє/`null` — «Спорожнити все»
+/// (`ManualPurgeSelection::All`, T-083).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QuarantinePurgePayload {
+    #[serde(default)]
+    pub entry_ids: Option<Vec<u64>>,
+}
+
+/// Відповідь `quarantine.purge`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuarantinePurgeAck {
+    pub purged_count: u64,
+    pub purged_bytes: u64,
+}
+
+/// `quarantine.purge` (T-133, docs/ui.md §7): остаточне видалення — єдине
+/// місце в продукті з жорстким підтвердженням (UI, не тут). Use case
+/// (`ManualPurger`, T-083) уже вміє все — валідація вибору, фізичне видалення,
+/// manifest→Purged, аудит; тут лише резолв сурогатного шляху й подія
+/// `quarantine.changed` для живого бейджа Sidebar (T-106) — той самий payload,
+/// що й TTL-sweeper (T-082), лише інше джерело виклику.
+#[tauri::command]
+pub async fn quarantine_purge<R: Runtime>(
+    app: AppHandle<R>,
+    payload: QuarantinePurgePayload,
+    profile: tauri::State<'_, ProfileRuntime>,
+) -> Result<QuarantinePurgeAck, CoreError> {
+    record_command();
+    let profile_dir = profile.profile_dir();
+    let profile_dir_for_badge = profile_dir.clone();
+    let entry_ids = payload.entry_ids;
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        purge_profile_quarantine_entries(profile_dir, entry_ids)
+    })
+    .await
+    .map_err(|error| CoreError::internal(format!("Quarantine purge task failed: {error}")))?;
+    let result = match result {
+        Ok(r) => r,
+        Err(error) => {
+            record_command_error();
+            return Err(error);
+        }
+    };
+
+    let held = tauri::async_runtime::spawn_blocking(move || {
+        read_profile_quarantine_badge(profile_dir_for_badge)
+    })
+    .await
+    .map_err(|error| CoreError::internal(format!("Quarantine badge task failed: {error}")))?;
+
+    events::emit(
+        &app,
+        events::topic::QUARANTINE_CHANGED,
+        &events::QuarantineChangedEvent {
+            purged_count: result.purged.len() as u64,
+            purged_bytes: result.purged_bytes,
+            held_bytes: held.held_bytes,
+            threshold_exceeded: false,
+            message: None,
+        },
+    );
+
+    Ok(QuarantinePurgeAck {
+        purged_count: result.purged.len() as u64,
+        purged_bytes: result.purged_bytes,
+    })
+}
+
+fn purge_profile_quarantine_entries(
+    profile: Option<std::path::PathBuf>,
+    entry_ids: Option<Vec<u64>>,
+) -> Result<trashradar_app::ManualPurgeResult, CoreError> {
+    use trashradar_domain::quarantine::QuarantineEntryId;
+
+    let database = open_profile_manifest(profile)
+        .ok_or_else(|| CoreError::invalid_argument("Профіль Quarantine недоступний."))?;
+    let filesystem = trashradar_quarantine_fs::NativeQuarantineFs;
+    let purger = trashradar_app::ManualPurger::new(&filesystem, &database);
+
+    let selection = match entry_ids {
+        Some(ids) => trashradar_app::ManualPurgeSelection::Entries(
+            ids.into_iter().map(QuarantineEntryId).collect(),
+        ),
+        None => trashradar_app::ManualPurgeSelection::All,
+    };
+
+    purger.purge(selection, |entry| {
+        filesystem
+            .surrogate_path(&entry.original_path, &entry.surrogate_name)
+            .map(|p| p.to_string_lossy().into_owned())
+    })
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppStateSnapshot {
@@ -1378,6 +1474,7 @@ mod tests {
                 quarantine_window,
                 quarantine_restore_batch,
                 quarantine_reveal_path,
+                quarantine_purge,
                 crate::preview_runtime::preview_thumbnail,
                 crate::preview_runtime::preview_scrub_strip,
                 crate::preview_runtime::preview_large,
@@ -1785,6 +1882,91 @@ mod tests {
         )
         .expect_err("порожній шлях мусить відмовити");
         assert_eq!(envelope["code"], "invalid_argument");
+    }
+
+    /// DoD T-133: вибірковий покажчик entryIds:[] — типізована відмова до
+    /// будь-якого I/O (та сама валідація use case ManualPurger, T-083).
+    #[test]
+    fn quarantine_purge_rejects_empty_selective_list() {
+        let (_app, webview) = test_app();
+        let envelope = get_ipc_response(
+            &webview,
+            request("quarantine_purge", json!({ "payload": { "entryIds": [] } })),
+        )
+        .expect_err("порожній вибірковий список мусить відмовити");
+        assert_eq!(envelope["code"], "invalid_argument");
+    }
+
+    /// DoD T-133: після знищення місце фактично звільняється — сурогат
+    /// реально прибирається з диска, manifest переходить у Purged, ack несе
+    /// коректні purgedCount/purgedBytes.
+    #[test]
+    fn quarantine_purge_removes_real_surrogate_and_updates_manifest() {
+        use trashradar_app::ports::QuarantineManifest;
+        use trashradar_domain::candidate::ByteSize;
+        use trashradar_domain::quarantine::{QuarantineEntry, QuarantineEntryId, QuarantineStatus};
+        use trashradar_quarantine_fs::NativeQuarantineFs;
+
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let profile = std::env::temp_dir().join(format!("trashradar-t133-purge-{nonce}"));
+
+        // Реальний сурогат під C:\.trashradar\quarantine\ — surrogate_path
+        // резолвить том з original_path (тут завжди C:, як і решта тестів
+        // quarantine-fs/T-079..083 у цьому воркспейсі).
+        let directory = NativeQuarantineFs
+            .ensure_at_root(std::path::Path::new("C:\\"))
+            .expect("quarantine root");
+        let surrogate_name = format!("t133-{nonce:x}");
+        let surrogate_path = directory.quarantine_root.join(&surrogate_name);
+        std::fs::write(&surrogate_path, b"purge me").expect("write surrogate");
+
+        let original_path = format!("C:\\Users\\test\\trashradar-t133-{nonce}.bin");
+        {
+            let database = trashradar_index_sqlite::IndexDatabase::open_profile(&profile)
+                .expect("manifest db");
+            database
+                .insert_entry(&QuarantineEntry {
+                    id: QuarantineEntryId(1),
+                    batch_id: None,
+                    original_path: original_path.clone(),
+                    surrogate_name: surrogate_name.clone(),
+                    size: ByteSize(8),
+                    quarantined_at_unix: 1_700_000_000,
+                    expires_at_unix: 1_700_000_000 + 86_400,
+                    status: QuarantineStatus::Quarantined,
+                })
+                .unwrap();
+        }
+
+        let (_app, webview) = test_app_in_profile(profile.clone());
+        let response = get_ipc_response(
+            &webview,
+            request(
+                "quarantine_purge",
+                json!({ "payload": { "entryIds": [1] } }),
+            ),
+        )
+        .expect("quarantine.purge");
+        let ack = body_json(response);
+        assert_eq!(ack["purgedCount"], 1);
+        assert_eq!(ack["purgedBytes"], 8);
+        assert!(
+            !surrogate_path.exists(),
+            "сурогат мусить бути реально видалений з диска"
+        );
+
+        let database =
+            trashradar_index_sqlite::IndexDatabase::open_profile(&profile).expect("reopen");
+        let entry = database
+            .get_entry(QuarantineEntryId(1))
+            .unwrap()
+            .expect("запис лишається в manifest як історія (append-only)");
+        assert_eq!(entry.status, QuarantineStatus::Purged);
+
+        let _ = std::fs::remove_dir_all(profile);
     }
 
     /// T-106: snapshot містить живі томи (capacity/free) і бейдж карантину.

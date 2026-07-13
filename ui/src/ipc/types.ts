@@ -419,6 +419,12 @@ export interface QuarantineRestoreOutcome {
   usedSuffix: boolean;
 }
 
+/** Відповідь `quarantine.purge` (T-133). */
+export interface QuarantinePurgeAck {
+  purgedCount: number;
+  purgedBytes: number;
+}
+
 export interface AppSettings {
   quarantine: {
     ttlDays: number;

@@ -94,7 +94,11 @@
       "task": "T-132",
       "$comment": "{path} → null; open Explorer with the file selected (same primitive as candidate.reveal_in_explorer, T-125, but by raw path — a just-restored file isn't necessarily a HotIndex candidate). Feeds the restore toast's [Показати] action."
     },
-    "quarantine.purge": { "status": "planned", "task": "T-083" },
+    "quarantine.purge": {
+      "status": "implemented",
+      "task": "T-133",
+      "$comment": "{entryIds?:u64[]} → {purgedCount,purgedBytes}; entryIds present = selective destroy (\"Знищити позначені\"), absent/null = \"Спорожнити все\" (ManualPurgeSelection::All, T-083). Wraps ManualPurger (T-083) — validation + real file deletion + manifest→Purged + audit; empty entryIds → invalid_argument. Emits quarantine.changed (same payload as TTL-sweeper T-082) so Sidebar badge stays live. Hard confirmation dialog is UI-only, not enforced here — the only such confirmation in the product (docs/ui.md §7)."
+    },
     "quarantine.window": {
       "status": "implemented",
       "task": "T-130",

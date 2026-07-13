@@ -80,6 +80,7 @@ fn main() {
             ipc::quarantine_window,
             ipc::quarantine_restore_batch,
             ipc::quarantine_reveal_path,
+            ipc::quarantine_purge,
             preview_runtime::preview_thumbnail,
             preview_runtime::preview_scrub_strip,
             preview_runtime::preview_large,

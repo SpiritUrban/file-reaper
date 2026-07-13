@@ -25,7 +25,17 @@
  * (T-104) → `quarantine.reveal_path`. Відновлений запис прибирається зі
  * списку локально (той самий `entries`, без повторного фетчу).
  *
- * Пошук (T-134) і Знищити (T-133) — окремі задачі.
+ * T-133: Знищення — клік по плитці (поза кнопкою Restore) позначає її до
+ * знищення (червона рамка/підсвітка — деструктивна дія, ui.md палітра: «Червоний
+ * ТІЛЬКИ для видалення»); «Знищити позначені» / «Спорожнити все» відкривають
+ * ЄДИНЕ у продукті жорстке модальне підтвердження (усе інше в застосунку —
+ * м'який undo через тости, тут відновити ніяк — тому підтвердження, а не тост).
+ * `quarantine.purge` (Core use case `ManualPurger`, T-083, щойно підключений)
+ * реально видаляє сурогат з диска й переводить manifest у Purged — саме тому
+ * підтверджені записи прибираються з `entries` без нового фетчу: місце вже
+ * звільнено.
+ *
+ * Пошук (T-134) — окрема задача.
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -36,7 +46,11 @@ import { useAppState } from "@/store/appState";
 import { useQuarantineThumbnail } from "@/store/preview";
 import { toast } from "@/store/toasts";
 import type { HotkeyActionEventDetail } from "@/hotkeys";
-import type { QuarantineEntry, QuarantineRestoreOutcome } from "@/ipc/types";
+import type {
+  QuarantineEntry,
+  QuarantinePurgeAck,
+  QuarantineRestoreOutcome,
+} from "@/ipc/types";
 
 function fileName(path: string): string {
   const normalized = path.replace(/\\/g, "/");
@@ -103,24 +117,30 @@ function QuarantineTile({
   entry,
   now,
   focused,
+  marked,
   onFocusEntry,
   onRestore,
+  onToggleMark,
 }: {
   entry: QuarantineEntry;
   now: number;
   focused: boolean;
+  marked: boolean;
   onFocusEntry: (id: number) => void;
   onRestore: (entry: QuarantineEntry) => void;
+  onToggleMark: (id: number) => void;
 }) {
   const thumbnail = useQuarantineThumbnail(entry);
   return (
     <div
       tabIndex={0}
       onFocus={() => onFocusEntry(entry.id)}
+      onClick={() => onToggleMark(entry.id)}
       data-focused={focused || undefined}
+      data-marked={marked || undefined}
       title={entry.originalPath}
-      className={`relative flex aspect-[4/3] w-full flex-col overflow-hidden rounded-sm border bg-panel outline-none transition-colors focus-visible:border-accent focus-visible:ring-2 focus-visible:ring-accent/70 ${
-        focused ? "border-quarantine" : "border-quarantine/40"
+      className={`relative flex aspect-[4/3] w-full cursor-pointer flex-col overflow-hidden rounded-sm border bg-panel outline-none transition-colors focus-visible:ring-2 focus-visible:ring-accent/70 ${
+        marked ? "border-reap" : focused ? "border-quarantine" : "border-quarantine/40"
       }`}
     >
       <span className="absolute inset-0 flex items-center justify-center overflow-hidden bg-panel-2">
@@ -137,21 +157,31 @@ function QuarantineTile({
           </span>
         )}
       </span>
-      <span className="absolute left-2 top-2 z-10 rounded-full bg-bg/85 px-2 py-0.5 text-xs text-quarantine backdrop-blur-sm">
+      {marked ? <span className="absolute inset-0 z-10 bg-reap/30" /> : null}
+      <span className="absolute left-2 top-2 z-20 rounded-full bg-bg/85 px-2 py-0.5 text-xs text-quarantine backdrop-blur-sm">
         ⏳ {timeUntilExpiry(entry.expiresAt, now)}
       </span>
-      <button
-        type="button"
-        onClick={(e) => {
-          e.stopPropagation();
-          onRestore(entry);
-        }}
-        title="Відновити на початкове місце (R)"
-        className="absolute right-1 top-1 z-20 rounded bg-keep/90 px-1.5 py-0.5 text-xs font-medium text-bg hover:bg-keep"
-      >
-        R Відновити
-      </button>
-      <span className="absolute inset-x-0 bottom-0 z-10 flex h-[15%] min-h-7 items-center gap-1.5 bg-bg/85 px-2 backdrop-blur-sm">
+      {marked ? (
+        <span
+          className="absolute right-2 top-2 z-20 grid h-6 w-6 place-items-center rounded-full bg-reap text-sm font-bold text-bg"
+          aria-label="Позначено до знищення"
+        >
+          ╳
+        </span>
+      ) : (
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onRestore(entry);
+          }}
+          title="Відновити на початкове місце (R)"
+          className="absolute right-1 top-1 z-20 rounded bg-keep/90 px-1.5 py-0.5 text-xs font-medium text-bg hover:bg-keep"
+        >
+          R Відновити
+        </button>
+      )}
+      <span className="absolute inset-x-0 bottom-0 z-20 flex h-[15%] min-h-7 items-center gap-1.5 bg-bg/85 px-2 backdrop-blur-sm">
         <strong className="shrink-0 font-mono text-sm font-semibold text-ink">
           {formatBytes(entry.sizeBytes)}
         </strong>
@@ -163,13 +193,77 @@ function QuarantineTile({
   );
 }
 
+/** «Єдине у продукті жорстке підтвердження» (ui.md §7) — деструктивне, без undo. */
+function PurgeConfirmDialog({
+  count,
+  bytes,
+  all,
+  busy,
+  onCancel,
+  onConfirm,
+}: {
+  count: number;
+  bytes: number;
+  all: boolean;
+  busy: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-bg/80 backdrop-blur-sm">
+      <div className="w-96 rounded border border-reap/60 bg-panel p-4 shadow-lg">
+        <h2 className="mb-2 text-sm font-semibold text-reap">Остаточне знищення</h2>
+        <p className="mb-4 text-sm text-ink-dim">
+          {all
+            ? `Спорожнити весь карантин: ${count} ${count === 1 ? "файл" : "файлів"} · ${formatBytes(bytes)}.`
+            : `Знищити позначені: ${count} ${count === 1 ? "файл" : "файлів"} · ${formatBytes(bytes)}.`}{" "}
+          Місце звільниться одразу. Це не можна скасувати — файли не потрапляють у кошик Windows.
+        </p>
+        <div className="flex justify-end gap-2">
+          <button
+            type="button"
+            disabled={busy}
+            onClick={onCancel}
+            className="rounded border border-line px-3 py-1 text-sm text-ink-dim hover:bg-panel-2"
+          >
+            Скасувати
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={onConfirm}
+            className="rounded bg-reap px-3 py-1 text-sm font-semibold text-bg hover:bg-reap/85 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {busy ? "Знищення…" : "Знищити назавжди"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Що саме зараз підтверджується жорстким діалогом. */
+type PurgeRequest = { all: true } | { all: false; ids: number[] };
+
 export function QuarantineScreen() {
   const { quarantine } = useAppState();
   const [entries, setEntries] = useState<QuarantineEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [sort, setSort] = useState<SortKey>("expiry");
   const [focusedId, setFocusedId] = useState<number | null>(null);
+  const [markedIds, setMarkedIds] = useState<ReadonlySet<number>>(new Set());
+  const [purgeRequest, setPurgeRequest] = useState<PurgeRequest | null>(null);
+  const [purging, setPurging] = useState(false);
   const now = useLiveNow();
+
+  const toggleMark = useCallback((id: number) => {
+    setMarkedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
 
   const load = useCallback(() => {
     command<QuarantineEntry[]>("quarantine.window")
@@ -226,6 +320,38 @@ export function QuarantineScreen() {
     return () => window.removeEventListener("trashradar:hotkey", onHotkey);
   }, [focusedId, entries, restoreEntry]);
 
+  // T-133: виконати підтверджене знищення. `quarantine.purge` (ManualPurger,
+  // T-083) реально видаляє сурогат з диска й переводить manifest у Purged —
+  // тому знищені записи прибираються локально, без рефетчу.
+  const runPurge = useCallback((purgeRequestToRun: PurgeRequest) => {
+    setPurging(true);
+    command<QuarantinePurgeAck>("quarantine.purge", {
+      payload: purgeRequestToRun.all ? {} : { entryIds: purgeRequestToRun.ids },
+    })
+      .then((ack) => {
+        if (purgeRequestToRun.all) {
+          setEntries([]);
+        } else {
+          const purgedIds = new Set(purgeRequestToRun.ids);
+          setEntries((prev) => prev.filter((e) => !purgedIds.has(e.id)));
+        }
+        setMarkedIds(new Set());
+        setPurgeRequest(null);
+        toast({
+          message: `Знищено ${ack.purgedCount} ${ack.purgedCount === 1 ? "файл" : "файлів"} · ${formatBytes(ack.purgedBytes)}.`,
+          tone: "success",
+        });
+      })
+      .catch((err) => toast({ message: ipcErrorMessage(err), tone: "warning" }))
+      .finally(() => setPurging(false));
+  }, []);
+
+  const markedEntries = useMemo(
+    () => entries.filter((e) => markedIds.has(e.id)),
+    [entries, markedIds],
+  );
+  const markedBytes = markedEntries.reduce((sum, e) => sum + e.sizeBytes, 0);
+
   const sorted = useMemo(() => sortEntries(entries, sort), [entries, sort]);
 
   return (
@@ -262,10 +388,27 @@ export function QuarantineScreen() {
         </button>
         <button
           type="button"
-          disabled
-          className="rounded border border-line px-2 py-0.5 text-reap opacity-50"
+          disabled={markedEntries.length === 0}
+          onClick={() => setPurgeRequest({ all: false, ids: markedEntries.map((e) => e.id) })}
+          className={`rounded border px-2 py-0.5 ${
+            markedEntries.length === 0
+              ? "cursor-not-allowed border-line text-reap opacity-50"
+              : "border-reap/60 text-reap hover:bg-reap/10"
+          }`}
         >
-          Знищити позначені
+          Знищити позначені{markedEntries.length > 0 ? ` (${markedEntries.length})` : ""}
+        </button>
+        <button
+          type="button"
+          disabled={entries.length === 0}
+          onClick={() => setPurgeRequest({ all: true })}
+          className={`rounded border px-2 py-0.5 ${
+            entries.length === 0
+              ? "cursor-not-allowed border-line text-reap opacity-50"
+              : "border-reap/60 text-reap hover:bg-reap/10"
+          }`}
+        >
+          Спорожнити все
         </button>
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto p-3">
@@ -283,13 +426,29 @@ export function QuarantineScreen() {
                 entry={entry}
                 now={now}
                 focused={focusedId === entry.id}
+                marked={markedIds.has(entry.id)}
                 onFocusEntry={setFocusedId}
                 onRestore={restoreEntry}
+                onToggleMark={toggleMark}
               />
             ))}
           </div>
         )}
       </div>
+      {purgeRequest ? (
+        <PurgeConfirmDialog
+          all={purgeRequest.all}
+          count={purgeRequest.all ? entries.length : purgeRequest.ids.length}
+          bytes={
+            purgeRequest.all
+              ? entries.reduce((sum, e) => sum + e.sizeBytes, 0)
+              : markedBytes
+          }
+          busy={purging}
+          onCancel={() => setPurgeRequest(null)}
+          onConfirm={() => runPurge(purgeRequest)}
+        />
+      ) : null}
     </div>
   );
 }
