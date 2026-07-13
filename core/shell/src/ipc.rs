@@ -301,24 +301,113 @@ impl ProfileRuntime {
         }
         true
     }
+
+    /// Каталог профілю (T-130: `preview_runtime::quarantine_thumbnail`
+    /// резолвить сурогатний шлях без доступу до приватного поля цього типу).
+    pub fn profile_dir(&self) -> Option<std::path::PathBuf> {
+        self.profile.clone()
+    }
+}
+
+/// Відкрити manifest профілю; недоступний профіль/БД → `None` (деградація,
+/// не збій — той самий принцип, що й health-проби T-089). Спільна точка
+/// відкриття для бейджа (T-106) і вікна карантину (T-130) — жодного
+/// дублювання «open + degrade».
+fn open_profile_manifest(
+    profile: Option<std::path::PathBuf>,
+) -> Option<trashradar_index_sqlite::IndexDatabase> {
+    let profile = profile?;
+    match trashradar_index_sqlite::IndexDatabase::open_profile(profile) {
+        Ok(database) => Some(database),
+        Err(error) => {
+            tracing::warn!(%error, "Manifest профілю не відкрився");
+            None
+        }
+    }
 }
 
 /// Бейдж з профільного manifest; недоступна БД → порожній бейдж (деградація,
 /// не збій snapshot — той самий принцип, що й health-проби T-089).
 fn read_profile_quarantine_badge(profile: Option<std::path::PathBuf>) -> QuarantineBadge {
-    let Some(profile) = profile else {
-        return QuarantineBadge::default();
-    };
-    match trashradar_index_sqlite::IndexDatabase::open_profile(profile) {
-        Ok(database) => quarantine_badge(&database).unwrap_or_else(|error| {
+    match open_profile_manifest(profile) {
+        Some(database) => quarantine_badge(&database).unwrap_or_else(|error| {
             tracing::warn!(%error, "Бейдж Quarantine недоступний");
             QuarantineBadge::default()
         }),
-        Err(error) => {
-            tracing::warn!(%error, "Manifest для бейджа Quarantine не відкрився");
-            QuarantineBadge::default()
-        }
+        None => QuarantineBadge::default(),
     }
+}
+
+/// Дзеркало `QuarantineEntry` (ui/src/ipc/types.ts) для `quarantine.window` (T-130).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuarantineEntryDto {
+    pub id: u64,
+    pub batch_id: u64,
+    pub original_path: String,
+    pub size_bytes: u64,
+    pub quarantined_at: String,
+    pub expires_at: String,
+    pub status: trashradar_domain::quarantine::QuarantineStatus,
+}
+
+fn quarantine_entry_to_dto(
+    e: &trashradar_domain::quarantine::QuarantineEntry,
+) -> QuarantineEntryDto {
+    QuarantineEntryDto {
+        id: e.id.0,
+        batch_id: e.batch_id.map(|b| b.0).unwrap_or(0),
+        original_path: e.original_path.clone(),
+        size_bytes: e.size.0,
+        quarantined_at: unix_secs_to_iso8601(e.quarantined_at_unix.max(0) as u32),
+        expires_at: unix_secs_to_iso8601(e.expires_at_unix.max(0) as u32),
+        status: e.status,
+    }
+}
+
+/// Вміст журналу карантину (T-130): лише статус `Quarantined` (той самий
+/// фільтр, що й бейдж T-106) — не покинуто in_flight/restored/purged.
+/// Сортовано за найближчим автознищенням (wireframe ui.md §7); повне
+/// сортування за розміром/шляхом/датою — T-131.
+fn read_profile_quarantine_entries(profile: Option<std::path::PathBuf>) -> Vec<QuarantineEntryDto> {
+    use trashradar_app::ports::QuarantineManifest;
+    let Some(database) = open_profile_manifest(profile) else {
+        return Vec::new();
+    };
+    let mut entries = database.list_entries().unwrap_or_else(|error| {
+        tracing::warn!(%error, "Вікно Quarantine: manifest недоступний");
+        Vec::new()
+    });
+    entries.retain(|e| e.status == trashradar_domain::quarantine::QuarantineStatus::Quarantined);
+    entries.sort_by_key(|e| e.expires_at_unix);
+    entries.iter().map(quarantine_entry_to_dto).collect()
+}
+
+/// `quarantine.window` (T-130): плитки для екрана Quarantine.
+#[tauri::command]
+pub async fn quarantine_window(
+    profile: tauri::State<'_, ProfileRuntime>,
+) -> Result<Vec<QuarantineEntryDto>, CoreError> {
+    record_command();
+    let profile_dir = profile.profile_dir();
+    tauri::async_runtime::spawn_blocking(move || read_profile_quarantine_entries(profile_dir))
+        .await
+        .map_err(|error| CoreError::internal(format!("Quarantine window task failed: {error}")))
+}
+
+/// Один запис за id (T-130: `preview_runtime::quarantine_thumbnail` резолвить
+/// сурогатний шлях перед генерацією мініатюри) — не фільтрує за статусом,
+/// на відміну від `read_profile_quarantine_entries` (список екрана).
+pub(crate) fn find_quarantine_entry(
+    profile: Option<std::path::PathBuf>,
+    entry_id: u64,
+) -> Result<trashradar_domain::quarantine::QuarantineEntry, CoreError> {
+    use trashradar_app::ports::QuarantineManifest;
+    let database = open_profile_manifest(profile)
+        .ok_or_else(|| CoreError::invalid_argument("Профіль Quarantine недоступний."))?;
+    database
+        .get_entry(trashradar_domain::quarantine::QuarantineEntryId(entry_id))?
+        .ok_or_else(|| CoreError::invalid_argument("Запис Quarantine не знайдено."))
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1168,9 +1257,11 @@ mod tests {
                 category_all_candidates,
                 category_window,
                 category_set_threshold,
+                quarantine_window,
                 crate::preview_runtime::preview_thumbnail,
                 crate::preview_runtime::preview_scrub_strip,
                 crate::preview_runtime::preview_large,
+                crate::preview_runtime::quarantine_thumbnail,
                 crate::scan_runtime::scan_start,
                 crate::scan_runtime::scan_stop,
                 crate::scan_runtime::candidate_keep,
@@ -1438,6 +1529,95 @@ mod tests {
         );
         drop(database);
         let _ = std::fs::remove_dir_all(profile);
+    }
+
+    /// DoD T-130: вікно карантину — лише `Quarantined` (той самий фільтр, що
+    /// й бейдж T-106), сортовано за найближчим автознищенням; camelCase-поля
+    /// відповідають `ui/src/ipc/types.ts` `QuarantineEntry`.
+    #[test]
+    fn quarantine_window_returns_only_quarantined_sorted_by_expiry() {
+        use trashradar_app::ports::QuarantineManifest;
+        use trashradar_domain::candidate::ByteSize;
+        use trashradar_domain::quarantine::{
+            BatchId, QuarantineEntry, QuarantineEntryId, QuarantineStatus,
+        };
+
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let profile = std::env::temp_dir().join(format!("trashradar-t130-window-{nonce}"));
+        {
+            let database = trashradar_index_sqlite::IndexDatabase::open_profile(&profile)
+                .expect("manifest db");
+            database
+                .insert_entry(&QuarantineEntry {
+                    id: QuarantineEntryId(1),
+                    batch_id: None,
+                    original_path: "C:\\Users\\test\\later.bin".into(),
+                    surrogate_name: "0000000000000001".into(),
+                    size: ByteSize(500),
+                    quarantined_at_unix: 1_700_000_000,
+                    expires_at_unix: 1_700_200_000,
+                    status: QuarantineStatus::Quarantined,
+                })
+                .unwrap();
+            database
+                .insert_entry(&QuarantineEntry {
+                    id: QuarantineEntryId(2),
+                    batch_id: Some(BatchId(9)),
+                    original_path: "C:\\Users\\test\\sooner.bin".into(),
+                    surrogate_name: "0000000000000002".into(),
+                    size: ByteSize(300),
+                    quarantined_at_unix: 1_700_000_000,
+                    expires_at_unix: 1_700_100_000,
+                    status: QuarantineStatus::Quarantined,
+                })
+                .unwrap();
+            database
+                .insert_entry(&QuarantineEntry {
+                    id: QuarantineEntryId(3),
+                    batch_id: None,
+                    original_path: "C:\\Users\\test\\gone.bin".into(),
+                    surrogate_name: "0000000000000003".into(),
+                    size: ByteSize(999),
+                    quarantined_at_unix: 1_700_000_000,
+                    expires_at_unix: 1_700_050_000,
+                    status: QuarantineStatus::Purged,
+                })
+                .unwrap();
+        }
+
+        let (_app, webview) = test_app_in_profile(profile.clone());
+        let response = get_ipc_response(&webview, request("quarantine_window", json!({})))
+            .expect("quarantine.window");
+        let entries = body_json(response);
+        let entries = entries.as_array().expect("entries array");
+
+        assert_eq!(entries.len(), 2, "Purged не входить у вікно");
+        assert_eq!(entries[0]["id"], 2, "найближче автознищення — перше");
+        assert_eq!(entries[0]["batchId"], 9);
+        assert_eq!(entries[0]["sizeBytes"], 300);
+        assert_eq!(entries[0]["status"], "quarantined");
+        assert!(entries[0]["expiresAt"].as_str().unwrap().ends_with('Z'));
+        assert_eq!(entries[1]["id"], 1);
+        assert_eq!(entries[1]["batchId"], 0, "відсутній batchId у домені → 0");
+
+        let _ = std::fs::remove_dir_all(profile);
+    }
+
+    /// DoD T-130: невідомий запис — типізована відмова, не паніка.
+    #[test]
+    fn quarantine_thumbnail_rejects_unknown_entry() {
+        let (_app, webview) = test_app();
+        let result = get_ipc_response(
+            &webview,
+            request(
+                "quarantine_thumbnail",
+                json!({ "payload": { "entryId": 999 } }),
+            ),
+        );
+        assert!(result.is_err());
     }
 
     /// T-106: snapshot містить живі томи (capacity/free) і бейдж карантину.

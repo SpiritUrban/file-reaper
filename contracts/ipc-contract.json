@@ -90,6 +90,16 @@
       "$comment": "Core use case ready (QuarantineRestorer, T-080); command wiring with manifest DB state — T-081/T-132"
     },
     "quarantine.purge": { "status": "planned", "task": "T-083" },
+    "quarantine.window": {
+      "status": "implemented",
+      "task": "T-130",
+      "$comment": "{} → QuarantineEntry[] (id,batchId,originalPath,sizeBytes,quarantinedAt,expiresAt,status); лише status=quarantined (той самий фільтр, що й бейдж T-106), сортовано за найближчим автознищенням; повне сортування/фільтр — T-131/T-134"
+    },
+    "quarantine.thumbnail": {
+      "status": "implemented",
+      "task": "T-130",
+      "$comment": "{entryId, maxEdge?} → {status: cached|unavailable, dataUrl?}; та сама мініатюра, що й preview.thumbnail (T-120), але джерело — сурогатний шлях карантину, не HotIndex (файл уже переміщено, T-088); генерація синхронна в межах виклику (без P1-черги/preview.ready — client не може наперед відтворити сурогатний шлях для кореляції події)"
+    },
     "settings.get": {
       "status": "implemented",
       "task": "T-092",

@@ -221,29 +221,19 @@ pub struct PreviewThumbnailAck {
     pub data_url: Option<String>,
 }
 
-/// Статична мініатюра плитки (T-100/T-111 → T-120): кеш синхронно,
-/// інакше P1-генерація в фоні через ланцюжок джерел (architecture.md §5.2).
-#[tauri::command]
-pub async fn preview_thumbnail<R: Runtime>(
+/// Кеш синхронно, інакше P1-генерація в фоні через ланцюжок джерел
+/// (architecture.md §5.2) + доставка подією `preview.ready`. Спільне тіло
+/// `preview.thumbnail` (T-120, за candidate_id/HotIndex) і `quarantine.thumbnail`
+/// (T-130, за сурогатним шляхом карантину) — обидва мають один і той самий
+/// «кеш або заплануй» конвеєр, різниться лише звідки взявся `path`.
+async fn thumbnail_for_path<R: Runtime>(
     app: AppHandle<R>,
-    payload: PreviewThumbnailPayload,
-    scan: tauri::State<'_, crate::scan_runtime::ScanRuntime>,
-    preview: tauri::State<'_, PreviewRuntime>,
+    preview: &PreviewRuntime,
+    path: String,
+    size: ByteSize,
+    modified_at: Option<FsTimestamp>,
+    max_edge: u32,
 ) -> Result<PreviewThumbnailAck, CoreError> {
-    record_command();
-    let record = find_record(&scan, payload.candidate_id)?;
-    if record.unit != trashradar_domain::candidate::CandidateUnit::File {
-        // Папка-одиниця (T-053) — немає єдиного файла для мініатюри.
-        return Ok(PreviewThumbnailAck {
-            status: "unavailable".into(),
-            data_url: None,
-        });
-    }
-    let max_edge = payload.max_edge.unwrap_or(160).clamp(16, 1024);
-    let path = record.path.clone();
-    let size = record.size;
-    let modified_at = record.modified_at;
-
     let cache = preview.cache_handle();
     let lookup_path = path.clone();
     let cached = tauri::async_runtime::spawn_blocking(move || {
@@ -270,6 +260,84 @@ pub async fn preview_thumbnail<R: Runtime>(
         status: "scheduled".into(),
         data_url: None,
     })
+}
+
+/// Статична мініатюра плитки (T-100/T-111 → T-120): кеш синхронно,
+/// інакше P1-генерація в фоні через ланцюжок джерел (architecture.md §5.2).
+#[tauri::command]
+pub async fn preview_thumbnail<R: Runtime>(
+    app: AppHandle<R>,
+    payload: PreviewThumbnailPayload,
+    scan: tauri::State<'_, crate::scan_runtime::ScanRuntime>,
+    preview: tauri::State<'_, PreviewRuntime>,
+) -> Result<PreviewThumbnailAck, CoreError> {
+    record_command();
+    let record = find_record(&scan, payload.candidate_id)?;
+    if record.unit != trashradar_domain::candidate::CandidateUnit::File {
+        // Папка-одиниця (T-053) — немає єдиного файла для мініатюри.
+        return Ok(PreviewThumbnailAck {
+            status: "unavailable".into(),
+            data_url: None,
+        });
+    }
+    let max_edge = payload.max_edge.unwrap_or(160).clamp(16, 1024);
+    thumbnail_for_path(
+        app,
+        &preview,
+        record.path.clone(),
+        record.size,
+        record.modified_at,
+        max_edge,
+    )
+    .await
+}
+
+/// Параметри `quarantine.thumbnail`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuarantineThumbnailPayload {
+    pub entry_id: u64,
+    #[serde(default)]
+    pub max_edge: Option<u32>,
+}
+
+/// Мініатюра плитки Quarantine (T-130): той самий кеш+ланцюжок джерел, що й
+/// `preview.thumbnail`, але джерело — сурогатний шлях карантину
+/// (`quarantine-fs::surrogate_path`), не HotIndex: файл уже переміщений з
+/// оригінального шляху (T-088 прибирає його з індексу під час reap-rename),
+/// тому лукап іде через manifest (`ipc::find_quarantine_entry`), не `find_record`.
+/// `modified_at: None` — карантинні файли не змінюються на місці; валідність
+/// кешу за розміром (унікальний сурогатний шлях і так не колізує).
+#[tauri::command]
+pub async fn quarantine_thumbnail<R: Runtime>(
+    app: AppHandle<R>,
+    payload: QuarantineThumbnailPayload,
+    profile: tauri::State<'_, crate::ipc::ProfileRuntime>,
+    preview: tauri::State<'_, PreviewRuntime>,
+) -> Result<PreviewThumbnailAck, CoreError> {
+    record_command();
+    let profile_dir = profile.profile_dir();
+    let entry_id = payload.entry_id;
+    let entry = tauri::async_runtime::spawn_blocking(move || {
+        crate::ipc::find_quarantine_entry(profile_dir, entry_id)
+    })
+    .await
+    .map_err(|error| {
+        CoreError::internal(format!("Quarantine entry lookup task failed: {error}"))
+    })??;
+
+    let surrogate = trashradar_quarantine_fs::NativeQuarantineFs
+        .surrogate_path(&entry.original_path, &entry.surrogate_name)?;
+    let max_edge = payload.max_edge.unwrap_or(160).clamp(16, 1024);
+    thumbnail_for_path(
+        app,
+        &preview,
+        surrogate.to_string_lossy().into_owned(),
+        entry.size,
+        None,
+        max_edge,
+    )
+    .await
 }
 
 /// Параметри `preview.scrub_strip`.

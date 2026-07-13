@@ -92,6 +92,48 @@ export function useThumbnail(
   return src;
 }
 
+/** entryId → data URL мініатюри Quarantine (T-130); окремий кеш від плиток. */
+const quarantineThumbnailCache = new Map<number, string>();
+
+/**
+ * Мініатюра плитки Quarantine (T-130): `quarantine.thumbnail` — окрема
+ * команда від `preview.thumbnail`, бо джерело мініатюри — сурогатний шлях
+ * карантину, не HotIndex-запис (файл уже переміщено, T-088). Синхронна
+ * відповідь Core (без P1-черги/`preview.ready`, T-130) — жодної підписки
+ * на подію не потрібно, на відміну від `useThumbnail`.
+ */
+export function useQuarantineThumbnail(entry: { id: number }): string | null {
+  const [src, setSrc] = useState<string | null>(
+    () => quarantineThumbnailCache.get(entry.id) ?? null,
+  );
+
+  useEffect(() => {
+    const cached = quarantineThumbnailCache.get(entry.id);
+    if (cached) {
+      setSrc(cached);
+      return;
+    }
+    setSrc(null);
+    let cancelled = false;
+    command<PreviewThumbnailAck>("quarantine.thumbnail", {
+      payload: { entryId: entry.id },
+    })
+      .then((ack) => {
+        if (cancelled || ack.status !== "cached" || !ack.dataUrl) return;
+        quarantineThumbnailCache.set(entry.id, ack.dataUrl);
+        setSrc(ack.dataUrl);
+      })
+      .catch((error) => {
+        console.warn(`Failed to request thumbnail for quarantine entry ${entry.id}:`, error);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [entry.id]);
+
+  return src;
+}
+
 /**
  * Скраб-смуга відео на вимогу (T-120: рух курсора = кадри). Один запит
  * на сесію на кандидата — клієнтський кеш покриває повторні наведення.

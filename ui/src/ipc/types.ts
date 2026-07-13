@@ -313,6 +313,8 @@ export type CommandName =
   | "reap.undo_batch"
   | "quarantine.restore_batch"
   | "quarantine.purge"
+  | "quarantine.window"
+  | "quarantine.thumbnail"
   | "settings.get"
   | "settings.set"
   | "cache.get_usage"

@@ -1,16 +1,116 @@
 /**
- * Quarantine — «передсмертна зона» у бурштиновій темі (docs/ui.md §7).
- * Каркас: рамка режиму + порожня сітка. Наповнення — T-130…T-134.
+ * Quarantine — «передсмертна зона» файлів (T-130, docs/ui.md §7): та сама
+ * механіка сітки з превью, що й Radar, у бурштиновій рамці режиму (T-095
+ * amber — «режим карантину», не плутати з reap-червоним). Дані —
+ * `quarantine.window` (лише статус `quarantined`, той самий фільтр, що й
+ * бейдж T-106); превью — окрема команда `quarantine.thumbnail` (T-130), бо
+ * джерело — сурогатний шлях карантину, не HotIndex-запис (файл уже
+ * переміщено з оригінального шляху, T-088).
+ *
+ * Верхній рядок (обсяг/дата автоочищення) живиться вже наявним `useAppState`
+ * `quarantine`-бейджем (T-106/T-113) — не новий фетч. Рефетч списку на
+ * кожну зміну бейджа (той самий сигнал, що й `quarantine.changed`, T-082).
+ *
+ * Сортування/пошук (T-131/T-134) і дії Відновити/Знищити (T-132/T-133) —
+ * окремі задачі; тут лише читання й показ.
  */
 
-import { EmptyState } from "@/components/EmptyState";
+import { useCallback, useEffect, useState } from "react";
+
+import { command, ipcErrorMessage } from "@/ipc/client";
+import { formatBytes } from "@/store/format";
+import { useAppState } from "@/store/appState";
+import { useQuarantineThumbnail } from "@/store/preview";
+import type { QuarantineEntry } from "@/ipc/types";
+
+function fileName(path: string): string {
+  const normalized = path.replace(/\\/g, "/");
+  return normalized.split("/").filter(Boolean).at(-1) || path;
+}
+
+function sourceVolume(path: string): string {
+  const match = /^([A-Za-z]:)/.exec(path);
+  return match?.[1] ?? "?:";
+}
+
+/** Час до автознищення (ui.md §7 «⏳ 2 дн»); минуле → «згорає». */
+function timeUntilExpiry(iso: string): string {
+  const expires = Date.parse(iso);
+  if (!Number.isFinite(expires)) return "—";
+  const ms = expires - Date.now();
+  if (ms <= 0) return "згорає";
+  const days = Math.floor(ms / 86_400_000);
+  if (days >= 1) return `${days} дн`;
+  const hours = Math.floor(ms / 3_600_000);
+  if (hours >= 1) return `${hours} год`;
+  return `${Math.max(1, Math.floor(ms / 60_000))} хв`;
+}
+
+function QuarantineTile({ entry }: { entry: QuarantineEntry }) {
+  const thumbnail = useQuarantineThumbnail(entry);
+  return (
+    <div
+      className="relative flex aspect-[4/3] w-full flex-col overflow-hidden rounded-sm border border-quarantine/40 bg-panel"
+      title={entry.originalPath}
+    >
+      <span className="absolute inset-0 flex items-center justify-center overflow-hidden bg-panel-2">
+        {thumbnail ? (
+          <img
+            src={thumbnail}
+            alt=""
+            className="h-full w-full object-cover"
+            draggable={false}
+          />
+        ) : (
+          <span className="text-4xl text-ink-faint" aria-hidden="true">
+            ◇
+          </span>
+        )}
+      </span>
+      <span className="absolute left-2 top-2 z-10 rounded-full bg-bg/85 px-2 py-0.5 text-xs text-quarantine backdrop-blur-sm">
+        ⏳ {timeUntilExpiry(entry.expiresAt)}
+      </span>
+      <span className="absolute inset-x-0 bottom-0 z-10 flex h-[15%] min-h-7 items-center gap-1.5 bg-bg/85 px-2 backdrop-blur-sm">
+        <strong className="shrink-0 font-mono text-sm font-semibold text-ink">
+          {formatBytes(entry.sizeBytes)}
+        </strong>
+        <span className="min-w-0 flex-1 truncate font-mono text-xs text-ink-dim">
+          з {sourceVolume(entry.originalPath)} {fileName(entry.originalPath)}
+        </span>
+      </span>
+    </div>
+  );
+}
 
 export function QuarantineScreen() {
+  const { quarantine } = useAppState();
+  const [entries, setEntries] = useState<QuarantineEntry[]>([]);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(() => {
+    command<QuarantineEntry[]>("quarantine.window")
+      .then((res) => {
+        setEntries(res);
+        setError(null);
+      })
+      .catch((err) => setError(ipcErrorMessage(err)));
+  }, []);
+
+  // Рефетч на кожну зміну бейджа (T-106) — той самий сигнал, що й
+  // quarantine.changed (purge/restore міняють held-лічильники).
+  useEffect(() => {
+    load();
+  }, [load, quarantine.heldCount, quarantine.heldBytes]);
+
   return (
     <div className="flex h-full flex-col border-t-2 border-quarantine/60">
       <div className="flex h-8 shrink-0 items-center gap-3 border-b border-line px-3 text-xs">
         <span className="font-mono text-quarantine">
-          — файлів · — · найближче автознищення: —
+          {quarantine.heldCount} файлів · {formatBytes(quarantine.heldBytes)} · найближче
+          автознищення:{" "}
+          {quarantine.nextPurgeAtUnix > 0
+            ? new Date(quarantine.nextPurgeAtUnix * 1000).toLocaleDateString("uk-UA")
+            : "—"}
         </span>
         <div className="flex-1" />
         <button
@@ -28,8 +128,20 @@ export function QuarantineScreen() {
           Знищити позначені
         </button>
       </div>
-      <div className="min-h-0 flex-1">
-        <EmptyState title="Сітка карантину" taskRef="T-130…T-134" />
+      <div className="min-h-0 flex-1 overflow-y-auto p-3">
+        {error ? (
+          <div className="text-sm text-ink-faint">{error}</div>
+        ) : entries.length === 0 ? (
+          <div className="flex h-full items-center justify-center text-sm text-ink-faint">
+            Карантин порожній
+          </div>
+        ) : (
+          <div className="grid grid-cols-[repeat(auto-fill,minmax(10rem,1fr))] gap-2">
+            {entries.map((entry) => (
+              <QuarantineTile key={entry.id} entry={entry} />
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );
