@@ -11,11 +11,17 @@
  * `quarantine`-бейджем (T-106/T-113) — не новий фетч. Рефетч списку на
  * кожну зміну бейджа (той самий сигнал, що й `quarantine.changed`, T-082).
  *
- * Сортування/пошук (T-131/T-134) і дії Відновити/Знищити (T-132/T-133) —
- * окремі задачі; тут лише читання й показ.
+ * T-131: таймер ⏳ на плитці «живий» — `useLiveNow` тікає раз на 30 с,
+ * достатньо для гранулярності дн/год/хв (без секундної стрілки); дефолтне
+ * сортування Core (найближче згорання, T-130) доповнено клієнтським пікером
+ * дата видалення/розмір/шлях — той самий патерн, що й фільтр-чипси T-107
+ * (сортування над уже завантаженим `entries`, без повторного запиту).
+ *
+ * Пошук (T-134) і дії Відновити/Знищити (T-132/T-133) — окремі задачі; тут
+ * лише читання, показ і сортування.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { command, ipcErrorMessage } from "@/ipc/client";
 import { formatBytes } from "@/store/format";
@@ -34,10 +40,10 @@ function sourceVolume(path: string): string {
 }
 
 /** Час до автознищення (ui.md §7 «⏳ 2 дн»); минуле → «згорає». */
-function timeUntilExpiry(iso: string): string {
+function timeUntilExpiry(iso: string, now: number): string {
   const expires = Date.parse(iso);
   if (!Number.isFinite(expires)) return "—";
-  const ms = expires - Date.now();
+  const ms = expires - now;
   if (ms <= 0) return "згорає";
   const days = Math.floor(ms / 86_400_000);
   if (days >= 1) return `${days} дн`;
@@ -46,7 +52,45 @@ function timeUntilExpiry(iso: string): string {
   return `${Math.max(1, Math.floor(ms / 60_000))} хв`;
 }
 
-function QuarantineTile({ entry }: { entry: QuarantineEntry }) {
+/** Живий годинник з кроком 30 с — досить для дн/год/хв гранулярності таймера. */
+function useLiveNow(): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(id);
+  }, []);
+  return now;
+}
+
+type SortKey = "expiry" | "quarantined_at" | "size" | "path";
+
+const SORT_OPTIONS: { value: SortKey; label: string }[] = [
+  { value: "expiry", label: "Згорання" },
+  { value: "quarantined_at", label: "Дата видалення" },
+  { value: "size", label: "Розмір" },
+  { value: "path", label: "Початковий шлях" },
+];
+
+function sortEntries(entries: QuarantineEntry[], sort: SortKey): QuarantineEntry[] {
+  const sorted = [...entries];
+  switch (sort) {
+    case "expiry":
+      sorted.sort((a, b) => Date.parse(a.expiresAt) - Date.parse(b.expiresAt));
+      break;
+    case "quarantined_at":
+      sorted.sort((a, b) => Date.parse(b.quarantinedAt) - Date.parse(a.quarantinedAt));
+      break;
+    case "size":
+      sorted.sort((a, b) => b.sizeBytes - a.sizeBytes);
+      break;
+    case "path":
+      sorted.sort((a, b) => a.originalPath.localeCompare(b.originalPath));
+      break;
+  }
+  return sorted;
+}
+
+function QuarantineTile({ entry, now }: { entry: QuarantineEntry; now: number }) {
   const thumbnail = useQuarantineThumbnail(entry);
   return (
     <div
@@ -68,7 +112,7 @@ function QuarantineTile({ entry }: { entry: QuarantineEntry }) {
         )}
       </span>
       <span className="absolute left-2 top-2 z-10 rounded-full bg-bg/85 px-2 py-0.5 text-xs text-quarantine backdrop-blur-sm">
-        ⏳ {timeUntilExpiry(entry.expiresAt)}
+        ⏳ {timeUntilExpiry(entry.expiresAt, now)}
       </span>
       <span className="absolute inset-x-0 bottom-0 z-10 flex h-[15%] min-h-7 items-center gap-1.5 bg-bg/85 px-2 backdrop-blur-sm">
         <strong className="shrink-0 font-mono text-sm font-semibold text-ink">
@@ -86,6 +130,8 @@ export function QuarantineScreen() {
   const { quarantine } = useAppState();
   const [entries, setEntries] = useState<QuarantineEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [sort, setSort] = useState<SortKey>("expiry");
+  const now = useLiveNow();
 
   const load = useCallback(() => {
     command<QuarantineEntry[]>("quarantine.window")
@@ -102,6 +148,8 @@ export function QuarantineScreen() {
     load();
   }, [load, quarantine.heldCount, quarantine.heldBytes]);
 
+  const sorted = useMemo(() => sortEntries(entries, sort), [entries, sort]);
+
   return (
     <div className="flex h-full flex-col border-t-2 border-quarantine/60">
       <div className="flex h-8 shrink-0 items-center gap-3 border-b border-line px-3 text-xs">
@@ -112,6 +160,20 @@ export function QuarantineScreen() {
             ? new Date(quarantine.nextPurgeAtUnix * 1000).toLocaleDateString("uk-UA")
             : "—"}
         </span>
+        <label className="flex items-center gap-1 text-ink-faint">
+          <span>Сорт:</span>
+          <select
+            value={sort}
+            onChange={(e) => setSort(e.target.value as SortKey)}
+            className="rounded border border-line bg-transparent px-1 py-0.5 text-ink-dim focus:border-accent focus:outline-none"
+          >
+            {SORT_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value} className="bg-panel text-ink">
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </label>
         <div className="flex-1" />
         <button
           type="button"
@@ -131,14 +193,14 @@ export function QuarantineScreen() {
       <div className="min-h-0 flex-1 overflow-y-auto p-3">
         {error ? (
           <div className="text-sm text-ink-faint">{error}</div>
-        ) : entries.length === 0 ? (
+        ) : sorted.length === 0 ? (
           <div className="flex h-full items-center justify-center text-sm text-ink-faint">
             Карантин порожній
           </div>
         ) : (
           <div className="grid grid-cols-[repeat(auto-fill,minmax(10rem,1fr))] gap-2">
-            {entries.map((entry) => (
-              <QuarantineTile key={entry.id} entry={entry} />
+            {sorted.map((entry) => (
+              <QuarantineTile key={entry.id} entry={entry} now={now} />
             ))}
           </div>
         )}
