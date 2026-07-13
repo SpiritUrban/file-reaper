@@ -20,10 +20,16 @@
  * DoD «відповідає wireframe», не претендує на точність для мульти-дискового
  * позначення одночасно.
  *
- * Маркери «?» підозрілих позицій (T-136) і викидання ✕ зі списку (T-137) —
- * окремі задачі, тут немає. «Відправити у Quarantine» — навмисно `disabled`:
- * виконання (прогрес батч-reap + тост-скасування) — T-138, залежить від
- * `reap.execute` (planned) і не будувалось заздалегідь.
+ * T-136: маркер «?» — м'яка підказка, не блокування (ui.md §8): недавній
+ * доступ (< 7 днів) або робоча локація (Desktop/Documents). Підозрілі рядки
+ * підіймаються нагору **в межах своєї групи**, а групи, що містять хоча б
+ * одну підозрілу позицію, підіймаються над рештою груп — групування
+ * директорій (T-135) при цьому не ламається.
+ *
+ * Викидання ✕ зі списку (T-137) — окрема задача, тут немає. «Відправити у
+ * Quarantine» — навмисно `disabled`: виконання (прогрес батч-reap + тост-
+ * скасування) — T-138, залежить від `reap.execute` (planned) і не
+ * будувалось заздалегідь.
  */
 
 import { useEffect, useState } from "react";
@@ -74,6 +80,40 @@ function groupByDirectory(candidates: Candidate[]): Array<[string, Candidate[]]>
   return [...map.entries()];
 }
 
+const RECENT_ACCESS_MS = 7 * 86_400_000;
+const WORKING_LOCATION_SEGMENTS = ["desktop", "documents"];
+
+function isWorkingLocation(path: string): boolean {
+  const lower = path.toLowerCase();
+  return WORKING_LOCATION_SEGMENTS.some((seg) => lower.includes(`\\${seg}\\`) || lower.endsWith(`\\${seg}`));
+}
+
+/** «?» — м'яка підказка (T-136): недавній доступ або робоча локація. */
+function suspicionReason(candidate: Candidate): string | null {
+  const accessed = Date.parse(candidate.lastAccessAt);
+  const recentAccess = Number.isFinite(accessed) && Date.now() - accessed < RECENT_ACCESS_MS;
+  const workingLocation = isWorkingLocation(candidate.path);
+  if (recentAccess && workingLocation) return "Недавній доступ і робоча директорія (Desktop/Documents)";
+  if (recentAccess) return "Недавній доступ (менш ніж 7 днів тому)";
+  if (workingLocation) return "Робоча директорія (Desktop/Documents)";
+  return null;
+}
+
+/** Підозрілі — нагору в межах групи; групи з підозрілими — над рештою груп. */
+function sortBySuspicion(groups: Array<[string, Candidate[]]>): Array<[string, Candidate[]]> {
+  const withFlags = groups.map<[string, Candidate[], boolean]>(([dir, items]) => {
+    const sorted = [...items].sort((a, b) => {
+      const as = suspicionReason(a) ? 1 : 0;
+      const bs = suspicionReason(b) ? 1 : 0;
+      return bs - as;
+    });
+    const hasSuspicious = sorted.some((c) => suspicionReason(c) !== null);
+    return [dir, sorted, hasSuspicious];
+  });
+  withFlags.sort((a, b) => Number(b[2]) - Number(a[2]));
+  return withFlags.map(([dir, items]) => [dir, items]);
+}
+
 interface DiskForecast {
   volume: string;
   usedPercentNow: number;
@@ -117,8 +157,15 @@ function computeForecast(
 
 function ReapRow({ candidate }: { candidate: Candidate }) {
   const thumbnail = useThumbnail(candidate);
+  const reason = suspicionReason(candidate);
   return (
     <div className="flex items-center gap-2 border-b border-line/50 py-1 text-xs last:border-b-0">
+      <span
+        className="w-3 shrink-0 text-center font-semibold text-quarantine"
+        title={reason ?? undefined}
+      >
+        {reason ? "?" : ""}
+      </span>
       <div className="flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded-sm bg-panel-2">
         {thumbnail ? (
           <img src={thumbnail} alt="" className="h-full w-full object-cover" draggable={false} />
@@ -166,7 +213,7 @@ export function ReapConfirmOverlay() {
 
   if (!open) return null;
 
-  const groups = groupByDirectory(candidates);
+  const groups = sortBySuspicion(groupByDirectory(candidates));
   const forecast = computeForecast(candidates, volumes, quarantine.heldBytes);
   const ttlDays = settings?.quarantine.ttlDays ?? 30;
 
