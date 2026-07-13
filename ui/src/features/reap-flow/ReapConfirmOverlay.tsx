@@ -26,10 +26,16 @@
  * одну підозрілу позицію, підіймаються над рештою груп — групування
  * директорій (T-135) при цьому не ламається.
  *
- * Викидання ✕ зі списку (T-137) — окрема задача, тут немає. «Відправити у
- * Quarantine» — навмисно `disabled`: виконання (прогрес батч-reap + тост-
- * скасування) — T-138, залежить від `reap.execute` (planned) і не
- * будувалось заздалегідь.
+ * T-137: ✕ на рядку знімає позначення **скрізь** — той самий `selectionStore`
+ * (T-108), що й сітка категорій/Reap Bar, тож тайл у вже змонтованому
+ * `CategoryScreen` (T-099) миттєво втрачає ╳-позначку, а підсумок нагорі
+ * (живий з `useMarkedSummary`) перераховується сам, без ручного узгодження.
+ * Викинута позиція НЕ повертається у сітку кандидатом на reap — вона просто
+ * знову undecided, як і будь-який unmark (T-116).
+ *
+ * «Відправити у Quarantine» — навмисно `disabled`: виконання (прогрес
+ * батч-reap + тост-скасування) — T-138, залежить від `reap.execute`
+ * (planned) і не будувалось заздалегідь.
  */
 
 import { useEffect, useState } from "react";
@@ -155,7 +161,13 @@ function computeForecast(
   };
 }
 
-function ReapRow({ candidate }: { candidate: Candidate }) {
+function ReapRow({
+  candidate,
+  onDismiss,
+}: {
+  candidate: Candidate;
+  onDismiss: (candidate: Candidate) => void;
+}) {
   const thumbnail = useThumbnail(candidate);
   const reason = suspicionReason(candidate);
   return (
@@ -178,6 +190,14 @@ function ReapRow({ candidate }: { candidate: Candidate }) {
       <span className="min-w-0 flex-1 truncate text-ink">{fileName(candidate.path)}</span>
       <span className="shrink-0 font-mono text-ink-dim">{formatBytes(candidate.sizeBytes)}</span>
       <span className="shrink-0 text-ink-faint">{ageLabel(candidate.lastAccessAt)}</span>
+      <button
+        type="button"
+        onClick={() => onDismiss(candidate)}
+        title="Прибрати зі списку (зняти позначення)"
+        className="shrink-0 rounded px-1 text-ink-faint hover:bg-panel-2 hover:text-reap"
+      >
+        ✕
+      </button>
     </div>
   );
 }
@@ -201,6 +221,14 @@ export function ReapConfirmOverlay() {
       .catch((err) => setError(ipcErrorMessage(err)))
       .finally(() => setLoading(false));
   }, [open]);
+
+  // T-137: зняти позначення скрізь (selectionStore, T-108) — той самий стор,
+  // що й Reap Bar/тайли сітки, тож підсумок і сама сітка синхронізуються
+  // самі, без ручного узгодження; локально прибираємо рядок зі списку.
+  const dismissCandidate = (candidate: Candidate) => {
+    selectionStore.unmark(candidate.id);
+    setCandidates((prev) => prev.filter((c) => c.id !== candidate.id));
+  };
 
   useEffect(() => {
     if (!open) return;
@@ -244,7 +272,7 @@ export function ReapConfirmOverlay() {
               <div key={dir} className="mb-3">
                 <div className="mb-1 truncate font-mono text-xs text-ink-faint">{dir}</div>
                 {items.map((c) => (
-                  <ReapRow key={c.id} candidate={c} />
+                  <ReapRow key={c.id} candidate={c} onDismiss={dismissCandidate} />
                 ))}
               </div>
             ))
