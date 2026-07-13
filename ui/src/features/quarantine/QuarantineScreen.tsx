@@ -35,10 +35,18 @@
  * підтверджені записи прибираються з `entries` без нового фетчу: місце вже
  * звільнено.
  *
- * Пошук (T-134) — окрема задача.
+ * T-134: Пошук `/` — той самий хоткей і UX, що й T-109 (real-time, Escape
+ * закриває й очищує), але локальний до цього екрана: TopBar `SearchBox`
+ * (T-109) прив'язаний до `CategoryId` через `searchStore` і мовчки
+ * нічого не робить, коли `categoryId===null` (Quarantine — не категорія).
+ * Тому власний невеликий стан тут, а не розширення категорійного стору.
+ * Фільтрує за `originalPath` (DoD: не суррогатним іменем — той файл, що вже
+ * лежить під `.trashradar\quarantine`, користувачу не показується і не має
+ * значення для пошуку «де він був»), той самий infix/case-insensitive
+ * принцип, що й `applySearchQuery` (T-109), лише на іншому полі запису.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { command, ipcErrorMessage } from "@/ipc/client";
 import { formatBytes } from "@/store/format";
@@ -93,6 +101,13 @@ const SORT_OPTIONS: { value: SortKey; label: string }[] = [
   { value: "size", label: "Розмір" },
   { value: "path", label: "Початковий шлях" },
 ];
+
+/** Пошук infix по `originalPath` (T-134 DoD: не суррогатним іменем). */
+function filterByOriginalPath(entries: QuarantineEntry[], query: string): QuarantineEntry[] {
+  if (!query) return entries;
+  const needle = query.toLowerCase();
+  return entries.filter((e) => e.originalPath.toLowerCase().includes(needle));
+}
 
 function sortEntries(entries: QuarantineEntry[], sort: SortKey): QuarantineEntry[] {
   const sorted = [...entries];
@@ -254,7 +269,36 @@ export function QuarantineScreen() {
   const [markedIds, setMarkedIds] = useState<ReadonlySet<number>>(new Set());
   const [purgeRequest, setPurgeRequest] = useState<PurgeRequest | null>(null);
   const [purging, setPurging] = useState(false);
+  const [searchActive, setSearchActive] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const now = useLiveNow();
+
+  // T-134: `/` активує пошук (той самий хоткей, що й T-109 у категоріях),
+  // Escape закриває й очищує. Локальний стан — не searchStore (T-109), бо той
+  // прив'язаний до CategoryId, а Quarantine не категорія.
+  useEffect(() => {
+    const onHotkey = (event: Event) => {
+      const { action } = (event as CustomEvent<HotkeyActionEventDetail>).detail;
+      if (action === "search") setSearchActive(true);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && searchActive) {
+        setSearchActive(false);
+        setSearchQuery("");
+      }
+    };
+    window.addEventListener("trashradar:hotkey", onHotkey);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("trashradar:hotkey", onHotkey);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [searchActive]);
+
+  useEffect(() => {
+    if (searchActive) searchInputRef.current?.focus();
+  }, [searchActive]);
 
   const toggleMark = useCallback((id: number) => {
     setMarkedIds((prev) => {
@@ -352,7 +396,11 @@ export function QuarantineScreen() {
   );
   const markedBytes = markedEntries.reduce((sum, e) => sum + e.sizeBytes, 0);
 
-  const sorted = useMemo(() => sortEntries(entries, sort), [entries, sort]);
+  const searched = useMemo(
+    () => filterByOriginalPath(entries, searchQuery),
+    [entries, searchQuery],
+  );
+  const sorted = useMemo(() => sortEntries(searched, sort), [searched, sort]);
 
   return (
     <div className="flex h-full flex-col border-t-2 border-quarantine/60">
@@ -364,6 +412,31 @@ export function QuarantineScreen() {
             ? new Date(quarantine.nextPurgeAtUnix * 1000).toLocaleDateString("uk-UA")
             : "—"}
         </span>
+        {searchActive ? (
+          <input
+            ref={searchInputRef}
+            type="text"
+            placeholder="Пошук за початковим шляхом…"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.currentTarget.value)}
+            onBlur={() => setSearchActive(searchQuery.length > 0)}
+            className="w-48 rounded bg-panel-2 px-2 py-0.5 text-ink placeholder:text-ink-faint focus:outline-none focus:ring-1 focus:ring-accent"
+          />
+        ) : (
+          <button
+            type="button"
+            onClick={() => setSearchActive(true)}
+            className="font-mono text-ink-faint hover:text-ink"
+            title="Пошук за початковим шляхом (/)"
+          >
+            🔍 /
+          </button>
+        )}
+        {searchQuery ? (
+          <span className="text-ink-faint">
+            · результати: {sorted.length} з {entries.length}
+          </span>
+        ) : null}
         <label className="flex items-center gap-1 text-ink-faint">
           <span>Сорт:</span>
           <select
@@ -416,7 +489,9 @@ export function QuarantineScreen() {
           <div className="text-sm text-ink-faint">{error}</div>
         ) : sorted.length === 0 ? (
           <div className="flex h-full items-center justify-center text-sm text-ink-faint">
-            Карантин порожній
+            {searchQuery && entries.length > 0
+              ? "Жодного збігу з пошуком"
+              : "Карантин порожній"}
           </div>
         ) : (
           <div className="grid grid-cols-[repeat(auto-fill,minmax(10rem,1fr))] gap-2">
