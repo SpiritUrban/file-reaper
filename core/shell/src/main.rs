@@ -77,6 +77,7 @@ fn main() {
             ipc::category_all_candidates,
             ipc::category_window,
             ipc::category_set_threshold,
+            ipc::candidate_batch,
             ipc::quarantine_window,
             ipc::quarantine_restore_batch,
             ipc::quarantine_reveal_path,

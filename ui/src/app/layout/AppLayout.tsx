@@ -14,8 +14,10 @@ import { CleanupSummaryScreen } from "@/features/cleanup-summary/CleanupSummaryS
 import { DuplicatesScreen } from "@/features/duplicates/DuplicatesScreen";
 import { HealthScreen } from "@/features/health/HealthScreen";
 import { QuarantineScreen } from "@/features/quarantine/QuarantineScreen";
+import { ReapConfirmOverlay } from "@/features/reap-flow/ReapConfirmOverlay";
 import { SettingsScreen } from "@/features/settings/SettingsScreen";
 import { CATEGORIES, categoryRowsByWeight, categoryTitle } from "@/store/categories";
+import { reapOverlayStore } from "@/store/reapOverlay";
 import { useMarkedSummary } from "@/store/selection";
 import { useAppState } from "@/store/appState";
 import type { CategoryId } from "@/ipc/types";
@@ -123,6 +125,23 @@ export function AppLayout() {
     return () => window.removeEventListener("trashradar:hotkey", onHotkey);
   }, [navigate]);
 
+  // T-135: Ctrl+Enter відкриває оверлей підтвердження REAP (global контекст,
+  // T-103 `reap_confirm`) — той самий guard, що й кнопка REAP у TopBar
+  // (нічого не відкривати, якщо нема позначень). Ref — той самий stale-closure
+  // захист, що й вище для category_previous/next.
+  const markedCountRef = useRef(marked.count);
+  markedCountRef.current = marked.count;
+  useEffect(() => {
+    const onHotkey = (event: Event) => {
+      const { action } = (event as CustomEvent<HotkeyActionEventDetail>).detail;
+      if (action === "reap_confirm" && markedCountRef.current > 0) {
+        reapOverlayStore.open();
+      }
+    };
+    window.addEventListener("trashradar:hotkey", onHotkey);
+    return () => window.removeEventListener("trashradar:hotkey", onHotkey);
+  }, []);
+
   const context = activeCategory
     ? categoryTitle(activeCategory)
     : isQuarantine
@@ -186,6 +205,8 @@ export function AppLayout() {
       {/* Немодальна панель деталей (T-123): поруч із сіткою, не поверх неї. */}
       <DetailsPanel />
       <ToastViewport />
+      {/* Єдиний оверлей у продукті (T-135): REAP-кнопка/Ctrl+Enter. */}
+      <ReapConfirmOverlay />
     </div>
   );
 }

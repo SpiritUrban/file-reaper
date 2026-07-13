@@ -82,6 +82,11 @@
       "task": "T-125",
       "$comment": "payload {candidateId:u64} → null; open Explorer with the file selected (explorer.exe /select,\"path\"); fire-and-forget, Err only if the candidate is unknown or the process failed to spawn"
     },
+    "candidate.batch": {
+      "status": "implemented",
+      "task": "T-135",
+      "$comment": "{candidateIds:u64[]} → Candidate[] (same shape as category.window); looks up arbitrary ids across ALL categories via HotIndex, not scoped to one — Reap Bar/selectionStore (T-108) only track candidateId+sizeBytes across the whole session, so the REAP confirmation overlay needs a category-agnostic way to fetch full path/kind/decision for whatever's currently marked. Unknown ids silently drop, not an error."
+    },
     "reap.execute": { "status": "planned", "task": "T-079" },
     "reap.undo_batch": { "status": "planned", "task": "T-081" },
     "quarantine.restore_batch": {

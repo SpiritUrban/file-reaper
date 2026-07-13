@@ -1369,6 +1369,40 @@ pub fn category_window(
         .collect())
 }
 
+/// Параметри `candidate.batch`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CandidateBatchPayload {
+    pub candidate_ids: Vec<u64>,
+}
+
+/// `candidate.batch` (T-135): повні дані довільного набору кандидатів,
+/// **не** обмежених однією категорією — Reap Bar (T-108) і `selectionStore`
+/// тримають лише candidateId+sizeBytes на всю сесію (позначення комбінується
+/// з кількох категорій), тож оверлей підтвердження REAP потребує окремого
+/// способу дістати path/kind/decision саме для позначених id. Той самий
+/// лукап по HotIndex, що й `find_record`/`candidates_in_category`, лише без
+/// фільтра за категорією; невідомі id мовчки випадають (той самий принцип,
+/// що category.window: рядок з битим id — не помилка команди).
+#[tauri::command]
+pub fn candidate_batch(
+    payload: CandidateBatchPayload,
+    scan: tauri::State<'_, scan_runtime::ScanRuntime>,
+) -> Result<Vec<CandidateDto>, CoreError> {
+    record_command();
+    let wanted: std::collections::HashSet<u64> = payload.candidate_ids.into_iter().collect();
+    Ok(scan
+        .index
+        .get_all()
+        .into_iter()
+        .filter(|r| wanted.contains(&r.candidate_id.0))
+        .map(|record| {
+            let also_in = scan.also_in_categories(record.candidate_id, record.category);
+            file_record_to_candidate_dto(&record, also_in)
+        })
+        .collect())
+}
+
 /// Категорії предикатних детекторів з редагованими порогами (T-039..042):
 /// id категорії == id детектора у [`scan_runtime::configured_registry`].
 const THRESHOLD_EDITABLE_CATEGORIES: &[CategoryId] = &[
@@ -1471,6 +1505,7 @@ mod tests {
                 category_all_candidates,
                 category_window,
                 category_set_threshold,
+                candidate_batch,
                 quarantine_window,
                 quarantine_restore_batch,
                 quarantine_reveal_path,
@@ -2373,6 +2408,47 @@ mod tests {
             "sample_file_record не задає created_at — DTO чесно віддає null, не 1970-01-01"
         );
         assert_eq!(list[0]["alsoIn"], json!([]));
+    }
+
+    /// DoD T-135: `candidate.batch` дістає повні дані для позначених id **з
+    /// різних категорій** одним запитом (Reap Bar/selectionStore не знають
+    /// категорії, лише candidateId); невідомий id мовчки випадає, а не
+    /// падає команда; Keep не виключається спеціально (candidate.batch не
+    /// категорійна вибірка — рішення відображається як є).
+    #[test]
+    fn candidate_batch_returns_requested_ids_across_categories() {
+        let (app, webview) = test_app();
+        use tauri::Manager;
+        let scan = app.state::<crate::scan_runtime::ScanRuntime>();
+        scan.index
+            .insert_batch(vec![
+                sample_file_record(
+                    1,
+                    10 * 1024 * 1024,
+                    CategoryId::LargeFiles,
+                    Decision::Undecided,
+                ),
+                sample_file_record(4, 5 * 1024 * 1024, CategoryId::OldFiles, Decision::Marked),
+                sample_file_record(5, 1024 * 1024, CategoryId::TempFiles, Decision::Undecided),
+            ])
+            .unwrap();
+
+        let response = get_ipc_response(
+            &webview,
+            request(
+                "candidate_batch",
+                json!({ "payload": { "candidateIds": [1, 4, 999] } }),
+            ),
+        )
+        .expect("candidate.batch");
+        let candidates = body_json(response);
+        let list = candidates.as_array().expect("масив кандидатів");
+        assert_eq!(list.len(), 2, "999 невідомий — мовчки випадає");
+        let ids: Vec<u64> = list.iter().map(|c| c["id"].as_u64().unwrap()).collect();
+        assert!(ids.contains(&1) && ids.contains(&4));
+        assert!(!ids.contains(&5), "5 не запитувався — не входить");
+        let marked = list.iter().find(|c| c["id"] == 4).unwrap();
+        assert_eq!(marked["decision"], "marked");
     }
 
     /// DoD T-121: файл, що заслуговує на кілька категорій, несе маркер

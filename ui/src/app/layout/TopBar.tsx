@@ -3,7 +3,9 @@
  * T-107: живий контекст категорії (обсяг · кількість) і фільтр-чипси
  * Розмір/Тип/Вік/Диск — випадайки з пресетами, активний чип заповнений
  * і знімається хрестиком; чипси комбінуються (AND у store/filters).
- * Живий Reap Bar — T-108, пошук — T-109.
+ * Живий Reap Bar — T-108, пошук — T-109. Кнопка REAP відкриває оверлей
+ * підтвердження (T-135) — `reapOverlayStore`, той самий патерн, що й
+ * `detailsPanelStore` (T-123).
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -20,6 +22,7 @@ import {
   candidateFilterStore,
   useCandidateFilters,
 } from "@/store/filters";
+import { reapOverlayStore } from "@/store/reapOverlay";
 import { searchStore, useSearchState } from "@/store/search";
 import type { CategoryId, FileKind, ScanStartAck } from "@/ipc/types";
 
@@ -314,10 +317,11 @@ export function TopBar({
         <button
           type="button"
           disabled={markedCount === 0}
+          onClick={() => reapOverlayStore.open()}
           title={
             markedCount === 0
               ? "Немає позначених кандидатів"
-              : "Перемістити позначене у Quarantine (оверлей — T-135)"
+              : "Переглянути перед відправкою у Quarantine (Ctrl+Enter)"
           }
           className={`rounded px-3 py-1 text-sm font-semibold transition-colors ${
             markedCount === 0

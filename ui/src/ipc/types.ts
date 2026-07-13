@@ -309,6 +309,7 @@ export type CommandName =
   | "candidate.mark"
   | "candidate.keep"
   | "candidate.reveal_in_explorer"
+  | "candidate.batch"
   | "reap.execute"
   | "reap.undo_batch"
   | "quarantine.restore_batch"
