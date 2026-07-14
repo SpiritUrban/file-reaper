@@ -26,6 +26,8 @@ export interface CandidateTileProps {
   className?: string;
   onActivate?: (candidate: Candidate, event: React.MouseEvent) => void;
   onFocusCandidate?: (candidate: Candidate) => void;
+  /** Наведення курсора (T-140): у Live Preview → велике превью праворуч. */
+  onHoverCandidate?: (candidate: Candidate) => void;
 }
 
 const KIND_GLYPH: Record<FileKind, string> = {
@@ -82,6 +84,7 @@ export function CandidateTile({
   className = "",
   onActivate,
   onFocusCandidate,
+  onHoverCandidate,
 }: CandidateTileProps) {
   const marked = markedOverride ?? candidate.decision === "marked";
   const kept = candidate.decision === "keep";
@@ -116,6 +119,7 @@ export function CandidateTile({
       data-scrubbing={scrubbing || undefined}
       onClick={(event) => onActivate?.(candidate, event)}
       onFocus={() => onFocusCandidate?.(candidate)}
+      onMouseEnter={() => onHoverCandidate?.(candidate)}
       onMouseMove={handleMouseMove}
       onMouseLeave={handleMouseLeave}
     >

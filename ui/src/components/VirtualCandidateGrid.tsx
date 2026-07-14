@@ -70,6 +70,8 @@ export interface VirtualCandidateGridProps {
   isMarked?: (candidate: Candidate) => boolean;
   onActivate?: (candidate: Candidate, event: React.MouseEvent) => void;
   onFocusCandidate?: (candidate: Candidate) => void;
+  /** Наведення курсора (T-140): у Live Preview → велике превью праворуч. */
+  onHoverCandidate?: (candidate: Candidate) => void;
   /** Поточна кількість колонок геометрії (T-123: клавіатурна навігація ↑/↓). */
   onColumnsChange?: (columns: number) => void;
   emptyTitle?: string;
@@ -83,6 +85,7 @@ export function VirtualCandidateGrid({
   isMarked,
   onActivate,
   onFocusCandidate,
+  onHoverCandidate,
   onColumnsChange,
   emptyTitle = "Немає кандидатів у цій категорії",
 }: VirtualCandidateGridProps) {
@@ -195,6 +198,7 @@ export function VirtualCandidateGrid({
                 {...(isMarked ? { marked: isMarked(candidate) } : {})}
                 {...(onActivate ? { onActivate } : {})}
                 {...(onFocusCandidate ? { onFocusCandidate } : {})}
+                {...(onHoverCandidate ? { onHoverCandidate } : {})}
               />
             );
           })}

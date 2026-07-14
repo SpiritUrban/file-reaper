@@ -51,6 +51,8 @@ import {
   useCandidateFilters,
 } from "@/store/filters";
 import { gridDensityStore, useGridDensity } from "@/store/gridDensity";
+import { livePreviewStore } from "@/store/livePreview";
+import { previewTargetStore } from "@/store/previewTarget";
 import { applySearchQuery, useSearchState } from "@/store/search";
 import { selectionStore, useMarkedSummary } from "@/store/selection";
 import { keepCandidate, useKeptIds } from "@/store/keep";
@@ -191,6 +193,13 @@ export function CategoryScreen({ categoryId }: CategoryScreenProps) {
     anchorRef.current = candidate.id;
   };
 
+  // T-140: у Live Preview кандидат «під курсором»/у фокусі стає ціллю
+  // великого превью праворуч. Поза режимом — no-op (права зона не змонтована),
+  // тож наведення в звичайній сітці не тягне жодного preview.large.
+  const previewIfLive = (candidate: Candidate) => {
+    if (livePreviewStore.getSnapshot().enabled) previewTargetStore.set(candidate);
+  };
+
   const handleActivate = (candidate: Candidate, event: React.MouseEvent) => {
     if (event.shiftKey && anchorRef.current !== null) {
       markRange(anchorRef.current, candidate.id);
@@ -214,6 +223,7 @@ export function CategoryScreen({ categoryId }: CategoryScreenProps) {
     const next = list[nextIndex];
     if (!next) return;
     setFocusedId(next.id);
+    previewIfLive(next);
     if (detailsPanelStore.isOpen()) detailsPanelStore.open(next);
   };
 
@@ -266,6 +276,7 @@ export function CategoryScreen({ categoryId }: CategoryScreenProps) {
       if (detail.categoryId !== categoryId) return;
       const first = visibleRef.current[0];
       setFocusedId(first ? first.id : null);
+      if (first) previewIfLive(first);
     };
     window.addEventListener("trashradar:focus-category-first", onFocusFirst);
     return () =>
@@ -309,7 +320,11 @@ export function CategoryScreen({ categoryId }: CategoryScreenProps) {
           focusedId={focusedId}
           isMarked={(candidate) => selectionStore.isMarked(candidate.id)}
           onActivate={handleActivate}
-          onFocusCandidate={(candidate) => setFocusedId(candidate.id)}
+          onFocusCandidate={(candidate) => {
+            setFocusedId(candidate.id);
+            previewIfLive(candidate);
+          }}
+          onHoverCandidate={previewIfLive}
           onColumnsChange={(columns) => {
             columnsRef.current = columns;
           }}

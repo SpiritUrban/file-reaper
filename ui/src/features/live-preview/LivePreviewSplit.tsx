@@ -13,6 +13,8 @@ import { useCallback, useRef, type PointerEvent as ReactPointerEvent, type React
 
 import { livePreviewStore, useLivePreview } from "@/store/livePreview";
 
+import { LivePreviewPane } from "./LivePreviewPane";
+
 export function LivePreviewSplit({ children }: { children: ReactNode }) {
   const { enabled, leftRatio } = useLivePreview();
   const containerRef = useRef<HTMLDivElement>(null);
@@ -66,11 +68,7 @@ export function LivePreviewSplit({ children }: { children: ReactNode }) {
             onPointerDown={startDrag}
             className="w-1 shrink-0 cursor-col-resize bg-line transition-colors hover:bg-accent"
           />
-          <div className="flex min-w-0 flex-1 items-center justify-center bg-bg">
-            <span className="select-none text-xs text-ink-faint">
-              Зона превью — наведіть курсор на плитку зліва
-            </span>
-          </div>
+          <LivePreviewPane />
         </>
       ) : null}
     </div>
