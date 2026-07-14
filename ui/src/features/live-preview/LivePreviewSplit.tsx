@@ -1,12 +1,10 @@
 /**
- * Розкладка двох зон Live Preview (docs/ui.md §10.1/§10.5, T-139).
+ * Розкладка двох зон Live Preview (docs/ui.md §10.1/§10.5/§10.6, T-139/T-149).
  *
- * Ліва зона — наявний host екранів (сітка + вся навігація, T-099), права —
- * суцільна зона превью без власних контролів (нуль втрат площі, §10.1). Між
- * ними перетяжна межа: тягнеться мишею, позиція запам'ятовується
- * (`livePreviewStore` → localStorage), тож праву зону можна виставити точно
- * під фізичний монітор. Саме превью (наведення=файл на весь екран) — T-140;
- * тут лише каркас розкладки.
+ * Ліва зона — host екранів (сітка + навігація, T-099), права — суцільне
+ * превью. Перетяжна межа: пропорція **окремо** для одно- й дводисплейного
+ * режиму (T-149): на одному моніторі дефолт right ≈ 55% (left 45%); на
+ * розтягнутому вікні — 50/50, кожен слот у localStorage.
  */
 
 import {
@@ -24,7 +22,7 @@ import { LivePreviewActionBar } from "./LivePreviewActionBar";
 import { LivePreviewPane } from "./LivePreviewPane";
 
 export function LivePreviewSplit({ children }: { children: ReactNode }) {
-  const { enabled, leftRatio } = useLivePreview();
+  const { enabled, leftRatio, singleDisplay } = useLivePreview();
   const containerRef = useRef<HTMLDivElement>(null);
   const draggingRef = useRef(false);
 
@@ -32,6 +30,11 @@ export function LivePreviewSplit({ children }: { children: ReactNode }) {
   // увімкнення не стартувало autoplay на застарілому candidateId.
   useEffect(() => {
     if (!enabled) livePreviewScrubStore.clear();
+  }, [enabled]);
+
+  // T-149: при увімкненні LP і на resize — підтягнути single/dual слот.
+  useEffect(() => {
+    if (enabled) livePreviewStore.refreshDisplayMode();
   }, [enabled]);
 
   // Межа лівої зони рахується від власного контейнера спліту (виключає
@@ -67,9 +70,15 @@ export function LivePreviewSplit({ children }: { children: ReactNode }) {
   const leftStyle = enabled
     ? { flex: `0 0 ${leftRatio * 100}%`, minWidth: 0 }
     : undefined;
+  const rightPct = Math.round((1 - leftRatio) * 100);
 
   return (
-    <div ref={containerRef} className="flex min-w-0 flex-1">
+    <div
+      ref={containerRef}
+      className="flex min-w-0 flex-1"
+      data-lp-display={singleDisplay ? "single" : "dual"}
+      data-lp-right-pct={enabled ? rightPct : undefined}
+    >
       <div className={`flex min-w-0 flex-col ${enabled ? "" : "flex-1"}`} style={leftStyle}>
         {/* Панель дій — зверху лівої зони (§10.5), лише в режимі (T-142). */}
         {enabled ? <LivePreviewActionBar /> : null}
@@ -81,6 +90,12 @@ export function LivePreviewSplit({ children }: { children: ReactNode }) {
             role="separator"
             aria-orientation="vertical"
             aria-label="Перетягнути межу превью"
+            aria-valuenow={rightPct}
+            aria-valuetext={
+              singleDisplay
+                ? `Один монітор: превью ${rightPct}%`
+                : `Кілька моніторів: превью ${rightPct}%`
+            }
             onPointerDown={startDrag}
             className="w-1 shrink-0 cursor-col-resize bg-line transition-colors hover:bg-accent"
           />

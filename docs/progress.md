@@ -228,6 +228,9 @@
 
 | T-148 Live Preview у Quarantine: озброєні дії Відновити/Знищити | ✅ | 2026-07-14 | local | Чисто UI (без змін Core). **ui.md §10.6:** LP на карантині з набором Відновити/Знищити. **`armedAction`:** типи `restore`/`purge`; `QUARANTINE_ARMED_ACTIONS` (1/2/3); `oppositeAction` restore↔purge; `isDestructiveArmed` (reap+purge → авторозряд T-144). **`quarantinePreviewTargetStore`:** ціль LP для карантину (файл уже move — не HotIndex). **`LivePreviewPane`:** dual mode candidate / quarantine (великий `quarantine.thumbnail` maxEdge=1024 + накладка originalPath·size·expires). **`LivePreviewActionBar`:** палітра за route `/quarantine`; при зміні екрана disarm невалідної дії. **`QuarantineScreen`:** hover/focus → preview; клік = armed (restore негайно / purge → T-133 confirm / none); ПКМ = opposite; курсор-іконка. CategoryScreen чистить quarantine target. Перевірено: `npm run typecheck`; `npm run build`. Наступна: T-149 Однодисплейний режим (~55% правої зони). |
 
+
+| T-149 Однодисплейний режим: права зона ~55% вікна | ✅ | 2026-07-14 | local | Чисто UI. **ui.md §10.6 / DoD:** на одному моніторі LP повноцінний, right ≈ 55%; пропорція single/dual **окремо**. **`livePreviewStore`:** `leftRatioSingle` (дефолт 0.45 → right 55%), `leftRatioDual` (0.5); `detectSingleDisplay()` (outerWidth ≤ availWidth×1.15); active `leftRatio` + `singleDisplay`; `setLeftRatio` пише в поточний слот; resize → `refreshDisplayMode` без змішування слотів; legacy `leftRatio` → dual, single лишає 45%. **`LivePreviewSplit`:** `data-lp-display` single/dual, `data-lp-right-pct`, aria на separator. Перевірено: typecheck + build. Наступна: T-150 Екран налаштувань (E18). |
+
 ## Легенда
 
 ✅ виконано й верифіковано · 🔄 в роботі · ⛔ заблоковано (причина в нотатках)
