@@ -62,6 +62,7 @@ import { livePreviewStore, useLivePreview } from "@/store/livePreview";
 import { livePreviewScrubStore } from "@/store/livePreviewScrub";
 import { prefetchAlongTrajectory } from "@/store/preview";
 import { previewTargetStore } from "@/store/previewTarget";
+import { quarantinePreviewTargetStore } from "@/store/quarantinePreviewTarget";
 import { applySearchQuery, useSearchState } from "@/store/search";
 import { selectionStore, useMarkedSummary } from "@/store/selection";
 import { keepCandidate, useKeptIds } from "@/store/keep";
@@ -235,6 +236,8 @@ export function CategoryScreen({ categoryId }: CategoryScreenProps) {
   const previewIfLive = (candidate: Candidate) => {
     if (!livePreviewStore.getSnapshot().enabled) return;
     const prevId = prevPreviewIdRef.current;
+    // T-148: не тримати карантинну ціль, коли наводимо в категорії.
+    quarantinePreviewTargetStore.clear();
     previewTargetStore.set(candidate);
     // T-146: прогрів 2–3 наступних за знаком руху (видимий список сітки).
     prefetchAlongTrajectory(visibleRef.current, candidate.id, prevId);
@@ -253,12 +256,15 @@ export function CategoryScreen({ categoryId }: CategoryScreenProps) {
   };
 
   // T-143: колір пульс-обводу за роллю дії (reap/keep/move/open).
+  // restore/purge — лише Quarantine (T-148); у CategoryScreen не застосовуються.
   const RING_BY_ACTION: Record<ArmedAction, string> = {
     reap: "ring-4 ring-reap",
     keep: "ring-4 ring-keep",
     move: "ring-4 ring-accent",
     open: "ring-4 ring-accent",
     none: "",
+    restore: "ring-4 ring-keep",
+    purge: "ring-4 ring-reap",
   };
 
   const flashTile = (id: number, action: ArmedAction) => {

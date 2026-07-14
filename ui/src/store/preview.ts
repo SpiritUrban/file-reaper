@@ -116,12 +116,25 @@ const quarantineThumbnailCache = new Map<number, string>();
  * відповідь Core (без P1-черги/`preview.ready`, T-130) — жодної підписки
  * на подію не потрібно, на відміну від `useThumbnail`.
  */
-export function useQuarantineThumbnail(entry: { id: number }): string | null {
-  const [src, setSrc] = useState<string | null>(
-    () => quarantineThumbnailCache.get(entry.id) ?? null,
+/**
+ * Мініатюра / велике превью запису Quarantine.
+ * `maxEdge` — 160 для плитки (T-130), до 1024 для Live Preview (T-148).
+ * Кеш ключується лише `entryId` (перший успішний dataUrl); для LP
+ * достатньо того самого PNG, розтягнутого `object-contain`.
+ */
+export function useQuarantineThumbnail(
+  entry: { id: number } | null,
+  maxEdge = 160,
+): string | null {
+  const [src, setSrc] = useState<string | null>(() =>
+    entry ? (quarantineThumbnailCache.get(entry.id) ?? null) : null,
   );
 
   useEffect(() => {
+    if (!entry) {
+      setSrc(null);
+      return;
+    }
     const cached = quarantineThumbnailCache.get(entry.id);
     if (cached) {
       setSrc(cached);
@@ -130,7 +143,7 @@ export function useQuarantineThumbnail(entry: { id: number }): string | null {
     setSrc(null);
     let cancelled = false;
     command<PreviewThumbnailAck>("quarantine.thumbnail", {
-      payload: { entryId: entry.id },
+      payload: { entryId: entry.id, maxEdge },
     })
       .then((ack) => {
         if (cancelled || ack.status !== "cached" || !ack.dataUrl) return;
@@ -143,7 +156,7 @@ export function useQuarantineThumbnail(entry: { id: number }): string | null {
     return () => {
       cancelled = true;
     };
-  }, [entry.id]);
+  }, [entry?.id, maxEdge]);
 
   return src;
 }

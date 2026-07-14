@@ -1,17 +1,28 @@
 /**
- * Озброєна дія Live Preview (T-142, docs/ui.md §10.3): у двомоніторному
- * режимі користувач один раз обирає дію на панелі, і далі клік по плитці
- * виконує саме її (виконання — T-143). Тут — лише СТАН вибору + метадані
- * (колір/іконка) для панелі й курсора.
+ * Озброєна дія Live Preview (T-142, docs/ui.md §10.3; T-148 — Quarantine):
+ * у двомоніторному режимі користувач один раз обирає дію на панелі, і далі
+ * клік по плитці виконує саме її (виконання — T-143 / T-148). Тут — лише
+ * СТАН вибору + метадані (колір/іконка) для панелі й курсора.
  *
  * Ефемерний, сесійний (як `previewTargetStore`): дефолт — `none` («Нічого»,
  * тільки перегляд). Перемикання клавішами 1–5 / Esc-розрядження /
  * авторозрядження деструктивної за таймаутом — T-144.
+ *
+ * Набір дій залежить від екрана (§10.6): категорії — reap/keep/…; Quarantine —
+ * restore/purge. Спільний стор; при зміні екрана ActionBar валідує поточну дію.
  */
 
 import { useSyncExternalStore } from "react";
 
-export type ArmedAction = "reap" | "keep" | "move" | "open" | "none";
+/** Категорії (T-142) + Quarantine (T-148). */
+export type ArmedAction =
+  | "reap"
+  | "keep"
+  | "move"
+  | "open"
+  | "none"
+  | "restore"
+  | "purge";
 
 export interface ArmedActionMeta {
   id: ArmedAction;
@@ -73,15 +84,56 @@ export const ARMED_ACTIONS: readonly ArmedActionMeta[] = [
   },
 ];
 
+/** T-148 / §10.6: набір дій Live Preview на екрані Quarantine. */
+export const QUARANTINE_ARMED_ACTIONS: readonly ArmedActionMeta[] = [
+  {
+    id: "restore",
+    label: "Відновити",
+    glyph: "↩",
+    hex: "#46a758",
+    armedClass: "border-keep bg-keep/15 text-keep",
+    digit: 1,
+  },
+  {
+    id: "purge",
+    label: "Знищити",
+    glyph: "╳",
+    hex: "#e5484d",
+    armedClass: "border-reap bg-reap/15 text-reap",
+    digit: 2,
+  },
+  {
+    id: "none",
+    label: "Нічого",
+    glyph: "",
+    hex: null,
+    armedClass: "border-ink-dim/50 bg-panel-2 text-ink",
+    digit: 3,
+  },
+];
+
+const ALL_METAS: readonly ArmedActionMeta[] = [
+  ...ARMED_ACTIONS.filter((m) => m.id !== "none"),
+  ...QUARANTINE_ARMED_ACTIONS.filter((m) => m.id !== "none"),
+  ARMED_ACTIONS.find((m) => m.id === "none")!,
+];
+
 export function armedActionMeta(action: ArmedAction): ArmedActionMeta {
-  return ARMED_ACTIONS.find((meta) => meta.id === action) ?? ARMED_ACTIONS[4]!;
+  return ALL_METAS.find((meta) => meta.id === action) ?? ARMED_ACTIONS[4]!;
+}
+
+/** Чи дія валідна для набору панелі (категорія vs карантин). */
+export function isActionInPalette(
+  action: ArmedAction,
+  palette: readonly ArmedActionMeta[],
+): boolean {
+  return palette.some((meta) => meta.id === action);
 }
 
 /**
- * Протилежна дія для ПКМ (T-143, §10.3): reap↔keep — дзеркальна пара. Для
- * move/open «протилежне» = безпечне `keep` (лишити), бо в осі
- * деструктивне↔безпечне keep — універсальний безпечний вибір. `none` не має
- * протилежного (тільки перегляд).
+ * Протилежна дія для ПКМ (T-143 / T-148, §10.3):
+ * категорії — reap↔keep; Quarantine — restore↔purge.
+ * move/open → keep; `none` → `none`.
  */
 export function oppositeAction(action: ArmedAction): ArmedAction {
   switch (action) {
@@ -92,9 +144,18 @@ export function oppositeAction(action: ArmedAction): ArmedAction {
     case "move":
     case "open":
       return "keep";
+    case "restore":
+      return "purge";
+    case "purge":
+      return "restore";
     case "none":
       return "none";
   }
+}
+
+/** Деструктивні дії, що авторозряджаються за таймаутом (T-144). */
+export function isDestructiveArmed(action: ArmedAction): boolean {
+  return action === "reap" || action === "purge";
 }
 
 /**

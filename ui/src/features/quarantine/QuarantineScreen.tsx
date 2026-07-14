@@ -44,6 +44,11 @@
  * лежить під `.trashradar\quarantine`, користувачу не показується і не має
  * значення для пошуку «де він був»), той самий infix/case-insensitive
  * принцип, що й `applySearchQuery` (T-109), лише на іншому полі запису.
+ *
+ * T-148: Live Preview (§10.6) — наведення = велике превью праворуч
+ * (`quarantinePreviewTargetStore` + `quarantine.thumbnail`); озброєні дії
+ * Відновити / Знищити / Нічого (панель T-142 у `LivePreviewActionBar`);
+ * клік = озброєна дія, ПКМ = протилежна (restore↔purge).
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -51,7 +56,16 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { command, ipcErrorMessage } from "@/ipc/client";
 import { formatBytes } from "@/store/format";
 import { useAppState } from "@/store/appState";
+import {
+  armedActionCursor,
+  oppositeAction,
+  useArmedAction,
+  type ArmedAction,
+} from "@/store/armedAction";
+import { livePreviewStore, useLivePreview } from "@/store/livePreview";
 import { useQuarantineThumbnail } from "@/store/preview";
+import { previewTargetStore } from "@/store/previewTarget";
+import { quarantinePreviewTargetStore } from "@/store/quarantinePreviewTarget";
 import { toast } from "@/store/toasts";
 import type { HotkeyActionEventDetail } from "@/hotkeys";
 import type {
@@ -133,27 +147,49 @@ function QuarantineTile({
   now,
   focused,
   marked,
+  cursor,
   onFocusEntry,
+  onHoverEntry,
+  onActivate,
+  onSecondaryActivate,
   onRestore,
   onToggleMark,
+  livePreview,
 }: {
   entry: QuarantineEntry;
   now: number;
   focused: boolean;
   marked: boolean;
+  /** CSS-курсор озброєної дії (T-148 / T-142). */
+  cursor?: string;
   onFocusEntry: (id: number) => void;
+  onHoverEntry?: (entry: QuarantineEntry) => void;
+  /** Live Preview: клік = озброєна дія; поза LP — позначення до знищення. */
+  onActivate?: (entry: QuarantineEntry) => void;
+  onSecondaryActivate?: (entry: QuarantineEntry, event: React.MouseEvent) => void;
   onRestore: (entry: QuarantineEntry) => void;
   onToggleMark: (id: number) => void;
+  livePreview: boolean;
 }) {
   const thumbnail = useQuarantineThumbnail(entry);
   return (
     <div
       tabIndex={0}
       onFocus={() => onFocusEntry(entry.id)}
-      onClick={() => onToggleMark(entry.id)}
+      onMouseEnter={() => onHoverEntry?.(entry)}
+      onClick={() => {
+        if (livePreview && onActivate) onActivate(entry);
+        else onToggleMark(entry.id);
+      }}
+      onContextMenu={
+        livePreview && onSecondaryActivate
+          ? (event) => onSecondaryActivate(entry, event)
+          : undefined
+      }
       data-focused={focused || undefined}
       data-marked={marked || undefined}
       title={entry.originalPath}
+      style={cursor ? { cursor } : undefined}
       className={`relative flex aspect-[4/3] w-full cursor-pointer flex-col overflow-hidden rounded-sm border bg-panel outline-none transition-colors focus-visible:ring-2 focus-visible:ring-accent/70 ${
         marked ? "border-reap" : focused ? "border-quarantine" : "border-quarantine/40"
       }`}
@@ -262,6 +298,9 @@ type PurgeRequest = { all: true } | { all: false; ids: number[] };
 
 export function QuarantineScreen() {
   const { quarantine } = useAppState();
+  const livePreview = useLivePreview();
+  const armed = useArmedAction();
+  const tileCursor = livePreview.enabled ? armedActionCursor(armed) : undefined;
   const [entries, setEntries] = useState<QuarantineEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [sort, setSort] = useState<SortKey>("expiry");
@@ -273,6 +312,14 @@ export function QuarantineScreen() {
   const [searchQuery, setSearchQuery] = useState("");
   const searchInputRef = useRef<HTMLInputElement>(null);
   const now = useLiveNow();
+
+  // T-148: при розмонтуванні / виході з карантину — скинути ціль LP,
+  // щоб права зона не тримала застарілий сурогат.
+  useEffect(() => {
+    return () => {
+      quarantinePreviewTargetStore.clear();
+    };
+  }, []);
 
   // T-134: `/` активує пошук (той самий хоткей, що й T-109 у категоріях),
   // Escape закриває й очищує. Локальний стан — не searchStore (T-109), бо той
@@ -335,6 +382,9 @@ export function QuarantineScreen() {
         const outcome = outcomes[0];
         if (!outcome) return;
         setEntries((prev) => prev.filter((e) => e.id !== entry.id));
+        if (quarantinePreviewTargetStore.getSnapshot()?.id === entry.id) {
+          quarantinePreviewTargetStore.clear();
+        }
         toast({
           message: `Відновлено у ${outcome.restoredPath}`,
           tone: "success",
@@ -351,6 +401,58 @@ export function QuarantineScreen() {
       })
       .catch((err) => toast({ message: ipcErrorMessage(err), tone: "warning" }));
   }, []);
+
+  // T-148: наведення/фокус у Live Preview → велике превью праворуч.
+  // Candidate-ціль скидаємо, щоб права зона не показувала чужий файл.
+  const previewIfLive = useCallback(
+    (entry: QuarantineEntry) => {
+      if (!livePreviewStore.getSnapshot().enabled) return;
+      previewTargetStore.clear();
+      quarantinePreviewTargetStore.set(entry);
+    },
+    [],
+  );
+
+  // T-148: озброєна дія на плитці (restore / purge / none).
+  // purge — жорстке підтвердження (T-133 інваріант: єдине місце знищення).
+  const applyArmedAction = useCallback(
+    (entry: QuarantineEntry, action: ArmedAction) => {
+      switch (action) {
+        case "restore":
+          restoreEntry(entry);
+          break;
+        case "purge":
+          setPurgeRequest({ all: false, ids: [entry.id] });
+          break;
+        case "none":
+          break;
+        default:
+          // категорійні дії не валідні на карантині (ActionBar disarm-ить)
+          break;
+      }
+    },
+    [restoreEntry],
+  );
+
+  const handleActivate = useCallback(
+    (entry: QuarantineEntry) => {
+      if (!livePreview.enabled) {
+        toggleMark(entry.id);
+        return;
+      }
+      if (armed !== "none") applyArmedAction(entry, armed);
+    },
+    [livePreview.enabled, armed, applyArmedAction, toggleMark],
+  );
+
+  const handleSecondary = useCallback(
+    (entry: QuarantineEntry, event: React.MouseEvent) => {
+      if (!livePreview.enabled || armed === "none") return;
+      event.preventDefault();
+      applyArmedAction(entry, oppositeAction(armed));
+    },
+    [livePreview.enabled, armed, applyArmedAction],
+  );
 
   // R (контекст "quarantine", T-103) — відновити сфокусовану плитку.
   useEffect(() => {
@@ -502,7 +604,16 @@ export function QuarantineScreen() {
                 now={now}
                 focused={focusedId === entry.id}
                 marked={markedIds.has(entry.id)}
-                onFocusEntry={setFocusedId}
+                {...(tileCursor ? { cursor: tileCursor } : {})}
+                livePreview={livePreview.enabled}
+                onFocusEntry={(id) => {
+                  setFocusedId(id);
+                  const found = sorted.find((e) => e.id === id);
+                  if (found) previewIfLive(found);
+                }}
+                onHoverEntry={previewIfLive}
+                onActivate={handleActivate}
+                onSecondaryActivate={handleSecondary}
                 onRestore={restoreEntry}
                 onToggleMark={toggleMark}
               />

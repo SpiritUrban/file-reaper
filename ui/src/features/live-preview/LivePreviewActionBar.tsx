@@ -1,29 +1,25 @@
 /**
- * Панель озброєної дії Live Preview (docs/ui.md §10.3/§10.5, T-142/T-144/T-147):
- * зверху лівої зони. Клік по кнопці озброює дію; озброєна кнопка підсвічена
- * кольором ролі (червоний reap, зелений keep, accent move/open), тож поточна
- * дія завжди видима й кольорово однозначна. Курсор над плитками — окремо
- * (`armedActionCursor`, застосовує `CategoryScreen`).
+ * Панель озброєної дії Live Preview (docs/ui.md §10.3/§10.5/§10.6):
+ * зверху лівої зони. Набір дій залежить від екрана:
+ * - категорії (T-142): reap · keep · move · open · none;
+ * - Quarantine (T-148): restore · purge · none.
  *
- * T-144: швидке перемикання дій клавішами 1–5 (хоткеї `arm_action_1..5`,
- * контекст `live_preview`), Esc розряджає до «Нічого» (`dismiss`), а озброєна
- * ДЕСТРУКТИВНА дія (reap) авторозряджається після N с бездіяльності курсора
- * (N — `disarmTimeoutSec` з `livePreviewStore`, §10.3/§9). Слухачі живуть лише
- * поки панель змонтована (тобто поки режим увімкнено), тож самоприбираються.
- *
- * T-147 / §10.6: перемикач «Приховати опрацьовані» — keep/marked лишаються
- * затемненими на місці (сітка не стрибає), доки перемикач їх не сховає.
- *
- * Клік по плитці = дія й ПКМ = протилежна — T-143 (у `CategoryScreen`).
+ * T-144: 1–5 / Esc / авторозрядження деструктивної (reap або purge).
+ * T-147: «Приховати опрацьовані» — лише на категоріях (не на карантині).
  */
 
 import { useEffect } from "react";
+import { useLocation } from "react-router-dom";
 
 import type { HotkeyActionEventDetail } from "@/hotkeys";
 import {
   ARMED_ACTIONS,
+  QUARANTINE_ARMED_ACTIONS,
   armedActionStore,
+  isActionInPalette,
+  isDestructiveArmed,
   useArmedAction,
+  type ArmedActionMeta,
 } from "@/store/armedAction";
 import { livePreviewStore, useLivePreview } from "@/store/livePreview";
 
@@ -32,8 +28,23 @@ const ARM_ACTION_PREFIX = "arm_action_";
 export function LivePreviewActionBar() {
   const armed = useArmedAction();
   const { disarmTimeoutSec, hideProcessed } = useLivePreview();
+  const { pathname } = useLocation();
+  const isQuarantine = pathname === "/quarantine";
+  const palette: readonly ArmedActionMeta[] = isQuarantine
+    ? QUARANTINE_ARMED_ACTIONS
+    : ARMED_ACTIONS;
 
-  // T-144: клавіші 1–5 озброюють відповідну дію; Esc розряджає.
+  // T-148: при вході/виході з Quarantine скинути дію, якщо вона не з
+  // поточного набору (інакше клік зробив би «reap» на карантинній плитці).
+  useEffect(() => {
+    if (!isActionInPalette(armed, palette)) {
+      armedActionStore.disarm();
+    }
+    // лише зміна екрана / палітри — не при кожному set дії
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isQuarantine]);
+
+  // T-144: клавіші 1–5 озброюють відповідну дію палітри; Esc розряджає.
   useEffect(() => {
     const onHotkey = (event: Event) => {
       const { action } = (event as CustomEvent<HotkeyActionEventDetail>).detail;
@@ -43,18 +54,17 @@ export function LivePreviewActionBar() {
       }
       if (action.startsWith(ARM_ACTION_PREFIX)) {
         const digit = Number(action.slice(ARM_ACTION_PREFIX.length));
-        const meta = ARMED_ACTIONS.find((item) => item.digit === digit);
+        const meta = palette.find((item) => item.digit === digit);
         if (meta) armedActionStore.set(meta.id);
       }
     };
     window.addEventListener("trashradar:hotkey", onHotkey);
     return () => window.removeEventListener("trashradar:hotkey", onHotkey);
-  }, []);
+  }, [palette]);
 
-  // T-144: захист від випадкових серій — озброєний reap (єдина деструктивна
-  // дія; keep/move/open безпечні) сам розряджається після N с без руху миші.
+  // T-144: reap (категорії) і purge (карантин) — деструктивні, авторозряд.
   useEffect(() => {
-    if (armed !== "reap") return;
+    if (!isDestructiveArmed(armed)) return;
     let timer: ReturnType<typeof setTimeout>;
     const bump = () => {
       clearTimeout(timer);
@@ -74,7 +84,7 @@ export function LivePreviewActionBar() {
         Дія
       </span>
       <div className="flex items-center gap-1">
-        {ARMED_ACTIONS.map((meta) => {
+        {palette.map((meta) => {
           const active = armed === meta.id;
           return (
             <button
@@ -100,20 +110,25 @@ export function LivePreviewActionBar() {
         })}
       </div>
 
-      {/* T-147: сітка не стрибає після keep/reap, доки не увімкнути приховування. */}
-      <label
-        className="ml-auto flex cursor-pointer select-none items-center gap-1.5 text-xs text-ink-dim hover:text-ink"
-        title="Опрацьовані (позначені / залишені) лишаються затемненими на місці; увімкніть, щоб сховати їх зі сітки"
-      >
-        <input
-          type="checkbox"
-          checked={hideProcessed}
-          onChange={() => livePreviewStore.toggleHideProcessed()}
-          className="accent-[var(--color-accent)]"
-          aria-label="Приховати опрацьовані плитки"
-        />
-        <span>Приховати опрацьовані</span>
-      </label>
+      {!isQuarantine ? (
+        <label
+          className="ml-auto flex cursor-pointer select-none items-center gap-1.5 text-xs text-ink-dim hover:text-ink"
+          title="Опрацьовані (позначені / залишені) лишаються затемненими на місці; увімкніть, щоб сховати їх зі сітки"
+        >
+          <input
+            type="checkbox"
+            checked={hideProcessed}
+            onChange={() => livePreviewStore.toggleHideProcessed()}
+            className="accent-[var(--color-accent)]"
+            aria-label="Приховати опрацьовані плитки"
+          />
+          <span>Приховати опрацьовані</span>
+        </label>
+      ) : (
+        <span className="ml-auto text-xs text-ink-faint">
+          Live Preview · карантин
+        </span>
+      )}
     </div>
   );
 }
