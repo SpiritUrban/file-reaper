@@ -1513,6 +1513,7 @@ mod tests {
                 crate::preview_runtime::preview_thumbnail,
                 crate::preview_runtime::preview_scrub_strip,
                 crate::preview_runtime::preview_large,
+                crate::preview_runtime::preview_prefetch,
                 crate::preview_runtime::quarantine_thumbnail,
                 crate::scan_runtime::scan_start,
                 crate::scan_runtime::scan_stop,
@@ -2831,6 +2832,112 @@ mod tests {
         assert_eq!(ack["status"], "sharp_scheduled_only");
         assert_eq!(ack["quality"], serde_json::Value::Null);
         assert_eq!(ack["dataUrl"], serde_json::Value::Null);
+    }
+
+    /// T-146: `preview.prefetch` ставить P2 за траєкторією (T-075) і
+    /// повертає метрики хітрейту; невідомі / порожні id — no-op, не помилка.
+    #[test]
+    fn preview_prefetch_schedules_neighbors_and_reports_metrics() {
+        use tauri::Manager;
+        let (app, webview) = test_app();
+        app.state::<crate::scan_runtime::ScanRuntime>()
+            .index
+            .insert_batch(vec![
+                sample_file_record(10, 100, CategoryId::LargeFiles, Decision::Undecided),
+                sample_file_record(11, 200, CategoryId::LargeFiles, Decision::Undecided),
+                sample_file_record(12, 300, CategoryId::LargeFiles, Decision::Undecided),
+                sample_file_record(13, 400, CategoryId::LargeFiles, Decision::Undecided),
+            ])
+            .unwrap();
+
+        // motion=0 → no-op
+        let idle = body_json(
+            get_ipc_response(
+                &webview,
+                request(
+                    "preview_prefetch",
+                    json!({
+                        "payload": {
+                            "candidateIds": [10, 11, 12, 13],
+                            "anchorIndex": 0,
+                            "motion": 0
+                        }
+                    }),
+                ),
+            )
+            .expect("preview.prefetch idle"),
+        );
+        assert_eq!(idle["scheduledCount"], 0);
+
+        // motion=+1 від першої плитки → наступні 2–3 (T-075 look_ahead=3)
+        let forward = body_json(
+            get_ipc_response(
+                &webview,
+                request(
+                    "preview_prefetch",
+                    json!({
+                        "payload": {
+                            "candidateIds": [10, 11, 12, 13],
+                            "anchorIndex": 0,
+                            "motion": 1
+                        }
+                    }),
+                ),
+            )
+            .expect("preview.prefetch forward"),
+        );
+        let scheduled = forward["scheduledCount"].as_u64().unwrap();
+        assert!(
+            (1..=3).contains(&scheduled),
+            "expected 1..=3 scheduled, got {scheduled}"
+        );
+        assert!(forward["metrics"]["scheduled"].as_u64().unwrap() >= scheduled);
+
+        // Demand через preview.large → metrics.demands зростає (хітрейт міряється)
+        let _ = get_ipc_response(
+            &webview,
+            request("preview_large", json!({ "payload": { "candidateId": 11 } })),
+        )
+        .expect("preview.large demand");
+        let after_demand = body_json(
+            get_ipc_response(
+                &webview,
+                request(
+                    "preview_prefetch",
+                    json!({
+                        "payload": {
+                            "candidateIds": [10, 11, 12, 13],
+                            "anchorIndex": 1,
+                            "motion": 1
+                        }
+                    }),
+                ),
+            )
+            .expect("preview.prefetch after demand"),
+        );
+        assert!(
+            after_demand["metrics"]["demands"].as_u64().unwrap() >= 1,
+            "observe_demand should run on preview.large"
+        );
+    }
+
+    #[test]
+    fn preview_prefetch_rejects_anchor_out_of_range() {
+        let (_app, webview) = test_app();
+        let result = get_ipc_response(
+            &webview,
+            request(
+                "preview_prefetch",
+                json!({
+                    "payload": {
+                        "candidateIds": [1],
+                        "anchorIndex": 5,
+                        "motion": 1
+                    }
+                }),
+            ),
+        );
+        assert!(result.is_err(), "anchor out of range must fail");
     }
 
     /// DoD T-125: невідомий кандидат — типізована відмова, не паніка.

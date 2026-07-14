@@ -60,6 +60,7 @@ import {
 import { gridDensityStore, useGridDensity } from "@/store/gridDensity";
 import { livePreviewStore, useLivePreview } from "@/store/livePreview";
 import { livePreviewScrubStore } from "@/store/livePreviewScrub";
+import { prefetchAlongTrajectory } from "@/store/preview";
 import { previewTargetStore } from "@/store/previewTarget";
 import { applySearchQuery, useSearchState } from "@/store/search";
 import { selectionStore, useMarkedSummary } from "@/store/selection";
@@ -212,12 +213,20 @@ export function CategoryScreen({ categoryId }: CategoryScreenProps) {
     anchorRef.current = candidate.id;
   };
 
-  // T-140/T-145: у Live Preview кандидат «під курсором»/у фокусі стає ціллю
-  // великого превью праворуч; для відео — hold (автовідтворення після dwell).
+  // T-146: попередня ціль для знаку траєкторії (prefetch 2–3 сусідів, T-075).
+  const prevPreviewIdRef = useRef<number | null>(null);
+
+  // T-140/T-145/T-146: у Live Preview кандидат «під курсором»/у фокусі стає
+  // ціллю великого превью праворуч; для відео — hold (автовідтворення);
+  // за напрямом руху — P2-префетч наступних плиток (Draft готовий до наведення).
   // Поза режимом — no-op (права зона не змонтована).
   const previewIfLive = (candidate: Candidate) => {
     if (!livePreviewStore.getSnapshot().enabled) return;
+    const prevId = prevPreviewIdRef.current;
     previewTargetStore.set(candidate);
+    // T-146: прогрів 2–3 наступних за знаком руху (видимий список сітки).
+    prefetchAlongTrajectory(visibleRef.current, candidate.id, prevId);
+    prevPreviewIdRef.current = candidate.id;
     // T-145: вхід/фокус без X-руху → autoplay; reportMove переб'є на scrub.
     if (candidate.kind === "video" && candidate.unit === "file") {
       livePreviewScrubStore.reportHold(candidate.id);

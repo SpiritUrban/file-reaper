@@ -147,7 +147,12 @@
     "preview.large": {
       "status": "implemented",
       "task": "T-124",
-      "$comment": "{candidateId, maxEdge?:64..4096=1024} → {status: sharp_from_cache|draft_then_sharp_scheduled|sharp_scheduled_only|unavailable, quality?: draft|sharp, dataUrl?}; wraps TwoStagePreviewer (T-073) — draft synchronously if cached (<100ms), sharp generated as P0 job and delivered via preview.ready {kind:\"large_sharp\"} if not already synchronous"
+      "$comment": "{candidateId, maxEdge?:64..4096=1024} → {status: sharp_from_cache|draft_then_sharp_scheduled|sharp_scheduled_only|unavailable, quality?: draft|sharp, dataUrl?}; wraps TwoStagePreviewer (T-073) — draft synchronously if cached (<100ms), sharp generated as P0 job and delivered via preview.ready {kind:\"large_sharp\"} if not already synchronous; also records prefetch demand (T-146 hit rate)"
+    },
+    "preview.prefetch": {
+      "status": "implemented",
+      "task": "T-146",
+      "$comment": "{candidateIds:u64[], anchorIndex:usize, motion:i32} → {scheduledCount, scheduledPaths, metrics:{demands,cacheHits,scheduled,hitRate}}; integrates PreviewPrefetcher T-075 — P2 warm of next 2–3 tiles by cursor trajectory so Live Preview draft is ready (right pane never white). max 256 ids; motion=0 no-op"
     },
     "search.candidates": { "status": "planned", "task": "T-018" },
     "duplicates.groups": {

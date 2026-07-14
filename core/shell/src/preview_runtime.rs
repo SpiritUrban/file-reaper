@@ -3,7 +3,7 @@
 //! `PngThumbnailEncoder`, ffmpeg-скраб). До цієї задачі жодна `preview.*`
 //! команда не існувала — плитки показували лише гліфи-заглушки.
 //!
-//! Три команди:
+//! Чотири команди (+ metrics у відповіді prefetch):
 //! - `preview.thumbnail` — статична мініатюра плитки (T-100/T-111): кеш
 //!   (T-068) синхронно, інакше генерація P1-задачею + подія `preview.ready`;
 //! - `preview.scrub_strip` — скраб-смуга кадрів відео (T-072) на вимогу
@@ -15,7 +15,10 @@
 //! - `preview.large` — велике превью панелі деталей (T-073 → T-124):
 //!   обгортка над уже готовим `TwoStagePreviewer` — Draft із дискового
 //!   кешу синхронно (<100 мс, DoD T-124), Sharp генерується P0-задачею у
-//!   фоні й доставляється тією самою подією `preview.ready`.
+//!   фоні й доставляється тією самою подією `preview.ready`;
+//! - `preview.prefetch` — T-146 / інтеграція T-075: P2-прогрів наступних
+//!   2–3 плиток за знаком траєкторії курсора; Draft для Live Preview
+//!   правої зони береться з цього кешу мініатюр (architecture.md §5.3).
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -30,7 +33,8 @@ use trashradar_app::ports::{
 };
 use trashradar_app::preview::{
     encode_thumbnail, generate_from_chain, PreviewCacheManager, PreviewDelivery, PreviewDeliveryFn,
-    PreviewPriority, PreviewQuality, PreviewScheduler, TwoStageOutcome, TwoStagePreviewer,
+    PreviewPrefetchCandidate, PreviewPrefetcher, PreviewPriority, PreviewQuality, PreviewScheduler,
+    TwoStageOutcome, TwoStagePreviewer,
 };
 use trashradar_domain::candidate::{ByteSize, CandidateId, CandidateUnit, FsTimestamp};
 use trashradar_domain::error::CoreError;
@@ -77,6 +81,8 @@ pub struct PreviewRuntime {
     chain: Vec<Arc<dyn ThumbnailSource>>,
     encoder: Arc<dyn ThumbnailEncoder>,
     video: Arc<FfmpegVideoFrameSource>,
+    /// T-075/T-146: P2-прогрів 2–3 сусідів за траєкторією (спільний кеш/черга).
+    prefetcher: Arc<PreviewPrefetcher>,
 }
 
 impl PreviewRuntime {
@@ -107,14 +113,27 @@ impl PreviewRuntime {
                 Arc::clone(&video) as Arc<dyn VideoFrameSource>,
             )),
         ];
+        let cache = Arc::new(PreviewCacheManager::new(cache_dir, db));
+        // 2 воркери: превью — фонове навантаження, не має конкурувати
+        // з IPC-потоком чи скан-воркерами (architecture.md §13).
+        let scheduler = Arc::new(PreviewScheduler::new(2, 0.05));
+        let encoder: Arc<dyn ThumbnailEncoder> = Arc::new(PngThumbnailEncoder::new());
+        // look_ahead=3, max_edge=160 — дефолти плитки (T-075 / T-120).
+        let prefetcher = Arc::new(PreviewPrefetcher::new(
+            Arc::clone(&cache),
+            Arc::clone(&scheduler),
+            chain.clone(),
+            Arc::clone(&encoder),
+            160,
+            3,
+        ));
         Self {
-            cache: Arc::new(PreviewCacheManager::new(cache_dir, db)),
-            // 2 воркери: превью — фонове навантаження, не має конкурувати
-            // з IPC-потоком чи скан-воркерами (architecture.md §13).
-            scheduler: Arc::new(PreviewScheduler::new(2, 0.05)),
+            cache,
+            scheduler,
             chain,
-            encoder: Arc::new(PngThumbnailEncoder::new()),
+            encoder,
             video,
+            prefetcher,
         }
     }
 
@@ -468,6 +487,14 @@ pub async fn preview_large<R: Runtime>(
             data_url: None,
         });
     }
+    // T-146: фіксуємо demand для hit rate префетчу T-075 (Draft = Thumbnail).
+    let _prefetch_hit = preview
+        .prefetcher
+        .observe_demand(&PreviewPrefetchCandidate {
+            source_path: record.path.clone(),
+            size: record.size,
+            modified_at: record.modified_at,
+        });
     let max_edge = payload.max_edge.unwrap_or(1024).clamp(64, 4096);
     let path = record.path.clone();
     let size = record.size;
@@ -526,4 +553,152 @@ pub async fn preview_large<R: Runtime>(
         quality: sync.as_ref().map(|(q, _)| (*q).to_string()),
         data_url: sync.map(|(_, d)| d),
     })
+}
+
+/// Параметри `preview.prefetch` (T-146 / T-075).
+///
+/// `candidate_ids` — упорядкований список плиток (видиме вікно сітки);
+/// `anchor_index` — індекс плитки під курсором; `motion` — знак траєкторії
+/// (+ уперед, − назад). Prefetcher (T-075) ставить P2 на наступні 2–3.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewPrefetchPayload {
+    pub candidate_ids: Vec<u64>,
+    pub anchor_index: usize,
+    /// Знак руху: >0 уперед по списку, <0 назад. `0` = no-op.
+    pub motion: i32,
+}
+
+/// Відповідь `preview.prefetch`: щойно заплановані шляхи + кумулятивні
+/// метрики хітрейту (DoD T-146 «замір хітрейту префетчу»).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewPrefetchAck {
+    pub scheduled_count: u32,
+    pub scheduled_paths: Vec<String>,
+    pub metrics: PreviewPrefetchMetricsDto,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewPrefetchMetricsDto {
+    pub demands: u64,
+    pub cache_hits: u64,
+    pub scheduled: u64,
+    /// 0.0…1.0; 0 якщо demands == 0.
+    pub hit_rate: f64,
+}
+
+/// T-146: префетч за траєкторією — тонкий IPC над `PreviewPrefetcher` (T-075).
+/// UI передає порядок плиток і напрям; Core резолвить шляхи з HotIndex і
+/// ставить P2-задачі (не конкурують з P0 Live Preview / P1 видимих плиток).
+#[tauri::command]
+pub async fn preview_prefetch(
+    payload: PreviewPrefetchPayload,
+    scan: tauri::State<'_, crate::scan_runtime::ScanRuntime>,
+    preview: tauri::State<'_, PreviewRuntime>,
+) -> Result<PreviewPrefetchAck, CoreError> {
+    record_command();
+    if payload.candidate_ids.is_empty() {
+        let m = preview.prefetcher.metrics();
+        return Ok(PreviewPrefetchAck {
+            scheduled_count: 0,
+            scheduled_paths: Vec::new(),
+            metrics: metrics_dto(m),
+        });
+    }
+    if payload.anchor_index >= payload.candidate_ids.len() {
+        return Err(CoreError::invalid_argument(
+            "anchorIndex поза межами candidateIds.",
+        ));
+    }
+    if payload.motion == 0 {
+        let m = preview.prefetcher.metrics();
+        return Ok(PreviewPrefetchAck {
+            scheduled_count: 0,
+            scheduled_paths: Vec::new(),
+            metrics: metrics_dto(m),
+        });
+    }
+    // Жорстка стеля: UI не повинен гнати всю категорію (T-014 вікна);
+    // 256 — запас на віртуальну сітку + overscan, не 100k.
+    if payload.candidate_ids.len() > 256 {
+        return Err(CoreError::invalid_argument(
+            "candidateIds занадто довгий для prefetch (макс. 256).",
+        ));
+    }
+
+    let index = scan.index.get_all();
+    let by_id: std::collections::HashMap<u64, _> =
+        index.into_iter().map(|r| (r.candidate_id.0, r)).collect();
+
+    // Лише file-одиниці (папки T-053 без єдиного превью); зберігаємо
+    // оригінальні індекси UI-списку, щоб коректно змапити anchor.
+    let mut candidates: Vec<PreviewPrefetchCandidate> =
+        Vec::with_capacity(payload.candidate_ids.len());
+    let mut original_indices: Vec<usize> = Vec::with_capacity(payload.candidate_ids.len());
+    for (list_i, id) in payload.candidate_ids.iter().enumerate() {
+        let Some(record) = by_id.get(id) else {
+            continue; // сітка може випередити індекс
+        };
+        if record.unit != CandidateUnit::File {
+            continue;
+        }
+        candidates.push(PreviewPrefetchCandidate {
+            source_path: record.path.clone(),
+            size: record.size,
+            modified_at: record.modified_at,
+        });
+        original_indices.push(list_i);
+    }
+
+    if candidates.is_empty() {
+        let m = preview.prefetcher.metrics();
+        return Ok(PreviewPrefetchAck {
+            scheduled_count: 0,
+            scheduled_paths: Vec::new(),
+            metrics: metrics_dto(m),
+        });
+    }
+
+    // Точний збіг anchor → file-індекс; інакше найближчий файл ліворуч
+    // (або перший праворуч), щоб motion все одно прогрів сусідів.
+    let anchor_mapped = original_indices
+        .iter()
+        .position(|&i| i == payload.anchor_index)
+        .or_else(|| {
+            original_indices
+                .iter()
+                .rposition(|&i| i < payload.anchor_index)
+        })
+        .or_else(|| {
+            original_indices
+                .iter()
+                .position(|&i| i > payload.anchor_index)
+        })
+        .unwrap_or(0);
+
+    let prefetcher = Arc::clone(&preview.prefetcher);
+    let motion = payload.motion;
+    let scheduled = tauri::async_runtime::spawn_blocking(move || {
+        prefetcher.prefetch_from_motion(&candidates, anchor_mapped, motion)
+    })
+    .await
+    .map_err(|error| CoreError::internal(format!("Prefetch task failed: {error}")))?;
+
+    let m = preview.prefetcher.metrics();
+    Ok(PreviewPrefetchAck {
+        scheduled_count: scheduled.len() as u32,
+        scheduled_paths: scheduled,
+        metrics: metrics_dto(m),
+    })
+}
+
+fn metrics_dto(m: trashradar_app::preview::PreviewPrefetchMetrics) -> PreviewPrefetchMetricsDto {
+    PreviewPrefetchMetricsDto {
+        demands: m.demands,
+        cache_hits: m.cache_hits,
+        scheduled: m.scheduled,
+        hit_rate: m.hit_rate(),
+    }
 }

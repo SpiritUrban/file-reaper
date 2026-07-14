@@ -324,6 +324,7 @@ export type CommandName =
   | "preview.thumbnail"
   | "preview.scrub_strip"
   | "preview.large"
+  | "preview.prefetch"
   | "search.candidates"
   | "duplicates.groups";
 
@@ -354,6 +355,22 @@ export interface PreviewLargeAck {
     | "unavailable";
   quality?: "draft" | "sharp" | null;
   dataUrl?: string | null;
+}
+
+/** Метрики префетчу T-075/T-146 (кумулятивні за сесію Core). */
+export interface PreviewPrefetchMetrics {
+  demands: number;
+  cacheHits: number;
+  scheduled: number;
+  /** 0…1; 0 якщо demands == 0. */
+  hitRate: number;
+}
+
+/** Відповідь preview.prefetch (T-146): P2-прогрів сусідів + хітрейт. */
+export interface PreviewPrefetchAck {
+  scheduledCount: number;
+  scheduledPaths: string[];
+  metrics: PreviewPrefetchMetrics;
 }
 
 /** Імена подій (contracts/ipc-contract.json → events). */

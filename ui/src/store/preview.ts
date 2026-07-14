@@ -15,7 +15,9 @@
  *   панелі деталей (T-124) скраблять однаково — рух курсора по X;
  * - `useLivePreviewVideo` — права зона Live Preview (T-145): автовідтворення
  *   смуги без звуку при утриманні + скраб X-позицією зліва
- *   (`livePreviewScrubStore`); теж лише pre-extracted кадри, не `<video>`.
+ *   (`livePreviewScrubStore`); теж лише pre-extracted кадри, не `<video>`;
+ * - `prefetchAlongTrajectory` — T-146 / T-075: P2-прогрів 2–3 наступних
+ *   плиток за знаком руху, щоб Draft у правій зоні був готовий до наведення.
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -24,6 +26,7 @@ import { command, subscribe } from "@/ipc/client";
 import type {
   Candidate,
   PreviewLargeAck,
+  PreviewPrefetchAck,
   PreviewReadyEvent,
   PreviewScrubStripAck,
   PreviewThumbnailAck,
@@ -143,6 +146,69 @@ export function useQuarantineThumbnail(entry: { id: number }): string | null {
   }, [entry.id]);
 
   return src;
+}
+
+/**
+ * T-146: префетч за траєкторією (IPC → Core `PreviewPrefetcher` T-075).
+ * `ordered` — видимий порядок плиток; `anchorId` — під курсором/у фокусі;
+ * `prevAnchorId` — попередня ціль (для знаку motion). Fire-and-forget:
+ * помилка не ламає Live Preview (деградація до cold large).
+ *
+ * Кумулятивні metrics (hitRate) пишуться в `lastPrefetchMetrics` для
+ * діагностики DoD «замір хітрейту» без окремого health-екрана.
+ */
+let lastPrefetchMetrics: PreviewPrefetchAck["metrics"] | null = null;
+let prefetchInFlight = false;
+
+export function getLastPrefetchMetrics(): PreviewPrefetchAck["metrics"] | null {
+  return lastPrefetchMetrics;
+}
+
+export function prefetchAlongTrajectory(
+  ordered: readonly Pick<Candidate, "id">[],
+  anchorId: number,
+  prevAnchorId: number | null,
+): void {
+  if (ordered.length === 0) return;
+  const anchorIndex = ordered.findIndex((c) => c.id === anchorId);
+  if (anchorIndex < 0) return;
+
+  let motion = 1; // дефолт «уперед», коли перше наведення без prev
+  if (prevAnchorId != null) {
+    const prevIndex = ordered.findIndex((c) => c.id === prevAnchorId);
+    if (prevIndex >= 0 && prevIndex !== anchorIndex) {
+      motion = anchorIndex > prevIndex ? 1 : -1;
+    } else if (prevIndex === anchorIndex) {
+      return; // той самий якір — не спамимо IPC
+    }
+  }
+
+  // Не більше однієї prefetch-команди одночасно (швидкий скрол / hover).
+  if (prefetchInFlight) return;
+  prefetchInFlight = true;
+
+  // Стеля 256 — узгоджена з Core; віртуальна сітка + overscan вміщається.
+  const windowStart = Math.max(0, anchorIndex - 8);
+  const windowEnd = Math.min(ordered.length, anchorIndex + 9);
+  const slice = ordered.slice(windowStart, windowEnd);
+  const localAnchor = anchorIndex - windowStart;
+
+  void command<PreviewPrefetchAck>("preview.prefetch", {
+    payload: {
+      candidateIds: slice.map((c) => c.id),
+      anchorIndex: localAnchor,
+      motion,
+    },
+  })
+    .then((ack) => {
+      lastPrefetchMetrics = ack.metrics;
+    })
+    .catch((error) => {
+      console.warn("preview.prefetch failed:", error);
+    })
+    .finally(() => {
+      prefetchInFlight = false;
+    });
 }
 
 /**

@@ -85,6 +85,7 @@ fn main() {
             preview_runtime::preview_thumbnail,
             preview_runtime::preview_scrub_strip,
             preview_runtime::preview_large,
+            preview_runtime::preview_prefetch,
             preview_runtime::quarantine_thumbnail,
             scan_runtime::scan_start,
             scan_runtime::scan_stop,
