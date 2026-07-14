@@ -1,22 +1,69 @@
 /**
- * Панель озброєної дії Live Preview (docs/ui.md §10.3/§10.5, T-142): зверху
- * лівої зони. Клік по кнопці озброює дію; озброєна кнопка підсвічена кольором
- * ролі (червоний reap, зелений keep, accent move/open), тож поточна дія
- * завжди видима й кольорово однозначна. Курсор над плитками — окремо
+ * Панель озброєної дії Live Preview (docs/ui.md §10.3/§10.5, T-142/T-144):
+ * зверху лівої зони. Клік по кнопці озброює дію; озброєна кнопка підсвічена
+ * кольором ролі (червоний reap, зелений keep, accent move/open), тож поточна
+ * дія завжди видима й кольорово однозначна. Курсор над плитками — окремо
  * (`armedActionCursor`, застосовує `CategoryScreen`).
  *
- * Тут лише вибір+підсвітка. Клік по плитці = дія й ПКМ = протилежна — T-143;
- * хоткеї 1–5 / Esc / авторозрядження — T-144.
+ * T-144: швидке перемикання дій клавішами 1–5 (хоткеї `arm_action_1..5`,
+ * контекст `live_preview`), Esc розряджає до «Нічого» (`dismiss`), а озброєна
+ * ДЕСТРУКТИВНА дія (reap) авторозряджається після N с бездіяльності курсора
+ * (N — `disarmTimeoutSec` з `livePreviewStore`, §10.3/§9). Слухачі живуть лише
+ * поки панель змонтована (тобто поки режим увімкнено), тож самоприбираються.
+ *
+ * Клік по плитці = дія й ПКМ = протилежна — T-143 (у `CategoryScreen`).
  */
 
+import { useEffect } from "react";
+
+import type { HotkeyActionEventDetail } from "@/hotkeys";
 import {
   ARMED_ACTIONS,
   armedActionStore,
   useArmedAction,
 } from "@/store/armedAction";
+import { useLivePreview } from "@/store/livePreview";
+
+const ARM_ACTION_PREFIX = "arm_action_";
 
 export function LivePreviewActionBar() {
   const armed = useArmedAction();
+  const { disarmTimeoutSec } = useLivePreview();
+
+  // T-144: клавіші 1–5 озброюють відповідну дію; Esc розряджає.
+  useEffect(() => {
+    const onHotkey = (event: Event) => {
+      const { action } = (event as CustomEvent<HotkeyActionEventDetail>).detail;
+      if (action === "dismiss") {
+        armedActionStore.disarm();
+        return;
+      }
+      if (action.startsWith(ARM_ACTION_PREFIX)) {
+        const digit = Number(action.slice(ARM_ACTION_PREFIX.length));
+        const meta = ARMED_ACTIONS.find((item) => item.digit === digit);
+        if (meta) armedActionStore.set(meta.id);
+      }
+    };
+    window.addEventListener("trashradar:hotkey", onHotkey);
+    return () => window.removeEventListener("trashradar:hotkey", onHotkey);
+  }, []);
+
+  // T-144: захист від випадкових серій — озброєний reap (єдина деструктивна
+  // дія; keep/move/open безпечні) сам розряджається після N с без руху миші.
+  useEffect(() => {
+    if (armed !== "reap") return;
+    let timer: ReturnType<typeof setTimeout>;
+    const bump = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => armedActionStore.disarm(), disarmTimeoutSec * 1000);
+    };
+    bump();
+    window.addEventListener("mousemove", bump);
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener("mousemove", bump);
+    };
+  }, [armed, disarmTimeoutSec]);
 
   return (
     <div className="flex h-10 shrink-0 items-center gap-2 border-b border-line bg-panel px-3">
