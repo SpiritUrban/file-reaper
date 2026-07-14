@@ -78,6 +78,26 @@ export function armedActionMeta(action: ArmedAction): ArmedActionMeta {
 }
 
 /**
+ * Протилежна дія для ПКМ (T-143, §10.3): reap↔keep — дзеркальна пара. Для
+ * move/open «протилежне» = безпечне `keep` (лишити), бо в осі
+ * деструктивне↔безпечне keep — універсальний безпечний вибір. `none` не має
+ * протилежного (тільки перегляд).
+ */
+export function oppositeAction(action: ArmedAction): ArmedAction {
+  switch (action) {
+    case "reap":
+      return "keep";
+    case "keep":
+      return "reap";
+    case "move":
+    case "open":
+      return "keep";
+    case "none":
+      return "none";
+  }
+}
+
+/**
  * CSS-курсор із іконкою дії в її кольорі (§10.3: «курсор над плитками
  * змінює вигляд на іконку дії»). `none` → undefined (звичайний курсор).
  * Хотспот у центрі 28×28 (14,14).

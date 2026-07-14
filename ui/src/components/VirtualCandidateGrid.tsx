@@ -70,7 +70,11 @@ export interface VirtualCandidateGridProps {
   isMarked?: (candidate: Candidate) => boolean;
   /** CSS-курсор плиток (T-142): іконка озброєної дії у Live Preview. */
   tileCursor?: string;
+  /** Плитка з коротким пульс-відгуком після дії (T-143) та клас її кільця. */
+  flash?: { id: number; ring: string } | null;
   onActivate?: (candidate: Candidate, event: React.MouseEvent) => void;
+  /** ПКМ по плитці (T-143): у Live Preview → протилежна озброєна дія. */
+  onSecondaryActivate?: (candidate: Candidate, event: React.MouseEvent) => void;
   onFocusCandidate?: (candidate: Candidate) => void;
   /** Наведення курсора (T-140): у Live Preview → велике превью праворуч. */
   onHoverCandidate?: (candidate: Candidate) => void;
@@ -86,7 +90,9 @@ export function VirtualCandidateGrid({
   previewFor,
   isMarked,
   tileCursor,
+  flash,
   onActivate,
+  onSecondaryActivate,
   onFocusCandidate,
   onHoverCandidate,
   onColumnsChange,
@@ -200,7 +206,9 @@ export function VirtualCandidateGrid({
                 {...(preview ? { preview } : {})}
                 {...(isMarked ? { marked: isMarked(candidate) } : {})}
                 {...(tileCursor ? { cursor: tileCursor } : {})}
+                {...(flash?.id === candidate.id ? { flashRing: flash.ring } : {})}
                 {...(onActivate ? { onActivate } : {})}
+                {...(onSecondaryActivate ? { onSecondaryActivate } : {})}
                 {...(onFocusCandidate ? { onFocusCandidate } : {})}
                 {...(onHoverCandidate ? { onHoverCandidate } : {})}
               />

@@ -35,6 +35,7 @@ import { useLocation } from "react-router-dom";
 
 import { VirtualCandidateGrid } from "@/components/VirtualCandidateGrid";
 import type { HotkeyActionEventDetail } from "@/hotkeys";
+import { command, ipcErrorMessage } from "@/ipc/client";
 import { useAppState } from "@/store/appState";
 import { categoryRule, categoryTitle } from "@/store/categories";
 import { useCategoryWindow } from "@/store/categoryWindow";
@@ -50,13 +51,19 @@ import {
   hasActiveFilters,
   useCandidateFilters,
 } from "@/store/filters";
-import { armedActionCursor, useArmedAction } from "@/store/armedAction";
+import {
+  armedActionCursor,
+  oppositeAction,
+  useArmedAction,
+  type ArmedAction,
+} from "@/store/armedAction";
 import { gridDensityStore, useGridDensity } from "@/store/gridDensity";
 import { livePreviewStore, useLivePreview } from "@/store/livePreview";
 import { previewTargetStore } from "@/store/previewTarget";
 import { applySearchQuery, useSearchState } from "@/store/search";
 import { selectionStore, useMarkedSummary } from "@/store/selection";
 import { keepCandidate, useKeptIds } from "@/store/keep";
+import { toast } from "@/store/toasts";
 import type { Candidate, CategoryId } from "@/ipc/types";
 
 interface CategoryScreenProps {
@@ -172,6 +179,12 @@ export function CategoryScreen({ categoryId }: CategoryScreenProps) {
   const focusedIdRef = useRef<number | null>(null);
   focusedIdRef.current = focusedId;
 
+  // T-143: короткий пульс-відгук на плитці одразу після дії. Клас кільця —
+  // колір дії (reap-червоний / keep-зелений тощо); авто-згасає за 350 мс.
+  const [flash, setFlash] = useState<{ id: number; ring: string } | null>(null);
+  const flashTimerRef = useRef<ReturnType<typeof setTimeout>>();
+  useEffect(() => () => clearTimeout(flashTimerRef.current), []);
+
   const anchorRef = useRef<number | null>(null);
   const visibleRef = useRef<Candidate[]>(visible);
   visibleRef.current = visible;
@@ -205,12 +218,73 @@ export function CategoryScreen({ categoryId }: CategoryScreenProps) {
     if (livePreviewStore.getSnapshot().enabled) previewTargetStore.set(candidate);
   };
 
+  // T-143: колір пульс-обводу за роллю дії (reap/keep/move/open).
+  const RING_BY_ACTION: Record<ArmedAction, string> = {
+    reap: "ring-4 ring-reap",
+    keep: "ring-4 ring-keep",
+    move: "ring-4 ring-accent",
+    open: "ring-4 ring-accent",
+    none: "",
+  };
+
+  const flashTile = (id: number, action: ArmedAction) => {
+    const ring = RING_BY_ACTION[action];
+    if (!ring) return;
+    setFlash({ id, ring });
+    clearTimeout(flashTimerRef.current);
+    flashTimerRef.current = setTimeout(() => setFlash(null), 350);
+  };
+
+  // T-143: виконати озброєну дію по плитці миттєво (усе деструктивне однаково
+  // йде через Quarantine, тож без підтверджень — §10.3). Візуальний відгук:
+  // reap → плитка позначається (червоний оверлей T-116), keep → плитка зникає
+  // (спільний keepStore T-117); плюс короткий пульс-обвід кольором дії.
+  const applyArmedAction = (candidate: Candidate, action: ArmedAction) => {
+    switch (action) {
+      case "reap":
+        selectionStore.mark(candidate);
+        anchorRef.current = candidate.id;
+        break;
+      case "keep":
+        void keepCandidate(candidate);
+        break;
+      case "open":
+        void command("candidate.reveal_in_explorer", {
+          payload: { candidateId: candidate.id },
+        }).catch((error) => toast({ message: ipcErrorMessage(error), tone: "warning" }));
+        break;
+      case "move":
+        // Переміщення потребує вибору цільової папки + Core-команди move —
+        // окрема задача (панель уже озброює цю дію з T-142). Поки безпечний
+        // no-op з підказкою замість тихого «нічого».
+        toast({ message: "Переміщення у папку буде додано окремо.", tone: "info" });
+        return;
+      case "none":
+        return;
+    }
+    flashTile(candidate.id, action);
+  };
+
   const handleActivate = (candidate: Candidate, event: React.MouseEvent) => {
+    // T-143: у Live Preview клік = озброєна дія (none → тільки перегляд,
+    // нічого); поза режимом — звичайне позначення T-116 (клік/Shift-діапазон).
+    if (livePreview.enabled) {
+      if (armed !== "none") applyArmedAction(candidate, armed);
+      return;
+    }
     if (event.shiftKey && anchorRef.current !== null) {
       markRange(anchorRef.current, candidate.id);
     } else {
       toggleOne(candidate);
     }
+  };
+
+  // T-143: ПКМ у Live Preview = протилежна дія (reap↔keep дзеркально); поза
+  // режимом / при none — не перехоплюємо (свого контекст-меню немає).
+  const handleSecondary = (candidate: Candidate, event: React.MouseEvent) => {
+    if (!livePreview.enabled || armed === "none") return;
+    event.preventDefault();
+    applyArmedAction(candidate, oppositeAction(armed));
   };
 
   // T-123: перемістити фокус на delta позицій (±1 = ліво/право, ±columns =
@@ -325,7 +399,9 @@ export function CategoryScreen({ categoryId }: CategoryScreenProps) {
           focusedId={focusedId}
           isMarked={(candidate) => selectionStore.isMarked(candidate.id)}
           {...(tileCursor ? { tileCursor } : {})}
+          flash={flash}
           onActivate={handleActivate}
+          onSecondaryActivate={handleSecondary}
           onFocusCandidate={(candidate) => {
             setFocusedId(candidate.id);
             previewIfLive(candidate);

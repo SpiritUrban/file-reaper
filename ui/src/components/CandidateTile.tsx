@@ -26,7 +26,14 @@ export interface CandidateTileProps {
   className?: string;
   /** CSS-курсор плитки (T-142): іконка озброєної дії у Live Preview. */
   cursor?: string;
+  /**
+   * Короткий візуальний відгук після дії (T-143): пульс-обвід кольором дії.
+   * CSS-клас кільця (напр. `ring-reap`) або null.
+   */
+  flashRing?: string | null;
   onActivate?: (candidate: Candidate, event: React.MouseEvent) => void;
+  /** ПКМ (T-143): у Live Preview → протилежна озброєна дія. */
+  onSecondaryActivate?: (candidate: Candidate, event: React.MouseEvent) => void;
   onFocusCandidate?: (candidate: Candidate) => void;
   /** Наведення курсора (T-140): у Live Preview → велике превью праворуч. */
   onHoverCandidate?: (candidate: Candidate) => void;
@@ -74,7 +81,9 @@ export function CandidateTile({
   marked: markedOverride,
   className = "",
   cursor,
+  flashRing,
   onActivate,
+  onSecondaryActivate,
   onFocusCandidate,
   onHoverCandidate,
 }: CandidateTileProps) {
@@ -102,13 +111,18 @@ export function CandidateTile({
   return (
     <button
       type="button"
-      className={`group relative aspect-[4/3] w-full overflow-hidden rounded-sm border bg-panel text-left outline-none transition-colors ${stateClass} ${focusClass} focus-visible:border-accent focus-visible:ring-2 focus-visible:ring-accent/70 ${className}`}
+      className={`group relative aspect-[4/3] w-full overflow-hidden rounded-sm border bg-panel text-left outline-none transition-colors ${stateClass} ${focusClass} ${flashRing ?? ""} focus-visible:border-accent focus-visible:ring-2 focus-visible:ring-accent/70 ${className}`}
       {...(cursor ? { style: { cursor } } : {})}
       aria-label={`${fileName(candidate.path)}, ${formatBytes(candidate.sizeBytes)}, ${formatAge(candidate.lastAccessAt)}`}
       aria-pressed={marked}
       data-decision={candidate.decision}
       data-marked={marked || undefined}
       data-focused={focused || undefined}
+      onContextMenu={
+        onSecondaryActivate
+          ? (event) => onSecondaryActivate(candidate, event)
+          : undefined
+      }
       data-scrubbing={scrubbing || undefined}
       onClick={(event) => onActivate?.(candidate, event)}
       onFocus={() => onFocusCandidate?.(candidate)}
