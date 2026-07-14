@@ -1,6 +1,6 @@
 import type { Candidate, FileKind } from "@/ipc/types";
 import { categoryTitle } from "@/store/categories";
-import { formatBytes } from "@/store/format";
+import { formatAge, formatBytes } from "@/store/format";
 import { useThumbnail, useVideoScrub } from "@/store/preview";
 
 export type TileHeat = 1 | 2 | 3;
@@ -52,17 +52,6 @@ function fileName(path: string): string {
   return normalized.split("/").filter(Boolean).at(-1) || path;
 }
 
-function ageLabel(value: string): string {
-  const accessed = Date.parse(value);
-  if (!Number.isFinite(accessed)) return "вік —";
-  const days = Math.max(0, Math.floor((Date.now() - accessed) / 86_400_000));
-  if (days < 1) return "сьогодні";
-  if (days < 30) return `${days} дн`;
-  const months = Math.floor(days / 30);
-  if (months < 24) return `${months} міс`;
-  return `${Math.floor(months / 12)} р`;
-}
-
 function inferredHeat(sizeBytes: number): TileHeat {
   if (sizeBytes >= 10 * 1024 ** 3) return 3;
   if (sizeBytes >= 1024 ** 3) return 2;
@@ -111,7 +100,7 @@ export function CandidateTile({
     <button
       type="button"
       className={`group relative aspect-[4/3] w-full overflow-hidden rounded-sm border bg-panel text-left outline-none transition-colors ${stateClass} ${focusClass} focus-visible:border-accent focus-visible:ring-2 focus-visible:ring-accent/70 ${className}`}
-      aria-label={`${fileName(candidate.path)}, ${formatBytes(candidate.sizeBytes)}, ${ageLabel(candidate.lastAccessAt)}`}
+      aria-label={`${fileName(candidate.path)}, ${formatBytes(candidate.sizeBytes)}, ${formatAge(candidate.lastAccessAt)}`}
       aria-pressed={marked}
       data-decision={candidate.decision}
       data-marked={marked || undefined}
@@ -168,7 +157,7 @@ export function CandidateTile({
         <strong className="shrink-0 font-mono text-sm font-semibold text-ink">
           {formatBytes(candidate.sizeBytes)}
         </strong>
-        <span className="shrink-0 text-xs text-ink-dim">· {ageLabel(candidate.lastAccessAt)}</span>
+        <span className="shrink-0 text-xs text-ink-dim">· {formatAge(candidate.lastAccessAt)}</span>
         <span className="min-w-0 flex-1 truncate font-mono text-xs text-ink-dim">
           · {pathTail(candidate.path)}
         </span>

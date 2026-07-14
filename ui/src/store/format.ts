@@ -13,3 +13,18 @@ export function formatBytes(bytes: number | null): string {
   }
   return `${value >= 100 ? Math.round(value) : value.toFixed(1)} ${UNITS[unit]}`;
 }
+
+/**
+ * Вік файла з ISO-дати останнього доступу: «сьогодні» / «N дн» / «N міс» /
+ * «N р». Спільний для плитки (T-100) і накладки Live Preview (T-141).
+ */
+export function formatAge(isoDate: string): string {
+  const accessed = Date.parse(isoDate);
+  if (!Number.isFinite(accessed)) return "вік —";
+  const days = Math.max(0, Math.floor((Date.now() - accessed) / 86_400_000));
+  if (days < 1) return "сьогодні";
+  if (days < 30) return `${days} дн`;
+  const months = Math.floor(days / 30);
+  if (months < 24) return `${months} міс`;
+  return `${Math.floor(months / 12)} р`;
+}
