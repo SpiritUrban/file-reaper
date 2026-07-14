@@ -67,6 +67,11 @@ impl Detector for ArchivesDetector {
         self.enabled.load(Ordering::Relaxed)
     }
 
+    fn set_enabled(&self, enabled: bool) -> Result<(), CoreError> {
+        self.enabled.store(enabled, Ordering::Relaxed);
+        Ok(())
+    }
+
     fn evaluate(&self, record: &FileRecord) -> Option<Verdict> {
         if record.unit != CandidateUnit::File {
             return None;

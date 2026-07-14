@@ -61,6 +61,19 @@ pub trait Detector: Send + Sync {
         true
     }
 
+    /// Увімкнути/вимкнути детектор «на льоту» (T-152). Дефолт — детектор
+    /// без перемикача (як [`Detector::set_threshold`] без порогів).
+    ///
+    /// Реалізації тримають прапорець в `AtomicBool`, щоб працювати через
+    /// `&self` (спільний реєстр у воркерах).
+    fn set_enabled(&self, enabled: bool) -> Result<(), CoreError> {
+        let _ = enabled;
+        Err(CoreError::invalid_argument(format!(
+            "Детектор «{}» не має перемикача.",
+            self.id()
+        )))
+    }
+
     /// Оцінити один запис індексу.
     ///
     /// - `Some(verdict)` — кандидат; вердикт **мусить** містити category,

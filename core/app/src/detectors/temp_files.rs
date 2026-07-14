@@ -13,6 +13,7 @@ use super::contract::{Detector, DetectorId};
 use crate::location_registry::{path_matches_prefix, KnownLocationsRegistry, LocationKind};
 use trashradar_domain::candidate::{CandidateUnit, FileRecord, SafetyLevel, Verdict};
 use trashradar_domain::category::CategoryId;
+use trashradar_domain::error::CoreError;
 
 /// Стабільний id детектора.
 pub const DETECTOR_ID: DetectorId = DetectorId::new("temp_files");
@@ -121,6 +122,11 @@ impl Detector for TempFilesDetector {
 
     fn is_enabled(&self) -> bool {
         self.enabled.load(Ordering::Relaxed)
+    }
+
+    fn set_enabled(&self, enabled: bool) -> Result<(), CoreError> {
+        self.enabled.store(enabled, Ordering::Relaxed);
+        Ok(())
     }
 
     fn evaluate(&self, record: &FileRecord) -> Option<Verdict> {

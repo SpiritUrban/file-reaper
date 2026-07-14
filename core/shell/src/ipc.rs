@@ -192,6 +192,13 @@ async fn apply_and_persist_settings<R: Runtime>(
         .map_err(|error| CoreError::internal(format!("Settings write task failed: {error}")))??;
     let previous = state.current();
     let recalculated = scan.apply_settings(&settings)?;
+    // T-152 (DoD «прибирає категорію з Sidebar і цифри»): live totals щойно
+    // перебудовані з перерахованого індексу — віддати їх UI одразу, а не
+    // чекати наступної події скану/рішення. Закриває й T-093-прогалину:
+    // зміна порога тепер теж миттєво оновлює цифру.
+    if let Ok(live) = scan.last_totals.lock() {
+        events::emit_cleanup_totals(app, &live.summary());
+    }
     let rescheduled = previous.quarantine != settings.quarantine;
     let generation = if rescheduled {
         state.schedule_generation.fetch_add(1, Ordering::SeqCst) + 1

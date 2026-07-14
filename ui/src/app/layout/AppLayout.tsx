@@ -106,15 +106,19 @@ export function AppLayout() {
   activeCategoryRef.current = activeCategory;
   const categoriesRef = useRef(appState.cleanup.categories);
   categoriesRef.current = appState.cleanup.categories;
+  // T-152: вимкнені детектори випадають і з навігації Ctrl+↑/↓.
+  const settingsRef = useRef(appState.settings);
+  settingsRef.current = appState.settings;
 
   useEffect(() => {
     const onHotkey = (event: Event) => {
       const { action } = (event as CustomEvent<HotkeyActionEventDetail>).detail;
       if (action !== "category_previous" && action !== "category_next") return;
 
-      const ids = categoryRowsByWeight(categoriesRef.current).map(
-        (row) => row.descriptor.id,
-      );
+      const ids = categoryRowsByWeight(
+        categoriesRef.current,
+        settingsRef.current,
+      ).map((row) => row.descriptor.id);
       const current = activeCategoryRef.current;
       const currentIndex = current ? ids.indexOf(current) : -1;
       const delta = action === "category_next" ? 1 : -1;

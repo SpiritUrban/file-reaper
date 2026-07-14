@@ -22,6 +22,7 @@ use super::format::format_bytes_as_gb;
 use crate::location_registry::{path_matches_prefix, KnownLocationsRegistry, LocationKind};
 use trashradar_domain::candidate::{CandidateUnit, Decision, FileRecord, SafetyLevel, Verdict};
 use trashradar_domain::category::CategoryId;
+use trashradar_domain::error::CoreError;
 
 /// Стабільний id детектора.
 pub const DETECTOR_ID: DetectorId = DetectorId::new("app_caches");
@@ -198,6 +199,11 @@ impl Detector for AppCachesDetector {
 
     fn is_enabled(&self) -> bool {
         self.enabled.load(Ordering::Relaxed)
+    }
+
+    fn set_enabled(&self, enabled: bool) -> Result<(), CoreError> {
+        self.enabled.store(enabled, Ordering::Relaxed);
+        Ok(())
     }
 
     fn evaluate(&self, record: &FileRecord) -> Option<Verdict> {

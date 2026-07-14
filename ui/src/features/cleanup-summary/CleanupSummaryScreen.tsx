@@ -11,7 +11,7 @@ import { useState, useEffect } from "react";
 
 import { AnimatedBytes, AnimatedInteger } from "@/components/AnimatedCounter";
 import { Meter } from "@/components/Meter";
-import { CATEGORIES } from "@/store/categories";
+import { categoryRowsByWeight, type CategoryDescriptor } from "@/store/categories";
 import { useAppState } from "@/store/appState";
 import { fetchCategoryTopCandidates, fetchCategoryAllCandidates } from "@/store/categoryWindow";
 import { markAllCandidates } from "@/store/selection";
@@ -38,7 +38,7 @@ function CategoryRow({
   summary,
   totalBytes,
 }: {
-  descriptor: typeof CATEGORIES[0];
+  descriptor: CategoryDescriptor;
   summary: CategorySummary | undefined;
   totalBytes: number;
 }) {
@@ -150,29 +150,10 @@ function CategoryRow({
   );
 }
 
-/**
- * Порядок Sidebar: непорожні категорії за вагою (спадання байтів),
- * порожні — у каталожному порядку в кінці. Жорсткий порядок = нема стрибків.
- */
-function categoryRowsByWeight(live: CategorySummary[]) {
-  const byId = new Map(live.map((summary) => [summary.id, summary]));
-  return CATEGORIES.map((descriptor, catalogIndex) => ({
-    descriptor,
-    summary: byId.get(descriptor.id),
-    catalogIndex,
-  }))
-    .sort((left, right) => {
-      const leftBytes = left.summary?.totalBytes ?? 0;
-      const rightBytes = right.summary?.totalBytes ?? 0;
-      if (leftBytes !== rightBytes) return rightBytes - leftBytes;
-      return left.catalogIndex - right.catalogIndex;
-    })
-    .map(({ descriptor, summary }) => ({ descriptor, summary }));
-}
-
 export function CleanupSummaryScreen() {
-  const { cleanup, scanRunning, status, quarantine } = useAppState();
-  const rows = categoryRowsByWeight(cleanup.categories);
+  const { cleanup, scanRunning, status, quarantine, settings } = useAppState();
+  // Спільний порядок зі Sidebar (T-105); вимкнені детектори приховано (T-152).
+  const rows = categoryRowsByWeight(cleanup.categories, settings);
   const hasTotal = cleanup.reclaimableBytes > 0;
   const hasQuarantine = quarantine.heldCount > 0;
 

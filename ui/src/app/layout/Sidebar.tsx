@@ -45,9 +45,10 @@ function rescanVolume(volume: string): void {
 }
 
 export function Sidebar() {
-  const { cleanup, scanRunning, volumes, quarantine } = useAppState();
+  const { cleanup, scanRunning, volumes, quarantine, settings } = useAppState();
   const [collapsed, setCollapsed] = useState(false);
-  const rows = categoryRowsByWeight(cleanup.categories);
+  // T-152: вимкнені детектори прибираються зі списку категорій повністю.
+  const rows = categoryRowsByWeight(cleanup.categories, settings);
   const hasTotal = cleanup.reclaimableBytes > 0;
   const hasQuarantine = quarantine.heldCount > 0;
 

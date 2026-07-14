@@ -282,6 +282,11 @@ impl Detector for UnityArtifactsDetector {
         self.enabled.load(Ordering::Relaxed)
     }
 
+    fn set_enabled(&self, enabled: bool) -> Result<(), CoreError> {
+        self.enabled.store(enabled, Ordering::Relaxed);
+        Ok(())
+    }
+
     fn evaluate(&self, record: &FileRecord) -> Option<Verdict> {
         let (root, kind) = self.confirmed_root(&record.path)?;
         let (safety, phrase) = self.safety_and_phrase(&root);

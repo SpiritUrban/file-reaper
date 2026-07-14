@@ -84,6 +84,15 @@ impl DetectorRegistry {
         self.get(id).and_then(|d| d.get_threshold(key))
     }
 
+    /// Увімкнути/вимкнути детектор за id (T-152). Перерахунок індексу —
+    /// окремим кроком, як і в [`DetectorRegistry::set_threshold`].
+    pub fn set_enabled(&self, id: DetectorId, enabled: bool) -> Result<(), CoreError> {
+        let det = self.get(id).ok_or_else(|| {
+            CoreError::invalid_argument(format!("Детектор «{id}» не зареєстрований."))
+        })?;
+        det.set_enabled(enabled)
+    }
+
     /// Прогнати **один** запис через усі увімкнені детектори.
     ///
     /// Файл може отримати кілька вердиктів (перетин категорій, T-054).

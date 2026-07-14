@@ -4,7 +4,7 @@
  * (cleanup.total_updated, T-055) і сортують Sidebar за вагою.
  */
 
-import type { CategoryId, CategorySummary } from "@/ipc/types";
+import type { AppSettings, CategoryId, CategorySummary } from "@/ipc/types";
 
 export interface CategoryDescriptor {
   id: CategoryId;
@@ -47,6 +47,28 @@ export function categoryRule(id: CategoryId): string {
   return CATEGORY_RULES[id] ?? "";
 }
 
+/**
+ * Категорії з перемикачем детектора (T-152) — живі детектори ферми скану
+ * (`configured_registry` у core/shell): 5 предикатних. Решта — каскад
+ * дублікатів або детектори, ще не підключені до скану (temp/caches/dev):
+ * перемикач з'явиться разом з їхнім wiring.
+ */
+export const TOGGLEABLE_CATEGORIES: readonly CategoryId[] = [
+  "large_files",
+  "old_files",
+  "forgotten_videos",
+  "archives",
+  "installers",
+];
+
+/** Детектор категорії увімкнено (відсутність запису/поля = увімкнено). */
+export function isCategoryEnabled(
+  settings: AppSettings | null,
+  id: CategoryId,
+): boolean {
+  return settings?.detectors?.[id]?.enabled !== false;
+}
+
 export interface CategoryRow {
   descriptor: CategoryDescriptor;
   summary: CategorySummary | undefined;
@@ -57,14 +79,23 @@ export interface CategoryRow {
  * (спадання байтів), порожні — у каталожному порядку в кінці. Сортування
  * стабільне, тож рівні обсяги не «стрибають» між подіями скану — той самий
  * порядок, що бачить користувач, а не окрема послідовність для клавіатури.
+ *
+ * T-152: категорії з вимкненим детектором (settings) прибираються зі
+ * списку повністю — і з Sidebar, і з навігації Ctrl+↑/↓, і з Summary.
  */
-export function categoryRowsByWeight(live: CategorySummary[]): CategoryRow[] {
+export function categoryRowsByWeight(
+  live: CategorySummary[],
+  settings: AppSettings | null = null,
+): CategoryRow[] {
   const byId = new Map(live.map((summary) => [summary.id, summary]));
-  return CATEGORIES.map((descriptor, catalogIndex) => ({
-    descriptor,
-    summary: byId.get(descriptor.id),
-    catalogIndex,
-  }))
+  return CATEGORIES.filter((descriptor) =>
+    isCategoryEnabled(settings, descriptor.id),
+  )
+    .map((descriptor, catalogIndex) => ({
+      descriptor,
+      summary: byId.get(descriptor.id),
+      catalogIndex,
+    }))
     .sort((left, right) => {
       const leftBytes = left.summary?.totalBytes ?? 0;
       const rightBytes = right.summary?.totalBytes ?? 0;

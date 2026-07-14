@@ -252,6 +252,9 @@ fn configured_registry(settings: &AppSettings) -> Result<DetectorRegistry, CoreE
         for (key, value) in &detector.thresholds {
             registry.set_threshold(detector_id, key, ThresholdValue::U64(*value))?;
         }
+        // T-152: вимкнений детектор не отримує потік (T-037); перерахунок
+        // індексу після зміни — apply_settings.
+        registry.set_enabled(detector_id, detector.enabled)?;
     }
     Ok(registry)
 }
@@ -1315,11 +1318,65 @@ mod tests {
             "large_files".into(),
             DetectorSettings {
                 thresholds: BTreeMap::from([("min_size_bytes".into(), 10 * 1024 * 1024)]),
+                ..DetectorSettings::default()
             },
         );
         assert_eq!(runtime.apply_settings(&settings).unwrap(), 1);
         let records = runtime.index.get_all();
         assert_eq!(records[0].category, CategoryId::LargeFiles);
+    }
+
+    /// T-152 DoD: вимкнення детектора прибирає його категорію з індексу і
+    /// з live totals (цифра «можна звільнити» та ряд Sidebar) без рескану.
+    #[test]
+    fn disabling_detector_clears_category_and_live_totals() {
+        let runtime = ScanRuntime::new();
+        runtime
+            .index
+            .insert_batch(vec![FileRecord {
+                candidate_id: CandidateId(1),
+                path: "C:\\huge.bin".into(),
+                size: ByteSize(500 * 1024 * 1024),
+                created_at: None,
+                modified_at: None,
+                accessed_at: None,
+                kind: FileKind::Other,
+                unit: CandidateUnit::File,
+                category: CategoryId::Uncategorized,
+                safety: SafetyLevel::ReviewRecommended,
+                decision: Decision::Undecided,
+                detector_id: String::new(),
+                explanation: String::new(),
+                attributes: FileAttributes::default(),
+            }])
+            .unwrap();
+
+        // Дефолтні settings: large_files увімкнено → файл категоризовано.
+        runtime.apply_settings(&AppSettings::default()).unwrap();
+        assert_eq!(runtime.index.get_all()[0].category, CategoryId::LargeFiles);
+        assert!(runtime.last_totals.lock().unwrap().summary().unique_bytes.0 > 0);
+
+        // Вимкнення детектора → категорія знята, цифра нуль.
+        let mut settings = AppSettings::default();
+        settings.detectors.insert(
+            "large_files".into(),
+            DetectorSettings {
+                enabled: false,
+                ..DetectorSettings::default()
+            },
+        );
+        runtime.apply_settings(&settings).unwrap();
+        assert_eq!(
+            runtime.index.get_all()[0].category,
+            CategoryId::Uncategorized
+        );
+        let summary = runtime.last_totals.lock().unwrap().summary();
+        assert_eq!(summary.unique_bytes.0, 0, "цифра «можна звільнити» = 0");
+        let large_idx = CategoryId::LargeFiles.mvp_index().unwrap();
+        assert_eq!(
+            summary.by_category[large_idx].bytes, 0,
+            "ряд категорії без внеску"
+        );
     }
 
     #[test]

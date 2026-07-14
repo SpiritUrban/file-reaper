@@ -202,6 +202,36 @@ mod tests {
         assert_eq!(farm.iter().count(), 1);
     }
 
+    /// T-152: перемикач детектора через реєстр за id — вимкнення прибирає
+    /// його з потоку, увімкнення повертає; детектор без перемикача → помилка.
+    #[test]
+    fn registry_set_enabled_toggles_detector_by_id() {
+        let mut farm = DetectorRegistry::new();
+        farm.register(crate::detectors::LargeFilesDetector::new());
+        let id = DetectorId::new("large_files");
+        let big = sample_record(1, 500 * 1024 * 1024);
+
+        assert!(!farm.evaluate_record(&big).is_empty());
+        farm.set_enabled(id, false).unwrap();
+        assert_eq!(farm.enabled().count(), 0);
+        assert!(farm.evaluate_record(&big).is_empty());
+        farm.set_enabled(id, true).unwrap();
+        assert!(!farm.evaluate_record(&big).is_empty());
+
+        // Детектор без перемикача (дефолт контракту) → invalid_argument.
+        farm.register(SizeProbeDetector::new(1));
+        let err = farm
+            .set_enabled(DetectorId::new("test.size_probe"), false)
+            .unwrap_err();
+        assert_eq!(
+            err.code,
+            trashradar_domain::error::ErrorCode::InvalidArgument
+        );
+
+        // Невідомий id → invalid_argument.
+        assert!(farm.set_enabled(DetectorId::new("nope"), false).is_err());
+    }
+
     #[test]
     fn stream_batch_collects_hits_from_all_enabled() {
         let mut farm = DetectorRegistry::new();

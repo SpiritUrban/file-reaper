@@ -459,7 +459,14 @@ export interface AppSettings {
     excludedPaths: string[];
     minimumSizeBytes: number;
   };
-  detectors: Record<string, { thresholds: Record<string, number> }>;
+  detectors: Record<
+    string,
+    {
+      thresholds: Record<string, number>;
+      /** T-152: перемикач детектора; відсутнє поле = увімкнено. */
+      enabled?: boolean;
+    }
+  >;
 }
 
 

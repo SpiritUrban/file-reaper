@@ -17,8 +17,11 @@
  * виключення T-027 видимі; сканер читає список на старті сесії — зміни
  * діють з наступного скану.
  *
- * Заглушки наступних задач: перемикачі категорій і власні шаблони — T-152;
- * редактор гарячих клавіш — T-153.
+ * Перемикачі детекторів (T-152): чекбокс на категоріях живої ферми скану;
+ * вимкнення йде через `settings.set` → Core перераховує індекс і шле свіжі
+ * totals — категорія зникає з Sidebar/Summary/цифри миттєво, без рескану.
+ *
+ * Заглушка наступної задачі: редактор гарячих клавіш — T-153.
  */
 
 import { useEffect, useState } from "react";
@@ -29,7 +32,12 @@ import { DEFAULT_HOTKEYS } from "@/hotkeys";
 import { command, ipcErrorMessage, isTauri } from "@/ipc/client";
 import { ARMED_ACTIONS, type ArmedAction } from "@/store/armedAction";
 import { useAppState } from "@/store/appState";
-import { CATEGORIES, categoryRule } from "@/store/categories";
+import {
+  CATEGORIES,
+  categoryRule,
+  isCategoryEnabled,
+  TOGGLEABLE_CATEGORIES,
+} from "@/store/categories";
 import { CATEGORY_THRESHOLDS, effectiveThreshold } from "@/store/detectorThresholds";
 import { formatBytes } from "@/store/format";
 import {
@@ -426,35 +434,73 @@ export function SettingsScreen() {
         <div className="flex flex-col divide-y divide-line/60">
           {CATEGORIES.map((category) => {
             const fields = CATEGORY_THRESHOLDS[category.id] ?? [];
+            const toggleable = TOGGLEABLE_CATEGORIES.includes(category.id);
+            const enabled = isCategoryEnabled(settings, category.id);
             return (
               <div
                 key={category.id}
                 className="flex flex-wrap items-center gap-2 py-1.5"
               >
-                <span className="w-64 shrink-0">
-                  <span className="mr-1.5 text-ink-faint">{category.glyph}</span>
+                {/* T-152: перемикач — лише детектори живої ферми скану. */}
+                <label
+                  className={`flex w-64 shrink-0 items-center gap-2 ${
+                    toggleable && settings ? "cursor-pointer" : ""
+                  } ${enabled ? "" : "text-ink-faint"}`}
+                  title={
+                    toggleable
+                      ? enabled
+                        ? "Вимкнути детектор: категорія зникне з Sidebar і цифри"
+                        : "Увімкнути детектор"
+                      : "Детектор без перемикача в MVP (каскад дублікатів / ще не підключений до скану)"
+                  }
+                >
+                  <input
+                    type="checkbox"
+                    checked={enabled}
+                    disabled={!toggleable || settings === null}
+                    onChange={(e) => {
+                      if (!settings) return;
+                      void saveSettings({
+                        ...settings,
+                        detectors: {
+                          ...settings.detectors,
+                          [category.id]: {
+                            thresholds:
+                              settings.detectors?.[category.id]?.thresholds ??
+                              {},
+                            enabled: e.target.checked,
+                          },
+                        },
+                      });
+                    }}
+                    className="accent-[--color-accent]"
+                  />
+                  <span className="text-ink-faint">{category.glyph}</span>
                   {category.title}
-                </span>
+                </label>
                 <span className="flex-1 text-ink-faint">
                   {categoryRule(category.id)}
                 </span>
                 <span className="flex items-center gap-3">
-                  {fields.map((field) => (
-                    <ThresholdInput
-                      key={`${field.key}:${effectiveThreshold(settings, category.id, field)}`}
-                      categoryId={category.id}
-                      field={field}
-                      value={effectiveThreshold(settings, category.id, field)}
-                    />
-                  ))}
+                  {enabled
+                    ? fields.map((field) => (
+                        <ThresholdInput
+                          key={`${field.key}:${effectiveThreshold(settings, category.id, field)}`}
+                          categoryId={category.id}
+                          field={field}
+                          value={effectiveThreshold(settings, category.id, field)}
+                        />
+                      ))
+                    : null}
                 </span>
               </div>
             );
           })}
         </div>
-        <div className="flex items-center gap-2 pt-2 text-ink-faint">
-          Перемикачі категорій і власні шаблони папок —
-          <PlannedButton label="Налаштувати" taskRef="T-152" />
+        <div className="pt-2 text-ink-faint">
+          Вимкнення діє миттєво без рескану; власні шаблони папок для
+          dev-артефактів — поза MVP (реєстр{" "}
+          <span className="font-mono">registry/dev-artifacts.json</span>).
         </div>
       </Section>
 

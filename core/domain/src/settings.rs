@@ -24,11 +24,33 @@ pub struct AppSettings {
     pub detectors: BTreeMap<String, DetectorSettings>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DetectorSettings {
     #[serde(default)]
     pub thresholds: BTreeMap<String, u64>,
+    /// Перемикач детектора (T-152). Відсутнє поле у файлі/старому конфігу =
+    /// увімкнено — тому дефолт true і серіалізація лише відхилення (false).
+    #[serde(default = "detector_enabled_default", skip_serializing_if = "is_true")]
+    pub enabled: bool,
+}
+
+impl Default for DetectorSettings {
+    fn default() -> Self {
+        Self {
+            thresholds: BTreeMap::new(),
+            enabled: true,
+        }
+    }
+}
+
+fn detector_enabled_default() -> bool {
+    true
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)] // сигнатура serde skip_serializing_if
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -192,5 +214,27 @@ mod tests {
         settings.quarantine.ttl_days = 0;
         let error = validate_settings(&settings).unwrap_err();
         assert_eq!(error.field, "quarantine.ttlDays");
+    }
+
+    /// T-152: старий конфіг без `enabled` = детектор увімкнено; false
+    /// зберігається і читається; true не роздуває серіалізацію.
+    #[test]
+    fn detector_enabled_defaults_true_and_roundtrips_false() {
+        let legacy: DetectorSettings =
+            serde_json::from_str(r#"{"thresholds":{"minSizeBytes":1}}"#).unwrap();
+        assert!(legacy.enabled);
+        assert!(DetectorSettings::default().enabled);
+
+        let disabled = DetectorSettings {
+            enabled: false,
+            ..DetectorSettings::default()
+        };
+        let json = serde_json::to_string(&disabled).unwrap();
+        assert!(json.contains("\"enabled\":false"));
+        let back: DetectorSettings = serde_json::from_str(&json).unwrap();
+        assert!(!back.enabled);
+
+        let enabled_json = serde_json::to_string(&DetectorSettings::default()).unwrap();
+        assert!(!enabled_json.contains("enabled"));
     }
 }
