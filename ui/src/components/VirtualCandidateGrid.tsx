@@ -68,6 +68,8 @@ export interface VirtualCandidateGridProps {
   previewFor?: (candidate: Candidate) => CandidatePreview | undefined;
   /** Локальне оптимістичне позначення (T-116) — переважає candidate.decision. */
   isMarked?: (candidate: Candidate) => boolean;
+  /** CSS-курсор плиток (T-142): іконка озброєної дії у Live Preview. */
+  tileCursor?: string;
   onActivate?: (candidate: Candidate, event: React.MouseEvent) => void;
   onFocusCandidate?: (candidate: Candidate) => void;
   /** Наведення курсора (T-140): у Live Preview → велике превью праворуч. */
@@ -83,6 +85,7 @@ export function VirtualCandidateGrid({
   focusedId = null,
   previewFor,
   isMarked,
+  tileCursor,
   onActivate,
   onFocusCandidate,
   onHoverCandidate,
@@ -196,6 +199,7 @@ export function VirtualCandidateGrid({
                 focused={candidate.id === focusedId}
                 {...(preview ? { preview } : {})}
                 {...(isMarked ? { marked: isMarked(candidate) } : {})}
+                {...(tileCursor ? { cursor: tileCursor } : {})}
                 {...(onActivate ? { onActivate } : {})}
                 {...(onFocusCandidate ? { onFocusCandidate } : {})}
                 {...(onHoverCandidate ? { onHoverCandidate } : {})}

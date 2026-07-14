@@ -24,6 +24,8 @@ export interface CandidateTileProps {
    */
   marked?: boolean;
   className?: string;
+  /** CSS-курсор плитки (T-142): іконка озброєної дії у Live Preview. */
+  cursor?: string;
   onActivate?: (candidate: Candidate, event: React.MouseEvent) => void;
   onFocusCandidate?: (candidate: Candidate) => void;
   /** Наведення курсора (T-140): у Live Preview → велике превью праворуч. */
@@ -71,6 +73,7 @@ export function CandidateTile({
   focused = false,
   marked: markedOverride,
   className = "",
+  cursor,
   onActivate,
   onFocusCandidate,
   onHoverCandidate,
@@ -100,6 +103,7 @@ export function CandidateTile({
     <button
       type="button"
       className={`group relative aspect-[4/3] w-full overflow-hidden rounded-sm border bg-panel text-left outline-none transition-colors ${stateClass} ${focusClass} focus-visible:border-accent focus-visible:ring-2 focus-visible:ring-accent/70 ${className}`}
+      {...(cursor ? { style: { cursor } } : {})}
       aria-label={`${fileName(candidate.path)}, ${formatBytes(candidate.sizeBytes)}, ${formatAge(candidate.lastAccessAt)}`}
       aria-pressed={marked}
       data-decision={candidate.decision}

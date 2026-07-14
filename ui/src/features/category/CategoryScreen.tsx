@@ -50,8 +50,9 @@ import {
   hasActiveFilters,
   useCandidateFilters,
 } from "@/store/filters";
+import { armedActionCursor, useArmedAction } from "@/store/armedAction";
 import { gridDensityStore, useGridDensity } from "@/store/gridDensity";
-import { livePreviewStore } from "@/store/livePreview";
+import { livePreviewStore, useLivePreview } from "@/store/livePreview";
 import { previewTargetStore } from "@/store/previewTarget";
 import { applySearchQuery, useSearchState } from "@/store/search";
 import { selectionStore, useMarkedSummary } from "@/store/selection";
@@ -147,6 +148,10 @@ export function CategoryScreen({ categoryId }: CategoryScreenProps) {
   const hasSearch = search.query.length > 0;
   const thresholdFields = CATEGORY_THRESHOLDS[categoryId] ?? [];
   const density = useGridDensity();
+  // T-142: у Live Preview курсор над плитками — іконка озброєної дії.
+  const livePreview = useLivePreview();
+  const armed = useArmedAction();
+  const tileCursor = livePreview.enabled ? armedActionCursor(armed) : undefined;
 
   // T-119: «+N нових знахідок» — лише коли одиниця рахунку категорії це
   // окремі кандидати (не групи дублікатів, T-126) і перший фетч уже прийшов
@@ -319,6 +324,7 @@ export function CategoryScreen({ categoryId }: CategoryScreenProps) {
           density={density}
           focusedId={focusedId}
           isMarked={(candidate) => selectionStore.isMarked(candidate.id)}
+          {...(tileCursor ? { tileCursor } : {})}
           onActivate={handleActivate}
           onFocusCandidate={(candidate) => {
             setFocusedId(candidate.id);

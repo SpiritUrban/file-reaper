@@ -13,6 +13,7 @@ import { useCallback, useRef, type PointerEvent as ReactPointerEvent, type React
 
 import { livePreviewStore, useLivePreview } from "@/store/livePreview";
 
+import { LivePreviewActionBar } from "./LivePreviewActionBar";
 import { LivePreviewPane } from "./LivePreviewPane";
 
 export function LivePreviewSplit({ children }: { children: ReactNode }) {
@@ -57,6 +58,8 @@ export function LivePreviewSplit({ children }: { children: ReactNode }) {
   return (
     <div ref={containerRef} className="flex min-w-0 flex-1">
       <div className={`flex min-w-0 flex-col ${enabled ? "" : "flex-1"}`} style={leftStyle}>
+        {/* Панель дій — зверху лівої зони (§10.5), лише в режимі (T-142). */}
+        {enabled ? <LivePreviewActionBar /> : null}
         {children}
       </div>
       {enabled ? (
