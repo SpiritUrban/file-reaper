@@ -13,8 +13,12 @@
  * livePreviewStore/localStorage (рішення T-139: геометрія і поведінка
  * webview — не Core settings.json).
  *
- * Заглушки наступних задач: редактор виключених шляхів — T-151; перемикачі
- * категорій і власні шаблони — T-152; редактор гарячих клавіш — T-153.
+ * Виключені шляхи (T-151): редактор списку в секції «Сканування»; системні
+ * виключення T-027 видимі; сканер читає список на старті сесії — зміни
+ * діють з наступного скану.
+ *
+ * Заглушки наступних задач: перемикачі категорій і власні шаблони — T-152;
+ * редактор гарячих клавіш — T-153.
  */
 
 import { useEffect, useState } from "react";
@@ -39,6 +43,24 @@ import type { AppSettings, CacheUsage, HealthInfo } from "@/ipc/types";
 
 const MIB = 1024 * 1024;
 const GIB = 1024 * MIB;
+
+/**
+ * Системні виключення обходу (T-027, дзеркало
+ * `PathExclusions::windows_system_defaults` у core/infra/scan-walk) +
+ * службовий каталог карантину (T-088). Застосовуються Core-ом до кожного
+ * тому завжди; тут — лише видимість (DoD T-151).
+ */
+const SYSTEM_EXCLUSIONS = [
+  "Windows",
+  "Program Files",
+  "Program Files (x86)",
+  "ProgramData",
+  "$Recycle.Bin",
+  "System Volume Information",
+  "Recovery",
+  "Config.Msi",
+  ".trashradar",
+] as const;
 
 /** Варіанти автознищення Quarantine (ui.md §9.1; «ніколи» — див. відхилення
  *  T-150 у progress.md: Core вимагає TTL 1..3650 дн). */
@@ -166,6 +188,87 @@ function PlannedButton({ label, taskRef }: { label: string; taskRef: string }) {
 const SELECT_CLASS =
   "rounded border border-line bg-panel-2 px-1.5 py-0.5 text-ink focus:border-accent focus:outline-none";
 
+/**
+ * Редактор виключених шляхів (T-151, ui.md §9.2): видимі системні виключення
+ * + користувацький список з додаванням/видаленням. Список зберігається через
+ * `settings.set` (валідація Core: непорожні елементи, ліміт 4096); сканер
+ * читає його на старті сесії — зміни діють з наступного скану.
+ */
+function ExcludedPathsEditor({ settings }: { settings: AppSettings }) {
+  const [draft, setDraft] = useState("");
+  const excluded = settings.scan.excludedPaths;
+
+  const save = (excludedPaths: string[]) =>
+    saveSettings({
+      ...settings,
+      scan: { ...settings.scan, excludedPaths },
+    });
+
+  const addPath = async () => {
+    const path = draft.trim();
+    if (path.length === 0) return;
+    const exists = excluded.some(
+      (item) => item.toLowerCase() === path.toLowerCase(),
+    );
+    if (exists) {
+      toast({ message: "Цей шлях уже у списку виключень.", tone: "info" });
+      return;
+    }
+    await save([...excluded, path]);
+    setDraft("");
+  };
+
+  const removePath = (index: number) =>
+    void save(excluded.filter((_, i) => i !== index));
+
+  return (
+    <div className="flex flex-col gap-2">
+      {excluded.length > 0 ? (
+        <ul className="flex flex-col gap-1">
+          {excluded.map((path, index) => (
+            <li key={`${path}:${index}`} className="flex items-center gap-2">
+              <button
+                type="button"
+                aria-label={`Видалити виключення ${path}`}
+                title="Видалити зі списку"
+                onClick={() => removePath(index)}
+                className="rounded border border-line bg-panel-2 px-1.5 text-ink-dim hover:border-accent hover:text-ink"
+              >
+                ✕
+              </button>
+              <span className="font-mono text-ink-dim">{path}</span>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <div className="text-ink-faint">Власних виключень немає.</div>
+      )}
+
+      <div className="flex items-center gap-2">
+        <input
+          type="text"
+          value={draft}
+          placeholder="D:\Projects\archive"
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") void addPath();
+          }}
+          className="w-80 border-b border-line bg-transparent px-1 font-mono text-ink placeholder:text-ink-faint focus:border-accent focus:outline-none"
+        />
+        <button
+          type="button"
+          disabled={draft.trim().length === 0}
+          onClick={() => void addPath()}
+          className="rounded border border-line bg-panel-2 px-2 py-0.5 text-ink hover:border-accent disabled:cursor-not-allowed disabled:text-ink-faint"
+        >
+          Додати
+        </button>
+        <span className="text-ink-faint">діє з наступного скану</span>
+      </div>
+    </div>
+  );
+}
+
 export function SettingsScreen() {
   const navigate = useNavigate();
   const { settings, volumes } = useAppState();
@@ -204,7 +307,6 @@ export function SettingsScreen() {
   };
 
   const ttlDays = settings?.quarantine.ttlDays;
-  const excluded = settings?.scan.excludedPaths ?? [];
 
   return (
     <div className="flex flex-col gap-6 px-6 py-4 text-xs">
@@ -301,23 +403,23 @@ export function SettingsScreen() {
             <span className="text-ink-faint">—</span>
           )}
         </Row>
-        <Row label="Виключені шляхи">
-          <span className="text-ink-dim">
-            {excluded.length > 0 ? (
+        <div className="flex flex-wrap gap-2 py-1.5">
+          <span className="w-64 shrink-0 text-ink-dim">Виключені шляхи</span>
+          <div className="flex min-w-0 flex-1 flex-col gap-2">
+            {/* DoD T-151: системні виключення (T-027 + T-088) видимі завжди. */}
+            <div className="text-ink-faint">
+              Системні (завжди, на кожному томі):{" "}
               <span className="font-mono">
-                {excluded.slice(0, 4).join(", ")}
-                {excluded.length > 4 ? ` … (+${excluded.length - 4})` : ""}
+                {SYSTEM_EXCLUSIONS.map((name) => `<том>:\\${name}`).join(", ")}
               </span>
+            </div>
+            {settings ? (
+              <ExcludedPathsEditor settings={settings} />
             ) : (
-              "власних немає"
+              <span className="text-ink-faint">—</span>
             )}
-          </span>
-          <span className="text-ink-faint">
-            · системні (Windows, Program Files, $Recycle.Bin, …) виключені
-            завжди
-          </span>
-          <PlannedButton label="Змінити" taskRef="T-151" />
-        </Row>
+          </div>
+        </div>
       </Section>
 
       <Section title="Категорії-детектори">

@@ -372,8 +372,12 @@ fn strategies_for(volumes: &[char]) -> Vec<ScanStrategy> {
         .collect()
 }
 
-/// Диспетчер: MFT або walk за T-028 на кожному томі.
-struct AutoVolumeScanner;
+/// Диспетчер: MFT або walk за T-028 на кожному томі. Несе користувацькі
+/// виключені шляхи з settings сесії скану (T-151) — зливаються з системними
+/// дефолтами T-027 на кожен том.
+struct AutoVolumeScanner {
+    user_excluded: Vec<String>,
+}
 
 impl CancellableVolumeScanner for AutoVolumeScanner {
     fn scan_volume(
@@ -382,12 +386,40 @@ impl CancellableVolumeScanner for AutoVolumeScanner {
         cancel: &CancellationToken,
         on_batch: &mut dyn FnMut(Vec<FileRecord>) -> Result<(), CoreError>,
     ) -> Result<VolumeScanOutcome, CoreError> {
-        scan_one_volume_auto(volume, cancel, on_batch)
+        scan_one_volume_auto(volume, &self.user_excluded, cancel, on_batch)
     }
+}
+
+/// Повний набір виключень тому: системні дефолти T-027 + службовий каталог
+/// карантину (T-088, architecture.md §7.4) + користувацькі шляхи з
+/// Налаштувань (T-151). Користувацькі шляхи можуть указувати на будь-який
+/// том — нормалізація префіксів робить чужі невлучними без окремого фільтра.
+fn exclusions_for_volume(volume: char, user_excluded: &[String]) -> PathExclusions {
+    let mut exclusions = PathExclusions::windows_system_defaults(volume);
+    if volume.is_ascii_alphabetic() {
+        exclusions.extend([format!(
+            r"{}:\{}",
+            volume.to_ascii_uppercase(),
+            trashradar_domain::quarantine::SERVICE_DIRECTORY_NAME
+        )]);
+    }
+    exclusions.extend(user_excluded);
+    exclusions
+}
+
+/// Викидає з батча записи під виключеними шляхами (шлях MFT-скану: сирий
+/// перелік усього тому фільтрується на рівні записів — піддерева там
+/// відсікати нема де, на відміну від обходу T-027).
+fn retain_not_excluded(batch: &mut Vec<FileRecord>, exclusions: &PathExclusions) {
+    if exclusions.is_empty() {
+        return;
+    }
+    batch.retain(|record| !exclusions.is_excluded(std::path::Path::new(&record.path)));
 }
 
 fn scan_one_volume_auto(
     volume: char,
+    user_excluded: &[String],
     cancel: &CancellationToken,
     on_batch: &mut dyn FnMut(Vec<FileRecord>) -> Result<(), CoreError>,
 ) -> Result<VolumeScanOutcome, CoreError> {
@@ -397,42 +429,55 @@ fn scan_one_volume_auto(
         is_elevated: env.is_elevated(),
     })
     .strategy;
+    let exclusions = exclusions_for_volume(volume, user_excluded);
     match strategy {
-        ScanStrategy::Mft => scan_mft_cancellable(volume, cancel, on_batch),
+        ScanStrategy::Mft => scan_mft_cancellable(volume, &exclusions, cancel, on_batch),
         ScanStrategy::DirectoryWalk | ScanStrategy::UsnDelta => {
-            scan_walk_cancellable(volume, cancel, on_batch)
+            scan_walk_cancellable(volume, exclusions, cancel, on_batch)
         }
     }
 }
 
 fn scan_mft_cancellable(
     volume: char,
+    exclusions: &PathExclusions,
     cancel: &CancellationToken,
     on_batch: &mut dyn FnMut(Vec<FileRecord>) -> Result<(), CoreError>,
 ) -> Result<VolumeScanOutcome, CoreError> {
     #[cfg(windows)]
     {
         const BATCH: usize = 10_000;
-        let (stats, cancelled) = trashradar_scan_mft::pipeline::scan_volume_to_index_cancel(
+        // T-151: фільтр виключень на межі батча; files_indexed рахуємо по
+        // фактично зданих записах, а не по сирій статистиці парсера.
+        let mut files_kept = 0u64;
+        let (_stats, cancelled) = trashradar_scan_mft::pipeline::scan_volume_to_index_cancel(
             volume,
             BATCH,
             || cancel.is_cancelled(),
-            on_batch,
+            |mut batch: Vec<FileRecord>| {
+                retain_not_excluded(&mut batch, exclusions);
+                if batch.is_empty() {
+                    return Ok(());
+                }
+                files_kept += batch.len() as u64;
+                on_batch(batch)
+            },
         )?;
         Ok(VolumeScanOutcome {
-            files_indexed: stats.files_indexed,
+            files_indexed: files_kept,
             cancelled,
         })
     }
     #[cfg(not(windows))]
     {
-        let _ = (volume, cancel, on_batch);
+        let _ = (volume, exclusions, cancel, on_batch);
         Err(CoreError::not_implemented("scan.mft"))
     }
 }
 
 fn scan_walk_cancellable(
     volume: char,
+    exclusions: PathExclusions,
     cancel: &CancellationToken,
     on_batch: &mut dyn FnMut(Vec<FileRecord>) -> Result<(), CoreError>,
 ) -> Result<VolumeScanOutcome, CoreError> {
@@ -443,8 +488,9 @@ fn scan_walk_cancellable(
         });
     }
 
+    // T-027/T-151: у виключені піддерева обхід не заходить взагалі.
     let config = WalkConfig {
-        exclusions: PathExclusions::windows_system_defaults(volume),
+        exclusions,
         ..WalkConfig::default()
     };
     let all = trashradar_scan_walk::walk_volume(volume, config)?;
@@ -578,7 +624,11 @@ pub async fn scan_start<R: Runtime>(
                 Instant::now(),
             );
 
-            let scanner = AutoVolumeScanner;
+            // T-151: виключені шляхи фіксуються на старті сесії — зміна
+            // списку в Налаштуваннях діє з наступного скану.
+            let scanner = AutoVolumeScanner {
+                user_excluded: settings.scan.excluded_paths.clone(),
+            };
             let result = run_scan_session(
                 &volumes,
                 &strategies,
@@ -1190,6 +1240,52 @@ mod tests {
         };
         let v = resolve_volumes(&p).unwrap();
         assert_eq!(v, vec!['C', 'D']);
+    }
+
+    /// T-151: набір виключень тому = системні дефолти T-027 + `.trashradar`
+    /// (T-088) + користувацькі шляхи з Налаштувань.
+    #[test]
+    fn volume_exclusions_merge_system_service_and_user_paths() {
+        let user = vec![r"C:\Users\Ada\OneDrive".to_string()];
+        let ex = exclusions_for_volume('C', &user);
+        assert!(ex.is_excluded(std::path::Path::new(r"C:\Windows\System32")));
+        assert!(ex.is_excluded(std::path::Path::new(r"C:\.trashradar\quarantine\x.bin")));
+        assert!(ex.is_excluded(std::path::Path::new(r"c:\users\ada\onedrive\video.mp4")));
+        assert!(!ex.is_excluded(std::path::Path::new(r"C:\Users\Ada\Downloads\video.mp4")));
+    }
+
+    /// T-151 (шлях MFT): записи під виключеним шляхом викидаються з батча,
+    /// решта лишається незмінною.
+    #[test]
+    fn retain_not_excluded_drops_only_records_under_excluded_prefix() {
+        fn record(id: u64, path: &str) -> FileRecord {
+            FileRecord {
+                candidate_id: CandidateId(id),
+                path: path.into(),
+                size: ByteSize(1),
+                created_at: None,
+                modified_at: None,
+                accessed_at: None,
+                kind: FileKind::Other,
+                unit: CandidateUnit::File,
+                category: CategoryId::Uncategorized,
+                safety: SafetyLevel::ReviewRecommended,
+                decision: Decision::Undecided,
+                detector_id: String::new(),
+                explanation: String::new(),
+                attributes: FileAttributes::default(),
+            }
+        }
+        let ex = exclusions_for_volume('C', &[r"C:\Skip".to_string()]);
+        let mut batch = vec![
+            record(1, r"C:\Skip\a.bin"),
+            record(2, r"C:\Users\Ada\keep.bin"),
+            record(3, r"C:\Skip\deep\b.bin"),
+            record(4, r"C:\Skipper\not-excluded.bin"),
+        ];
+        retain_not_excluded(&mut batch, &ex);
+        let kept: Vec<u64> = batch.iter().map(|r| r.candidate_id.0).collect();
+        assert_eq!(kept, vec![2, 4]);
     }
 
     #[test]
