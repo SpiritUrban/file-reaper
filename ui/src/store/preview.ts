@@ -1,5 +1,5 @@
 /**
- * Прев'ю-міст (T-120/T-124): підключення UI до Core-конвеєра превью
+ * Прев'ю-міст (T-120/T-124/T-145): підключення UI до Core-конвеєра превью
  * (T-067..T-076). До T-120 жодна `preview.*` команда не викликалась з UI —
  * плитки показували лише гліфи-заглушки (T-100).
  *
@@ -12,7 +12,10 @@
  *   (перший hover), з клієнтським кешем у сесії (DoD T-072/T-120: «без
  *   декодування на льоту» — повторні наведення читають уже отримані кадри
  *   з пам'яті); спільний хук, бо і плитка (T-120), і велике превью в
- *   панелі деталей (T-124) скраблять однаково — рух курсора по X.
+ *   панелі деталей (T-124) скраблять однаково — рух курсора по X;
+ * - `useLivePreviewVideo` — права зона Live Preview (T-145): автовідтворення
+ *   смуги без звуку при утриманні + скраб X-позицією зліва
+ *   (`livePreviewScrubStore`); теж лише pre-extracted кадри, не `<video>`.
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -25,6 +28,14 @@ import type {
   PreviewScrubStripAck,
   PreviewThumbnailAck,
 } from "@/ipc/types";
+import { useLivePreviewScrub } from "@/store/livePreviewScrub";
+
+/** Затримка «утримання» перед автовідтворенням у правій зоні (T-145 / §10.2). */
+const LIVE_PREVIEW_AUTOPLAY_DWELL_MS = 350;
+/** Темп «відтворення» смуги: ~10 fps — плавно, без навантаження на GPU. */
+const LIVE_PREVIEW_AUTOPLAY_FPS = 10;
+/** Після скрабу (рух X) — стільки мс спокою, перш ніж відновити autoplay. */
+const LIVE_PREVIEW_SCRUB_IDLE_MS = 200;
 
 /** candidateId → data URL мініатюри; переживає розмонтування плитки (скрол). */
 const thumbnailCache = new Map<number, string>();
@@ -259,4 +270,116 @@ export function useVideoScrub(
   const displaySrc = scrubbing ? scrubFrames[scrubIndex] : fallbackSrc;
 
   return { displaySrc, scrubbing, handleMouseMove, handleMouseLeave };
+}
+
+/**
+ * Відео у правій зоні Live Preview (T-145, ui.md §10.2):
+ * - утримання курсора на плитці (dwell) → автовідтворення скраб-смуги
+ *   без звуку (циклічна зміна pre-extracted кадрів T-072, не `<video>`);
+ * - горизонтальний рух по плитці зліва → скраб великого екрана
+ *   (ratio з `livePreviewScrubStore`);
+ * - фокус клавіатури (без миші) → те саме автовідтворення після dwell.
+ *
+ * Fallback — `useLargePreview` (ключ-кадр/мініатюра), поки смуга ще
+ * вантажиться або файл не відео / смуга недоступна (немає ffmpeg).
+ */
+export function useLivePreviewVideo(
+  candidate: Pick<Candidate, "id" | "kind" | "unit"> | null,
+  fallbackSrc: string | null,
+): {
+  displaySrc: string | null;
+  /** true, коли показуємо кадр смуги (autoplay або scrub), не static large. */
+  playing: boolean;
+  scrubbing: boolean;
+} {
+  const isVideo =
+    candidate?.kind === "video" && candidate.unit === "file";
+  const scrub = useLivePreviewScrub();
+  const [frames, setFrames] = useState<string[] | null>(null);
+  const [frameIndex, setFrameIndex] = useState(0);
+  const [mode, setMode] = useState<"idle" | "autoplay" | "scrub">("idle");
+  const framesRef = useRef<string[] | null>(null);
+  framesRef.current = frames;
+
+  // Завантаження смуги при зміні цілі-відео (той самий клієнтський кеш,
+  // що й плитка T-120 — повторне наведення без IPC).
+  useEffect(() => {
+    setFrames(null);
+    setFrameIndex(0);
+    setMode("idle");
+    if (!isVideo || !candidate) return;
+
+    let cancelled = false;
+    loadScrubStrip(candidate).then((loaded) => {
+      if (cancelled || loaded.length === 0) return;
+      setFrames(loaded);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [candidate?.id, isVideo]);
+
+  // Скраб зліва: ratio з плитки мапиться на кадр. Лише для поточної цілі.
+  useEffect(() => {
+    if (!isVideo || !candidate || !frames) return;
+    if (scrub.candidateId !== candidate.id) return;
+    if (scrub.ratio === null) return;
+
+    setMode("scrub");
+    setFrameIndex(Math.floor(scrub.ratio * frames.length));
+  }, [scrub.candidateId, scrub.ratio, scrub.moveGeneration, candidate?.id, frames, isVideo]);
+
+  // Автовідтворення: dwell після появи цілі / після паузи скрабу.
+  // Залежить від moveGeneration — кожен рух перезапускає таймер idle.
+  useEffect(() => {
+    if (!isVideo || !candidate || !frames || frames.length === 0) return;
+
+    // Активний скраб цієї ж цілі — чекаємо спокою, потім autoplay.
+    const scrubbingThis =
+      scrub.candidateId === candidate.id && scrub.ratio !== null;
+    const delay = scrubbingThis
+      ? LIVE_PREVIEW_SCRUB_IDLE_MS
+      : LIVE_PREVIEW_AUTOPLAY_DWELL_MS;
+
+    const timer = setTimeout(() => {
+      // Стартуємо з поточного кадру (після скрабу — з місця зупинки).
+      setMode("autoplay");
+    }, delay);
+
+    return () => clearTimeout(timer);
+  }, [
+    candidate?.id,
+    frames,
+    isVideo,
+    scrub.candidateId,
+    scrub.ratio,
+    scrub.moveGeneration,
+  ]);
+
+  // Тік autoplay: циклічно гортає кадри, поки mode === "autoplay".
+  useEffect(() => {
+    if (mode !== "autoplay") return;
+    const strip = framesRef.current;
+    if (!strip || strip.length === 0) return;
+
+    const interval = setInterval(() => {
+      setFrameIndex((i) => (i + 1) % strip.length);
+    }, 1000 / LIVE_PREVIEW_AUTOPLAY_FPS);
+
+    return () => clearInterval(interval);
+  }, [mode, frames?.length, candidate?.id]);
+
+  if (!isVideo || !frames || frames.length === 0 || mode === "idle") {
+    return {
+      displaySrc: fallbackSrc,
+      playing: false,
+      scrubbing: false,
+    };
+  }
+
+  return {
+    displaySrc: frames[frameIndex] ?? fallbackSrc,
+    playing: mode === "autoplay",
+    scrubbing: mode === "scrub",
+  };
 }

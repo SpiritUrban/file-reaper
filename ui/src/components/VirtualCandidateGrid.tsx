@@ -78,6 +78,11 @@ export interface VirtualCandidateGridProps {
   onFocusCandidate?: (candidate: Candidate) => void;
   /** Наведення курсора (T-140): у Live Preview → велике превью праворуч. */
   onHoverCandidate?: (candidate: Candidate) => void;
+  /**
+   * Горизонтальний рух по плитці (T-145): ratio 0..1 для скрабу
+   * великого превью у правій зоні Live Preview.
+   */
+  onHoverMove?: (candidate: Candidate, ratio: number) => void;
   /** Поточна кількість колонок геометрії (T-123: клавіатурна навігація ↑/↓). */
   onColumnsChange?: (columns: number) => void;
   emptyTitle?: string;
@@ -95,6 +100,7 @@ export function VirtualCandidateGrid({
   onSecondaryActivate,
   onFocusCandidate,
   onHoverCandidate,
+  onHoverMove,
   onColumnsChange,
   emptyTitle = "Немає кандидатів у цій категорії",
 }: VirtualCandidateGridProps) {
@@ -211,6 +217,7 @@ export function VirtualCandidateGrid({
                 {...(onSecondaryActivate ? { onSecondaryActivate } : {})}
                 {...(onFocusCandidate ? { onFocusCandidate } : {})}
                 {...(onHoverCandidate ? { onHoverCandidate } : {})}
+                {...(onHoverMove ? { onHoverMove } : {})}
               />
             );
           })}

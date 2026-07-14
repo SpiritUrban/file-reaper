@@ -9,9 +9,16 @@
  * тут лише каркас розкладки.
  */
 
-import { useCallback, useRef, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode,
+} from "react";
 
 import { livePreviewStore, useLivePreview } from "@/store/livePreview";
+import { livePreviewScrubStore } from "@/store/livePreviewScrub";
 
 import { LivePreviewActionBar } from "./LivePreviewActionBar";
 import { LivePreviewPane } from "./LivePreviewPane";
@@ -20,6 +27,12 @@ export function LivePreviewSplit({ children }: { children: ReactNode }) {
   const { enabled, leftRatio } = useLivePreview();
   const containerRef = useRef<HTMLDivElement>(null);
   const draggingRef = useRef(false);
+
+  // T-145: при вимкненні режиму скидаємо скраб-стан, щоб наступне
+  // увімкнення не стартувало autoplay на застарілому candidateId.
+  useEffect(() => {
+    if (!enabled) livePreviewScrubStore.clear();
+  }, [enabled]);
 
   // Межа лівої зони рахується від власного контейнера спліту (виключає
   // Sidebar і панель деталей) — тож частка завжди узгоджена з видимою

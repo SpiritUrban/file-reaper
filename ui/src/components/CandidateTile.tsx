@@ -37,6 +37,12 @@ export interface CandidateTileProps {
   onFocusCandidate?: (candidate: Candidate) => void;
   /** Наведення курсора (T-140): у Live Preview → велике превью праворуч. */
   onHoverCandidate?: (candidate: Candidate) => void;
+  /**
+   * Горизонтальний рух по плитці (T-145): у Live Preview ratio 0..1
+   * скрабить великий екран праворуч. Окремо від внутрішнього скрабу
+   * мініатюри плитки (T-120).
+   */
+  onHoverMove?: (candidate: Candidate, ratio: number) => void;
 }
 
 const KIND_GLYPH: Record<FileKind, string> = {
@@ -86,6 +92,7 @@ export function CandidateTile({
   onSecondaryActivate,
   onFocusCandidate,
   onHoverCandidate,
+  onHoverMove,
 }: CandidateTileProps) {
   const marked = markedOverride ?? candidate.decision === "marked";
   const kept = candidate.decision === "keep";
@@ -108,6 +115,20 @@ export function CandidateTile({
   const { displaySrc, scrubbing, handleMouseMove, handleMouseLeave } =
     useVideoScrub(candidate, preview?.src);
 
+  // T-145: ratio для правого екрана Live Preview — паралельно з локальним
+  // скрабом мініатюри; батько (CategoryScreen) фільтрує за режимом.
+  const handleMove = (event: React.MouseEvent<HTMLElement>) => {
+    handleMouseMove(event);
+    if (!onHoverMove) return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    if (rect.width <= 0) return;
+    const ratio = Math.min(
+      0.999,
+      Math.max(0, (event.clientX - rect.left) / rect.width),
+    );
+    onHoverMove(candidate, ratio);
+  };
+
   return (
     <button
       type="button"
@@ -127,7 +148,7 @@ export function CandidateTile({
       onClick={(event) => onActivate?.(candidate, event)}
       onFocus={() => onFocusCandidate?.(candidate)}
       onMouseEnter={() => onHoverCandidate?.(candidate)}
-      onMouseMove={handleMouseMove}
+      onMouseMove={handleMove}
       onMouseLeave={handleMouseLeave}
     >
       <span className={`absolute inset-x-0 top-0 z-30 h-1 ${heatClass(heat)}`} />

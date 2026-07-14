@@ -59,6 +59,7 @@ import {
 } from "@/store/armedAction";
 import { gridDensityStore, useGridDensity } from "@/store/gridDensity";
 import { livePreviewStore, useLivePreview } from "@/store/livePreview";
+import { livePreviewScrubStore } from "@/store/livePreviewScrub";
 import { previewTargetStore } from "@/store/previewTarget";
 import { applySearchQuery, useSearchState } from "@/store/search";
 import { selectionStore, useMarkedSummary } from "@/store/selection";
@@ -211,11 +212,23 @@ export function CategoryScreen({ categoryId }: CategoryScreenProps) {
     anchorRef.current = candidate.id;
   };
 
-  // T-140: у Live Preview кандидат «під курсором»/у фокусі стає ціллю
-  // великого превью праворуч. Поза режимом — no-op (права зона не змонтована),
-  // тож наведення в звичайній сітці не тягне жодного preview.large.
+  // T-140/T-145: у Live Preview кандидат «під курсором»/у фокусі стає ціллю
+  // великого превью праворуч; для відео — hold (автовідтворення після dwell).
+  // Поза режимом — no-op (права зона не змонтована).
   const previewIfLive = (candidate: Candidate) => {
-    if (livePreviewStore.getSnapshot().enabled) previewTargetStore.set(candidate);
+    if (!livePreviewStore.getSnapshot().enabled) return;
+    previewTargetStore.set(candidate);
+    // T-145: вхід/фокус без X-руху → autoplay; reportMove переб'є на scrub.
+    if (candidate.kind === "video" && candidate.unit === "file") {
+      livePreviewScrubStore.reportHold(candidate.id);
+    }
+  };
+
+  // T-145: горизонтальний рух по плитці скрабить великий екран (не плитку).
+  const scrubIfLive = (candidate: Candidate, ratio: number) => {
+    if (!livePreviewStore.getSnapshot().enabled) return;
+    if (candidate.kind !== "video" || candidate.unit !== "file") return;
+    livePreviewScrubStore.reportMove(candidate.id, ratio);
   };
 
   // T-143: колір пульс-обводу за роллю дії (reap/keep/move/open).
@@ -407,6 +420,7 @@ export function CategoryScreen({ categoryId }: CategoryScreenProps) {
             previewIfLive(candidate);
           }}
           onHoverCandidate={previewIfLive}
+          onHoverMove={scrubIfLive}
           onColumnsChange={(columns) => {
             columnsRef.current = columns;
           }}

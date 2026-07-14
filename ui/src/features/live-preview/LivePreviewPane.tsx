@@ -1,7 +1,7 @@
 /**
- * Права зона Live Preview (docs/ui.md §10.1/§10.2, T-140): велике превью
- * файла «під курсором» або у фокусі клавіатури (`previewTargetStore`) на
- * весь екран, без власних контролів (нуль втрат площі, §10.1).
+ * Права зона Live Preview (docs/ui.md §10.1/§10.2, T-140..T-145): велике
+ * превью файла «під курсором» або у фокусі клавіатури (`previewTargetStore`)
+ * на весь екран, без власних контролів (нуль втрат площі, §10.1).
  *
  * Джерело — той самий `preview.large` (T-073 конвеєр, T-124 хук
  * `useLargePreview`), що й панель деталей: draft із кешу за <100 мс, sharp
@@ -10,13 +10,17 @@
  *
  * T-141: єдина інформація в зоні — тонкий рядок-накладка знизу (шлях·розмір·
  * вік), що зникає за 2 с бездіяльності курсора й вертається на будь-який рух.
- * Свідомо НЕ тут: відео автовідтворення + скраб рухом миші — T-145.
+ *
+ * T-145: для відео — автовідтворення без звуку при утриманні курсора на
+ * плитці (циклічна скраб-смуга T-072) і скраб горизонтальним рухом зліва
+ * (`livePreviewScrubStore` ← плитки); відео на льоту не декодується
+ * (architecture.md §5.3).
  */
 
 import { useEffect, useState } from "react";
 
 import { formatAge, formatBytes } from "@/store/format";
-import { useLargePreview } from "@/store/preview";
+import { useLargePreview, useLivePreviewVideo } from "@/store/preview";
 import { usePreviewTarget } from "@/store/previewTarget";
 
 const IDLE_HIDE_MS = 2000;
@@ -55,18 +59,27 @@ function useIdleOverlayVisible(resetKey: unknown): boolean {
 
 export function LivePreviewPane() {
   const target = usePreviewTarget();
-  const src = useLargePreview(target);
+  const largeSrc = useLargePreview(target);
+  // T-145: для відео підміняє largeSrc кадрами смуги (autoplay / scrub).
+  const { displaySrc, playing, scrubbing } = useLivePreviewVideo(
+    target,
+    largeSrc,
+  );
   const infoVisible = useIdleOverlayVisible(target?.id ?? null);
 
   return (
-    <div className="relative flex min-w-0 flex-1 items-center justify-center overflow-hidden bg-bg">
+    <div
+      className="relative flex min-w-0 flex-1 items-center justify-center overflow-hidden bg-bg"
+      data-video-playing={playing || undefined}
+      data-video-scrubbing={scrubbing || undefined}
+    >
       {!target ? (
         <span className="select-none text-xs text-ink-faint">
           Зона превью — наведіть курсор на плитку зліва
         </span>
-      ) : src ? (
+      ) : displaySrc ? (
         <img
-          src={src}
+          src={displaySrc}
           alt=""
           className="max-h-full max-w-full object-contain"
           draggable={false}
