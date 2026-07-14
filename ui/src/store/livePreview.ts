@@ -12,6 +12,12 @@
 
 import { useSyncExternalStore } from "react";
 
+import {
+  ARMED_ACTIONS,
+  armedActionStore,
+  type ArmedAction,
+} from "./armedAction";
+
 const STORAGE_KEY = "trashradar.livePreview";
 
 /** Межі частки лівої зони — жодна зі зон не колапсує в нуль. */
@@ -32,6 +38,20 @@ export const DEFAULT_DISARM_TIMEOUT_SEC = 60;
 export const MIN_DISARM_TIMEOUT_SEC = 5;
 export const MAX_DISARM_TIMEOUT_SEC = 600;
 
+/**
+ * T-150 / architecture.md §9: дефолтна озброєна дія при вході в Live Preview
+ * («дія кліку за замовч.» з екрана Налаштувань, ui.md §9.4). Дефолт `none` —
+ * режим стартує в безпечному «тільки перегляд», доки користувач не обере інше.
+ */
+export const DEFAULT_ARMED_ACTION: ArmedAction = "none";
+
+/** Дозволені значення — лише категорійна палітра (карантин має свій набір). */
+function sanitizeDefaultAction(value: unknown): ArmedAction {
+  return ARMED_ACTIONS.some((meta) => meta.id === value)
+    ? (value as ArmedAction)
+    : DEFAULT_ARMED_ACTION;
+}
+
 export interface LivePreviewState {
   enabled: boolean;
   /**
@@ -47,6 +67,8 @@ export interface LivePreviewState {
   singleDisplay: boolean;
   /** Секунди бездіяльності курсора до авторозрядження reap/purge (T-144). */
   disarmTimeoutSec: number;
+  /** T-150: дія, що озброюється при вході в Live Preview (ui.md §9.4). */
+  defaultArmedAction: ArmedAction;
   /**
    * T-147 / §10.6: false (дефолт) — опрацьовані лишаються затемненими;
    * true — ховаються з сітки.
@@ -94,6 +116,7 @@ interface PersistedShape {
   leftRatioSingle?: number;
   leftRatioDual?: number;
   disarmTimeoutSec?: number;
+  defaultArmedAction?: string;
   hideProcessed?: boolean;
 }
 
@@ -120,6 +143,7 @@ function load(): LivePreviewState {
         disarmTimeoutSec: clampTimeout(
           parsed.disarmTimeoutSec ?? DEFAULT_DISARM_TIMEOUT_SEC,
         ),
+        defaultArmedAction: sanitizeDefaultAction(parsed.defaultArmedAction),
         hideProcessed: parsed.hideProcessed === true,
       };
     }
@@ -137,6 +161,7 @@ function load(): LivePreviewState {
       DEFAULT_LEFT_RATIO_DUAL,
     ),
     disarmTimeoutSec: DEFAULT_DISARM_TIMEOUT_SEC,
+    defaultArmedAction: DEFAULT_ARMED_ACTION,
     hideProcessed: false,
   };
 }
@@ -185,14 +210,17 @@ class LivePreviewStore {
   }
 
   toggle(): void {
-    this.refreshDisplayMode();
-    this.commit({ ...this.state, enabled: !this.state.enabled });
+    this.setEnabled(!this.state.enabled);
   }
 
   setEnabled(enabled: boolean): void {
     if (this.state.enabled === enabled) return;
     this.refreshDisplayMode();
     this.commit({ ...this.state, enabled });
+    // T-150: вхід у режим озброює дію за замовчуванням з Налаштувань
+    // (ui.md §9.4). Невалідну для поточного екрана дію (напр. reap на
+    // Quarantine) ActionBar розрядить сам (T-148).
+    if (enabled) armedActionStore.set(this.state.defaultArmedAction);
   }
 
   /**
@@ -229,6 +257,15 @@ class LivePreviewStore {
     this.commit({ ...this.state, disarmTimeoutSec });
   }
 
+  /** T-150: «дія кліку за замовч.» з екрана Налаштувань (ui.md §9.4). */
+  setDefaultArmedAction(action: ArmedAction): void {
+    const defaultArmedAction = sanitizeDefaultAction(action);
+    if (defaultArmedAction === this.state.defaultArmedAction) return;
+    this.commit({ ...this.state, defaultArmedAction });
+    // Гаряче застосування: якщо режим уже активний — переозброїти одразу.
+    if (this.state.enabled) armedActionStore.set(defaultArmedAction);
+  }
+
   setHideProcessed(hideProcessed: boolean): void {
     if (this.state.hideProcessed === hideProcessed) return;
     this.commit({ ...this.state, hideProcessed });
@@ -252,6 +289,7 @@ class LivePreviewStore {
         leftRatioSingle: this.state.leftRatioSingle,
         leftRatioDual: this.state.leftRatioDual,
         disarmTimeoutSec: this.state.disarmTimeoutSec,
+        defaultArmedAction: this.state.defaultArmedAction,
         hideProcessed: this.state.hideProcessed,
       };
       localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
