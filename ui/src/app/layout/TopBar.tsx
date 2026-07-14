@@ -22,6 +22,7 @@ import {
   candidateFilterStore,
   useCandidateFilters,
 } from "@/store/filters";
+import { livePreviewStore, useLivePreview } from "@/store/livePreview";
 import { reapOverlayStore } from "@/store/reapOverlay";
 import { searchStore, useSearchState } from "@/store/search";
 import type { CategoryId, FileKind, ScanStartAck } from "@/ipc/types";
@@ -203,6 +204,7 @@ export function TopBar({
   markedBytes = 0,
 }: TopBarProps) {
   const { cleanup, volumes } = useAppState();
+  const livePreview = useLivePreview();
   const filters = useCandidateFilters(categoryId);
   const summary = categoryId
     ? cleanup.categories.find((category) => category.id === categoryId)
@@ -304,6 +306,23 @@ export function TopBar({
 
       {/* Пошук (T-109): хоткей `/` фокусує, Escape закриває, infix по path */}
       <SearchBox categoryId={categoryId} />
+
+      {/* Live Preview (T-139, ui.md §10.1): вмикає двомоніторний режим —
+          той самий стан, що й `P` (livePreviewStore). */}
+      <button
+        type="button"
+        onClick={() => livePreviewStore.toggle()}
+        aria-pressed={livePreview.enabled}
+        title="Live Preview (P)"
+        aria-label="Live Preview"
+        className={`rounded px-2 py-1 text-sm transition-colors ${
+          livePreview.enabled
+            ? "bg-accent/20 text-ink"
+            : "text-ink-dim hover:bg-panel-2 hover:text-ink"
+        }`}
+      >
+        ▐▐
+      </button>
 
       {/* Reap Bar (T-108): спільний кошик сесії, живі лічильники T-102 */}
       <div className="flex items-center gap-2">

@@ -13,10 +13,12 @@ import { CategoryScreen } from "@/features/category/CategoryScreen";
 import { CleanupSummaryScreen } from "@/features/cleanup-summary/CleanupSummaryScreen";
 import { DuplicatesScreen } from "@/features/duplicates/DuplicatesScreen";
 import { HealthScreen } from "@/features/health/HealthScreen";
+import { LivePreviewSplit } from "@/features/live-preview/LivePreviewSplit";
 import { QuarantineScreen } from "@/features/quarantine/QuarantineScreen";
 import { ReapConfirmOverlay } from "@/features/reap-flow/ReapConfirmOverlay";
 import { SettingsScreen } from "@/features/settings/SettingsScreen";
 import { CATEGORIES, categoryRowsByWeight, categoryTitle } from "@/store/categories";
+import { livePreviewStore, useLivePreview } from "@/store/livePreview";
 import { reapOverlayStore } from "@/store/reapOverlay";
 import { useMarkedSummary } from "@/store/selection";
 import { useAppState } from "@/store/appState";
@@ -44,6 +46,7 @@ export function AppLayout() {
   const navigate = useNavigate();
   const marked = useMarkedSummary();
   const appState = useAppState();
+  const { enabled: livePreviewEnabled } = useLivePreview();
   const firstRunHandledRef = useRef(false);
 
   const activeCategory = categoryIdFromPath(pathname);
@@ -72,8 +75,21 @@ export function AppLayout() {
     hotkeys.setActiveContexts([
       ...(activeCategory ? (["grid"] as const) : []),
       ...(isQuarantine ? (["quarantine"] as const) : []),
+      ...(livePreviewEnabled ? (["live_preview"] as const) : []),
     ]);
-  }, [activeCategory, isQuarantine]);
+  }, [activeCategory, isQuarantine, livePreviewEnabled]);
+
+  // T-139: `P` (global контекст, T-103 `live_preview`) вмикає/вимикає
+  // двомоніторний режим; сам стан і геометрія межі — у livePreviewStore
+  // (переживають перезапуск через localStorage).
+  useEffect(() => {
+    const onHotkey = (event: Event) => {
+      const { action } = (event as CustomEvent<HotkeyActionEventDetail>).detail;
+      if (action === "live_preview") livePreviewStore.toggle();
+    };
+    window.addEventListener("trashradar:hotkey", onHotkey);
+    return () => window.removeEventListener("trashradar:hotkey", onHotkey);
+  }, []);
 
   // T-122: Ctrl+↑/↓ — перемикання категорій за тим самим порядком ваги,
   // що бачить користувач у Sidebar (T-105); "global" контекст — працює і
@@ -155,7 +171,10 @@ export function AppLayout() {
   return (
     <div className="flex h-full">
       <Sidebar />
-      <div className="flex min-w-0 flex-1 flex-col">
+      {/* T-139: у Live Preview LivePreviewSplit віддає частину ширини правій
+          зоні превью з перетяжною межею; поза режимом — прозорий wrapper,
+          ліва колонка займає всю ширину (як було до режиму). */}
+      <LivePreviewSplit>
         <TopBar
           context={context}
           categoryId={activeCategory}
@@ -201,7 +220,7 @@ export function AppLayout() {
             </section>
           ) : null}
         </main>
-      </div>
+      </LivePreviewSplit>
       {/* Немодальна панель деталей (T-123): поруч із сіткою, не поверх неї. */}
       <DetailsPanel />
       <ToastViewport />
