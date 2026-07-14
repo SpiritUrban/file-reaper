@@ -33,9 +33,12 @@
  * Викинута позиція НЕ повертається у сітку кандидатом на reap — вона просто
  * знову undecided, як і будь-який unmark (T-116).
  *
- * «Відправити у Quarantine» — навмисно `disabled`: виконання (прогрес
- * батч-reap + тост-скасування) — T-138, залежить від `reap.execute`
- * (planned) і не будувалось заздалегідь.
+ * «Відправити у Quarantine» (T-138) — `reap.execute` (TransactionalReaper,
+ * T-079) реально переміщує позначені файли й ховає їх з усіх категорій сесії
+ * тим самим шляхом, що й Keep (T-057); успіх закриває оверлей, чистить
+ * `selectionStore` і показує тост «X ГБ у Quarantine · [Скасувати]», де
+ * «Скасувати» — один виклик `reap.undo_batch` (QuarantineRestorer, T-081) на
+ * весь batchId.
  */
 
 import { useEffect, useState } from "react";
@@ -46,7 +49,8 @@ import { formatBytes } from "@/store/format";
 import { useThumbnail } from "@/store/preview";
 import { reapOverlayStore, useReapOverlayOpen } from "@/store/reapOverlay";
 import { selectionStore, useMarkedSummary } from "@/store/selection";
-import type { Candidate, VolumeUsageInfo } from "@/ipc/types";
+import { toast } from "@/store/toasts";
+import type { Candidate, ReapExecuteAck, QuarantineRestoreOutcome, VolumeUsageInfo } from "@/ipc/types";
 
 function fileName(path: string): string {
   const normalized = path.replace(/\\/g, "/");
@@ -209,6 +213,7 @@ export function ReapConfirmOverlay() {
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
     if (!open) return;
@@ -228,6 +233,41 @@ export function ReapConfirmOverlay() {
   const dismissCandidate = (candidate: Candidate) => {
     selectionStore.unmark(candidate.id);
     setCandidates((prev) => prev.filter((c) => c.id !== candidate.id));
+  };
+
+  // T-138: усі рядки, що лишились після T-137-вилучень, — один batch у
+  // reap.execute. Успіх: closes оверлей, чистить selectionStore (той самий
+  // сеансовий стор, що й Reap Bar/сітка — бейдж/лічильники підуть самі), тост
+  // із дією «Скасувати» на весь batchId (reap.undo_batch).
+  const submitReap = () => {
+    if (candidates.length === 0 || submitting) return;
+    setSubmitting(true);
+    command<ReapExecuteAck>("reap.execute", {
+      payload: { candidateIds: candidates.map((c) => c.id) },
+    })
+      .then((ack) => {
+        selectionStore.clear();
+        reapOverlayStore.close();
+        toast({
+          message: `${formatBytes(ack.reapedBytes)} у Quarantine`,
+          tone: "success",
+          action: {
+            label: "Скасувати",
+            run: () =>
+              command<QuarantineRestoreOutcome[]>("reap.undo_batch", {
+                payload: { batchId: ack.batchId },
+              })
+                .then(() => {
+                  toast({ message: "Відновлено з Quarantine", tone: "success" });
+                })
+                .catch((err) => {
+                  toast({ message: ipcErrorMessage(err), tone: "warning" });
+                }),
+          },
+        });
+      })
+      .catch((err) => toast({ message: ipcErrorMessage(err), tone: "warning" }))
+      .finally(() => setSubmitting(false));
   };
 
   useEffect(() => {
@@ -292,11 +332,11 @@ export function ReapConfirmOverlay() {
             </button>
             <button
               type="button"
-              disabled
-              title="Виконання — T-138"
-              className="cursor-not-allowed rounded bg-reap/50 px-3 py-1 text-sm font-semibold text-bg opacity-70"
+              onClick={submitReap}
+              disabled={submitting || candidates.length === 0}
+              className="rounded bg-reap px-3 py-1 text-sm font-semibold text-bg hover:bg-reap/90 disabled:cursor-not-allowed disabled:bg-reap/50 disabled:opacity-70"
             >
-              Відправити у Quarantine
+              {submitting ? "Виконання…" : "Відправити у Quarantine"}
             </button>
           </div>
         </div>

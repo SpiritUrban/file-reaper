@@ -87,8 +87,16 @@
       "task": "T-135",
       "$comment": "{candidateIds:u64[]} → Candidate[] (same shape as category.window); looks up arbitrary ids across ALL categories via HotIndex, not scoped to one — Reap Bar/selectionStore (T-108) only track candidateId+sizeBytes across the whole session, so the REAP confirmation overlay needs a category-agnostic way to fetch full path/kind/decision for whatever's currently marked. Unknown ids silently drop, not an error."
     },
-    "reap.execute": { "status": "planned", "task": "T-079" },
-    "reap.undo_batch": { "status": "planned", "task": "T-081" },
+    "reap.execute": {
+      "status": "implemented",
+      "task": "T-138",
+      "$comment": "{candidateIds:u64[]} → {batchId,reapedCount,reapedBytes}; wraps TransactionalReaper (T-079) — durable in_flight→atomic move→quarantined per candidate, expected_identity re-read live at call time (size exact, mtime to the second — the precision the hot index actually captured, T-024/T-057) before trusting the freshly-read precise identity for TransactionalReaper's own strict FILETIME check (T-086); mismatch → file_changed and the whole batch stops (no partial moves past the first failure). Reaped candidates get Decision::Keep applied via the same apply_decision_hot/apply_and_emit_totals path as candidate.keep (T-057), hiding them from every category in this session. Empty candidateIds / none resolve to a local volume → invalid_argument. Feeds the REAP overlay's (T-135) progress + \"X ГБ у Quarantine · [Скасувати]\" toast."
+    },
+    "reap.undo_batch": {
+      "status": "implemented",
+      "task": "T-138",
+      "$comment": "{batchId:u64} → RestoreOutcome[] {entryId,originalPath,restoredPath,usedSuffix}; wraps QuarantineRestorer::undo_batch (T-081) — restores every entry in the batch, emits quarantine.restored per entry. Powers the reap toast's [Скасувати] action (T-138)."
+    },
     "quarantine.restore_batch": {
       "status": "implemented",
       "task": "T-132",

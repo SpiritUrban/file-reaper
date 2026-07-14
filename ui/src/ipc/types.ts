@@ -426,6 +426,13 @@ export interface QuarantinePurgeAck {
   purgedBytes: number;
 }
 
+/** Відповідь `reap.execute` (T-138) — batchId живить `reap.undo_batch`. */
+export interface ReapExecuteAck {
+  batchId: number;
+  reapedCount: number;
+  reapedBytes: number;
+}
+
 export interface AppSettings {
   quarantine: {
     ttlDays: number;

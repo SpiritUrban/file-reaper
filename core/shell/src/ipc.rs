@@ -1520,6 +1520,8 @@ mod tests {
                 crate::scan_runtime::candidate_mark,
                 crate::scan_runtime::candidate_reveal_in_explorer,
                 crate::scan_runtime::duplicates_groups,
+                crate::scan_runtime::reap_execute,
+                crate::scan_runtime::reap_undo_batch,
             ])
             .build(mock_context(noop_assets()))
             .expect("mock app");
@@ -2002,6 +2004,118 @@ mod tests {
         assert_eq!(entry.status, QuarantineStatus::Purged);
 
         let _ = std::fs::remove_dir_all(profile);
+    }
+
+    /// DoD T-138: `reap.execute` реально переміщує файл у Quarantine
+    /// (durable in_flight→move→quarantined, use case T-079) і ховає
+    /// кандидата з усіх категорій сесії тим самим шляхом, що й Keep (T-057);
+    /// `reap.undo_batch` (use case T-081) відновлює весь батч одним викликом.
+    #[test]
+    fn reap_execute_moves_file_and_undo_batch_restores_it() {
+        use tauri::Manager;
+        use trashradar_domain::candidate::{
+            ByteSize, CandidateId, CandidateUnit, FileAttributes, FileKind, SafetyLevel,
+        };
+
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let profile = std::env::temp_dir().join(format!("trashradar-t138-profile-{nonce}"));
+        let source_dir = std::env::temp_dir().join(format!("trashradar-t138-src-{nonce}"));
+        std::fs::create_dir_all(&source_dir).expect("source dir");
+        let source_path = source_dir.join("marked.bin");
+        let content = b"reap me please";
+        std::fs::write(&source_path, content).expect("write source");
+        let source_path_str = source_path.to_string_lossy().into_owned();
+
+        let (app, webview) = test_app_in_profile(profile.clone());
+        let scan = app.state::<crate::scan_runtime::ScanRuntime>();
+
+        // Реальна mtime файла для гарячого індексу — execute_reap_batch сам
+        // звіряє її з живим диском на найкращій точності, яку захопило
+        // сканування (розмір точно, mtime до цілої секунди — CompactFileRecord
+        // не зберігає більшого), тож тут достатньо будь-якого реального
+        // значення; None дав би false-positive file_changed.
+        let identity =
+            trashradar_platform_win::read_file_identity(&source_path).expect("file identity");
+        scan.index
+            .insert_batch(vec![trashradar_domain::candidate::FileRecord {
+                candidate_id: CandidateId(555_555),
+                path: source_path_str.clone(),
+                size: ByteSize(content.len() as u64),
+                created_at: None,
+                modified_at: identity.modified_at,
+                accessed_at: None,
+                kind: FileKind::Other,
+                unit: CandidateUnit::File,
+                category: CategoryId::LargeFiles,
+                safety: SafetyLevel::ReviewRecommended,
+                decision: Decision::Marked,
+                detector_id: String::new(),
+                explanation: String::new(),
+                attributes: FileAttributes::default(),
+            }])
+            .unwrap();
+
+        let response = get_ipc_response(
+            &webview,
+            request(
+                "reap_execute",
+                json!({ "payload": { "candidateIds": [555555] } }),
+            ),
+        )
+        .expect("reap.execute");
+        let ack = body_json(response);
+        assert_eq!(ack["reapedCount"], 1);
+        assert_eq!(ack["reapedBytes"], content.len());
+        let batch_id = ack["batchId"].as_u64().expect("batchId");
+
+        assert!(
+            !source_path.exists(),
+            "файл мусить бути фізично переміщений"
+        );
+        let records = scan.index.get_all();
+        let record = records
+            .iter()
+            .find(|r| r.candidate_id == CandidateId(555_555))
+            .expect("запис лишається в індексі");
+        assert_eq!(
+            record.decision,
+            Decision::Keep,
+            "зреапнутий запис приховано тим самим шляхом, що й Keep (T-057)"
+        );
+
+        // «Скасувати» — весь батч одним викликом.
+        let undo_response = get_ipc_response(
+            &webview,
+            request(
+                "reap_undo_batch",
+                json!({ "payload": { "batchId": batch_id } }),
+            ),
+        )
+        .expect("reap.undo_batch");
+        let outcomes = body_json(undo_response);
+        let outcomes = outcomes.as_array().expect("масив відновлень");
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0]["restoredPath"], source_path_str);
+        assert!(source_path.exists(), "файл мусить повернутися на місце");
+
+        let _ = std::fs::remove_dir_all(&profile);
+        let _ = std::fs::remove_dir_all(&source_dir);
+    }
+
+    /// DoD T-138: порожній список candidateIds — типізована відмова до
+    /// будь-якого I/O.
+    #[test]
+    fn reap_execute_rejects_empty_candidate_ids() {
+        let (_app, webview) = test_app();
+        let envelope = get_ipc_response(
+            &webview,
+            request("reap_execute", json!({ "payload": { "candidateIds": [] } })),
+        )
+        .expect_err("порожній список мусить відмовити");
+        assert_eq!(envelope["code"], "invalid_argument");
     }
 
     /// T-106: snapshot містить живі томи (capacity/free) і бейдж карантину.

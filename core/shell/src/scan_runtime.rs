@@ -895,6 +895,266 @@ pub fn duplicates_groups(scan: State<'_, ScanRuntime>) -> Result<DuplicatesGroup
     })
 }
 
+// --- T-138: reap.execute / reap.undo_batch --------------------------------
+
+fn volume_of(path: &str) -> Option<char> {
+    let bytes = path.as_bytes();
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        Some(bytes[0].to_ascii_uppercase() as char)
+    } else {
+        None
+    }
+}
+
+/// Параметри `reap.execute` (T-138): candidateId уже позначених/підтверджених
+/// в оверлеї (T-135…T-137) — той самий id-простір, що й `candidate.batch`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReapExecutePayload {
+    pub candidate_ids: Vec<u64>,
+}
+
+/// Відповідь `reap.execute`: підсумок для тосту «X ГБ у Quarantine · [Скасувати]».
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReapExecuteAck {
+    pub batch_id: u64,
+    pub reaped_count: u64,
+    pub reaped_bytes: u64,
+}
+
+/// `reap.execute` (T-138): транзакційний батч-reap уже позначених candidateId
+/// (кнопка «Відправити у Quarantine», ReapConfirmOverlay T-135…T-137). Use
+/// case (`TransactionalReaper`, T-079) уже вміє все — durable in_flight →
+/// atomic move → durable quarantined + аудит; тут лише резолв сурогатного
+/// шляху/тому призначення (той самий примітив, що й `quarantine.thumbnail`/
+/// `restore_batch`, T-130/T-132) і побудова `QuarantineEntry` на кожен файл.
+///
+/// Зреапнуті записи приховуються з усіх категорій сесії тим самим шляхом,
+/// що й Keep (T-057, `apply_decision_hot` + `apply_and_emit_totals`):
+/// `Decision` не має власного варіанта «вже переміщено в Quarantine» —
+/// додавання нового варіанта torкнулось би усіх match-виразів по Decision
+/// у domain/app/shell/UI заради одного разового приховання в межах сесії;
+/// Keep уже означає саме «не показувати більше в жодній категорії», що тут
+/// і потрібно (сам файл фізично в Quarantine, не «залишений» користувачем,
+/// але для UI-видимості це той самий ефект).
+#[tauri::command]
+pub async fn reap_execute<R: Runtime>(
+    app: AppHandle<R>,
+    payload: ReapExecutePayload,
+    state: State<'_, ScanRuntime>,
+    profile: State<'_, crate::ipc::ProfileRuntime>,
+    settings: State<'_, crate::ipc::SettingsRuntime>,
+) -> Result<ReapExecuteAck, CoreError> {
+    record_command();
+    if payload.candidate_ids.is_empty() {
+        record_command_error();
+        return Err(CoreError::invalid_argument("Список candidateIds порожній."));
+    }
+
+    let wanted: std::collections::HashSet<u64> = payload.candidate_ids.iter().copied().collect();
+    let records: Vec<FileRecord> = state
+        .index
+        .get_all()
+        .into_iter()
+        .filter(|r| wanted.contains(&r.candidate_id.0))
+        .collect();
+    if records.is_empty() {
+        record_command_error();
+        return Err(CoreError::invalid_argument(
+            "Жоден з candidateIds не знайдено в живому індексі.",
+        ));
+    }
+
+    let profile_dir = profile.profile_dir();
+    let ttl_days = settings.current().quarantine.ttl_days;
+    let batch_id = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    let records_for_reap = records.clone();
+    let outcomes = tauri::async_runtime::spawn_blocking(move || {
+        execute_reap_batch(profile_dir, records_for_reap, ttl_days, batch_id)
+    })
+    .await
+    .map_err(|error| CoreError::internal(format!("Reap task failed: {error}")))?;
+
+    let outcomes = match outcomes {
+        Ok(outcomes) => outcomes,
+        Err(error) => {
+            record_command_error();
+            return Err(error);
+        }
+    };
+
+    let selector = DecisionSelector {
+        candidate_ids: records.iter().map(|r| r.candidate_id).collect(),
+        paths: Vec::new(),
+    };
+    if let Ok(result) =
+        trashradar_app::apply_decision_hot(state.index.as_ref(), &selector, Decision::Keep)
+    {
+        apply_and_emit_totals(&app, &state, &result);
+    }
+
+    let reaped_bytes: u64 = outcomes.iter().map(|o| o.entry.size.0).sum();
+    Ok(ReapExecuteAck {
+        batch_id,
+        reaped_count: outcomes.len() as u64,
+        reaped_bytes,
+    })
+}
+
+fn execute_reap_batch(
+    profile: Option<std::path::PathBuf>,
+    records: Vec<FileRecord>,
+    ttl_days: u32,
+    batch_id: u64,
+) -> Result<Vec<trashradar_app::ReapOutcome>, CoreError> {
+    use trashradar_domain::quarantine::{
+        BatchId, QuarantineEntry, QuarantineEntryId, QuarantineStatus,
+    };
+
+    let profile =
+        profile.ok_or_else(|| CoreError::invalid_argument("Профіль Quarantine недоступний."))?;
+    let profile_root = profile.to_string_lossy().into_owned();
+    let database = trashradar_index_sqlite::IndexDatabase::open_profile(profile)
+        .map_err(|error| CoreError::internal(format!("Manifest не відкрився: {error}")))?;
+    let filesystem = trashradar_quarantine_fs::NativeQuarantineFs;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let expires_at = now.saturating_add(i64::from(ttl_days) * 86_400);
+
+    let mut requests = Vec::with_capacity(records.len());
+    for record in &records {
+        // UNC/нелокальний шлях — не резолвиться на том, пропускаємо (той
+        // самий fail-open принцип, що й candidate.batch: невідома позиція
+        // не валить весь батч).
+        let Some(volume) = volume_of(&record.path) else {
+            continue;
+        };
+
+        // Гарячий індекс (T-024/T-057, infra/index-memory::CompactFileRecord)
+        // зберігає modified_at лише з точністю до цілої секунди (u32 unix
+        // secs) заради економії пам'яті на весь сеанс сканування — тоді як
+        // жива перевірка нижче (T-086, TransactionalReaper::reap_one) звіряє
+        // повну 100-нс FILETIME-точність. Порівняння впритул record.modified_at
+        // (завжди округлене) з живим точним читанням майже завжди хибно
+        // відмовляло б із file_changed для БУДЬ-ЯКОГО реального файла. Тому
+        // тут звіряємо на найкращій точності, яку справді захопило сканування
+        // (розмір точно, mtime до цілої секунди), а якщо збігається —
+        // передаємо в TransactionalReaper щойно прочитане ТОЧНЕ значення як
+        // expected_identity: внутрішня сувора перевірка тоді звіряє себе з
+        // тим самим моментом і коректно ловить лише зміни в короткому вікні
+        // між цим читанням і фактичним move.
+        let live = trashradar_platform_win::read_file_identity(std::path::Path::new(&record.path))?;
+        let record_seconds = record.modified_at.map(|timestamp| timestamp.0 / 10_000_000);
+        let live_seconds = live.modified_at.map(|timestamp| timestamp.0 / 10_000_000);
+        if live.size != record.size || live_seconds != record_seconds {
+            return Err(CoreError::file_changed(format!(
+                "Файл «{}» змінився після сканування; reap скасовано.",
+                record.path
+            )));
+        }
+
+        let directory = filesystem.ensure_on_volume(volume)?;
+        let surrogate_name = format!("{:016}.bin", record.candidate_id.0);
+        let destination = directory.quarantine_root.join(&surrogate_name);
+        requests.push(trashradar_app::ReapRequest {
+            entry: QuarantineEntry {
+                id: QuarantineEntryId(record.candidate_id.0),
+                batch_id: Some(BatchId(batch_id)),
+                original_path: record.path.clone(),
+                surrogate_name,
+                size: record.size,
+                quarantined_at_unix: now,
+                expires_at_unix: expires_at,
+                status: QuarantineStatus::InFlight,
+            },
+            destination_path: destination.to_string_lossy().into_owned(),
+            expected_identity: live,
+        });
+    }
+    if requests.is_empty() {
+        return Err(CoreError::invalid_argument(
+            "Жоден позначений файл не резолвився на локальний том.",
+        ));
+    }
+
+    let roots = vec![profile_root];
+    trashradar_app::TransactionalReaper::new(&filesystem, &database, &roots)
+        .reap_batch(BatchId(batch_id), requests)
+}
+
+/// Параметри `reap.undo_batch` (T-138): «Скасувати» на тості після reap.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReapUndoBatchPayload {
+    pub batch_id: u64,
+}
+
+/// `reap.undo_batch` (T-138, use case T-081): відновити весь батч одним
+/// викликом. Manifest сам знаходить усі quarantined-записи батчу
+/// (`undo_batch`); тут лише резолв сурогатного шляху (той самий примітив,
+/// що й `quarantine.thumbnail`/`restore_batch`) і подія-міст на кожен запис.
+#[tauri::command]
+pub async fn reap_undo_batch<R: Runtime>(
+    app: AppHandle<R>,
+    payload: ReapUndoBatchPayload,
+    profile: State<'_, crate::ipc::ProfileRuntime>,
+) -> Result<Vec<crate::ipc::QuarantineRestoredDto>, CoreError> {
+    record_command();
+    let profile_dir = profile.profile_dir();
+    let batch_id = payload.batch_id;
+    let outcomes =
+        tauri::async_runtime::spawn_blocking(move || undo_reap_batch(profile_dir, batch_id))
+            .await
+            .map_err(|error| CoreError::internal(format!("Reap undo task failed: {error}")))?;
+    let outcomes = match outcomes {
+        Ok(outcomes) => outcomes,
+        Err(error) => {
+            record_command_error();
+            return Err(error);
+        }
+    };
+
+    let mut dtos = Vec::with_capacity(outcomes.len());
+    for outcome in &outcomes {
+        events::emit_quarantine_restored(&app, outcome);
+        dtos.push(crate::ipc::QuarantineRestoredDto {
+            entry_id: outcome.entry.id.0,
+            original_path: outcome.entry.original_path.clone(),
+            restored_path: outcome.restored_path.clone(),
+            used_suffix: outcome.used_suffix,
+        });
+    }
+    Ok(dtos)
+}
+
+fn undo_reap_batch(
+    profile: Option<std::path::PathBuf>,
+    batch_id: u64,
+) -> Result<Vec<trashradar_app::RestoreOutcome>, CoreError> {
+    use trashradar_domain::quarantine::BatchId;
+
+    let profile =
+        profile.ok_or_else(|| CoreError::invalid_argument("Профіль Quarantine недоступний."))?;
+    let database = trashradar_index_sqlite::IndexDatabase::open_profile(profile)
+        .map_err(|error| CoreError::internal(format!("Manifest не відкрився: {error}")))?;
+    let filesystem = trashradar_quarantine_fs::NativeQuarantineFs;
+    trashradar_app::QuarantineRestorer::new(&filesystem, &database).undo_batch(
+        BatchId(batch_id),
+        |entry| {
+            filesystem
+                .surrogate_path(&entry.original_path, &entry.surrogate_name)
+                .map(|p| p.to_string_lossy().into_owned())
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -92,6 +92,8 @@ fn main() {
             scan_runtime::candidate_mark,
             scan_runtime::candidate_reveal_in_explorer,
             scan_runtime::duplicates_groups,
+            scan_runtime::reap_execute,
+            scan_runtime::reap_undo_batch,
         ])
         .run(tauri::generate_context!())
         .expect("не вдалося запустити TrashRadar shell");
