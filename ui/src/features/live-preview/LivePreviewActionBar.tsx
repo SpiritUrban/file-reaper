@@ -1,5 +1,5 @@
 /**
- * Панель озброєної дії Live Preview (docs/ui.md §10.3/§10.5, T-142/T-144):
+ * Панель озброєної дії Live Preview (docs/ui.md §10.3/§10.5, T-142/T-144/T-147):
  * зверху лівої зони. Клік по кнопці озброює дію; озброєна кнопка підсвічена
  * кольором ролі (червоний reap, зелений keep, accent move/open), тож поточна
  * дія завжди видима й кольорово однозначна. Курсор над плитками — окремо
@@ -10,6 +10,9 @@
  * ДЕСТРУКТИВНА дія (reap) авторозряджається після N с бездіяльності курсора
  * (N — `disarmTimeoutSec` з `livePreviewStore`, §10.3/§9). Слухачі живуть лише
  * поки панель змонтована (тобто поки режим увімкнено), тож самоприбираються.
+ *
+ * T-147 / §10.6: перемикач «Приховати опрацьовані» — keep/marked лишаються
+ * затемненими на місці (сітка не стрибає), доки перемикач їх не сховає.
  *
  * Клік по плитці = дія й ПКМ = протилежна — T-143 (у `CategoryScreen`).
  */
@@ -22,13 +25,13 @@ import {
   armedActionStore,
   useArmedAction,
 } from "@/store/armedAction";
-import { useLivePreview } from "@/store/livePreview";
+import { livePreviewStore, useLivePreview } from "@/store/livePreview";
 
 const ARM_ACTION_PREFIX = "arm_action_";
 
 export function LivePreviewActionBar() {
   const armed = useArmedAction();
-  const { disarmTimeoutSec } = useLivePreview();
+  const { disarmTimeoutSec, hideProcessed } = useLivePreview();
 
   // T-144: клавіші 1–5 озброюють відповідну дію; Esc розряджає.
   useEffect(() => {
@@ -96,6 +99,21 @@ export function LivePreviewActionBar() {
           );
         })}
       </div>
+
+      {/* T-147: сітка не стрибає після keep/reap, доки не увімкнути приховування. */}
+      <label
+        className="ml-auto flex cursor-pointer select-none items-center gap-1.5 text-xs text-ink-dim hover:text-ink"
+        title="Опрацьовані (позначені / залишені) лишаються затемненими на місці; увімкніть, щоб сховати їх зі сітки"
+      >
+        <input
+          type="checkbox"
+          checked={hideProcessed}
+          onChange={() => livePreviewStore.toggleHideProcessed()}
+          className="accent-[var(--color-accent)]"
+          aria-label="Приховати опрацьовані плитки"
+        />
+        <span>Приховати опрацьовані</span>
+      </label>
     </div>
   );
 }

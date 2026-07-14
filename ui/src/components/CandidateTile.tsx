@@ -23,6 +23,11 @@ export interface CandidateTileProps {
    * над `candidate.decision`. `undefined` — використати decision як є.
    */
   marked?: boolean;
+  /**
+   * Оптимістичний Keep (T-117/T-147): має пріоритет над `candidate.decision`.
+   * У Live Preview keep лишається на місці затемненим (сітка не стрибає).
+   */
+  kept?: boolean;
   className?: string;
   /** CSS-курсор плитки (T-142): іконка озброєної дії у Live Preview. */
   cursor?: string;
@@ -85,6 +90,7 @@ export function CandidateTile({
   heat = inferredHeat(candidate.sizeBytes),
   focused = false,
   marked: markedOverride,
+  kept: keptOverride,
   className = "",
   cursor,
   flashRing,
@@ -95,13 +101,16 @@ export function CandidateTile({
   onHoverMove,
 }: CandidateTileProps) {
   const marked = markedOverride ?? candidate.decision === "marked";
-  const kept = candidate.decision === "keep";
+  const kept = keptOverride ?? candidate.decision === "keep";
+  // T-147: опрацьована (marked/keep) — затемнена на місці, сітка не зсувається.
+  const processed = marked || kept;
   const stateClass = marked
     ? "border-reap"
     : kept
       ? "border-keep/80"
       : "border-line hover:border-ink-dim";
   const focusClass = focused ? "ring-2 ring-accent/70" : "";
+  const processedClass = processed ? "opacity-50" : "";
 
   // T-120: коли батьківський компонент не передав preview явно (звичайний
   // шлях сітки категорії), плитка сама запитує статичну мініатюру.
@@ -132,12 +141,14 @@ export function CandidateTile({
   return (
     <button
       type="button"
-      className={`group relative aspect-[4/3] w-full overflow-hidden rounded-sm border bg-panel text-left outline-none transition-colors ${stateClass} ${focusClass} ${flashRing ?? ""} focus-visible:border-accent focus-visible:ring-2 focus-visible:ring-accent/70 ${className}`}
+      className={`group relative aspect-[4/3] w-full overflow-hidden rounded-sm border bg-panel text-left outline-none transition-colors ${stateClass} ${focusClass} ${processedClass} ${flashRing ?? ""} focus-visible:border-accent focus-visible:ring-2 focus-visible:ring-accent/70 ${className}`}
       {...(cursor ? { style: { cursor } } : {})}
       aria-label={`${fileName(candidate.path)}, ${formatBytes(candidate.sizeBytes)}, ${formatAge(candidate.lastAccessAt)}`}
       aria-pressed={marked}
       data-decision={candidate.decision}
       data-marked={marked || undefined}
+      data-kept={kept || undefined}
+      data-processed={processed || undefined}
       data-focused={focused || undefined}
       onContextMenu={
         onSecondaryActivate
@@ -205,6 +216,15 @@ export function CandidateTile({
       {marked ? (
         <>
           <span className="absolute inset-0 z-10 bg-reap/30" />
+          {/* §10.6: перекреслена опрацьована (reap) — діагональ поверх превью. */}
+          <span
+            className="pointer-events-none absolute inset-0 z-20"
+            aria-hidden="true"
+            style={{
+              background:
+                "linear-gradient(to top left, transparent calc(50% - 1px), rgba(229,72,77,0.85) calc(50% - 1px), rgba(229,72,77,0.85) calc(50% + 1px), transparent calc(50% + 1px))",
+            }}
+          />
           <span
             className="absolute right-2 top-2 z-30 grid h-7 w-7 place-items-center rounded-full bg-reap text-lg font-bold text-bg"
             aria-label="Позначено до видалення"
@@ -214,13 +234,16 @@ export function CandidateTile({
         </>
       ) : null}
 
-      {kept ? (
-        <span
-          className="absolute right-2 top-2 z-30 grid h-7 w-7 place-items-center rounded-full bg-keep text-lg font-bold text-bg"
-          aria-label="Залишити"
-        >
-          ✓
-        </span>
+      {kept && !marked ? (
+        <>
+          <span className="absolute inset-0 z-10 bg-keep/20" />
+          <span
+            className="absolute right-2 top-2 z-30 grid h-7 w-7 place-items-center rounded-full bg-keep text-lg font-bold text-bg"
+            aria-label="Залишити"
+          >
+            ✓
+          </span>
+        </>
       ) : null}
     </button>
   );

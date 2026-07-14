@@ -2,9 +2,9 @@
  * Live Preview Mode — двомоніторний режим тріажу (docs/ui.md §10, T-139).
  *
  * Тут — UI-стан і налаштування режиму: увімкнено/вимкнено, позиція перетяжної
- * межі (частка ширини лівої зони) і таймаут авторозрядження озброєної
- * деструктивної дії (T-144). Наведення=превью (T-140), озброєні дії (T-142+) —
- * в інших сторах.
+ * межі (частка ширини лівої зони), таймаут авторозрядження озброєної
+ * деструктивної дії (T-144) і перемикач «приховати опрацьовані» (T-147 /
+ * §10.6). Наведення=превью (T-140), озброєні дії (T-142+) — в інших сторах.
  *
  * Усе це переживає перезапуск: суто UI-стан/налаштування взаємодії, не
  * доменні, тож зберігаються в `localStorage`, а НЕ в `settings.json` Core
@@ -33,6 +33,11 @@ export interface LivePreviewState {
   leftRatio: number;
   /** Секунди бездіяльності курсора до авторозрядження reap (T-144, §10.3). */
   disarmTimeoutSec: number;
+  /**
+   * T-147 / §10.6: коли false (дефолт) — опрацьовані (keep / marked) лишаються
+   * на місці затемненими, сітка не стрибає; коли true — ховаються з сітки.
+   */
+  hideProcessed: boolean;
 }
 
 function clampRatio(value: number): number {
@@ -56,6 +61,8 @@ function load(): LivePreviewState {
         disarmTimeoutSec: clampTimeout(
           parsed.disarmTimeoutSec ?? DEFAULT_DISARM_TIMEOUT_SEC,
         ),
+        // Дефолт false: сітка не стрибає після keep/reap (DoD T-147).
+        hideProcessed: parsed.hideProcessed === true,
       };
     }
   } catch {
@@ -65,6 +72,7 @@ function load(): LivePreviewState {
     enabled: false,
     leftRatio: DEFAULT_LEFT_RATIO,
     disarmTimeoutSec: DEFAULT_DISARM_TIMEOUT_SEC,
+    hideProcessed: false,
   };
 }
 
@@ -100,6 +108,16 @@ class LivePreviewStore {
     const disarmTimeoutSec = clampTimeout(seconds);
     if (disarmTimeoutSec === this.state.disarmTimeoutSec) return;
     this.commit({ ...this.state, disarmTimeoutSec });
+  }
+
+  /** T-147: показати/сховати опрацьовані (keep + marked) у сітці Live Preview. */
+  setHideProcessed(hideProcessed: boolean): void {
+    if (this.state.hideProcessed === hideProcessed) return;
+    this.commit({ ...this.state, hideProcessed });
+  }
+
+  toggleHideProcessed(): void {
+    this.setHideProcessed(!this.state.hideProcessed);
   }
 
   private commit(next: LivePreviewState): void {

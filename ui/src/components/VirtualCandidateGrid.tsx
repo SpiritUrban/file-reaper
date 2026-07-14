@@ -68,6 +68,8 @@ export interface VirtualCandidateGridProps {
   previewFor?: (candidate: Candidate) => CandidatePreview | undefined;
   /** Локальне оптимістичне позначення (T-116) — переважає candidate.decision. */
   isMarked?: (candidate: Candidate) => boolean;
+  /** Оптимістичний Keep (T-117/T-147) — переважає candidate.decision. */
+  isKept?: (candidate: Candidate) => boolean;
   /** CSS-курсор плиток (T-142): іконка озброєної дії у Live Preview. */
   tileCursor?: string;
   /** Плитка з коротким пульс-відгуком після дії (T-143) та клас її кільця. */
@@ -94,6 +96,7 @@ export function VirtualCandidateGrid({
   focusedId = null,
   previewFor,
   isMarked,
+  isKept,
   tileCursor,
   flash,
   onActivate,
@@ -211,6 +214,7 @@ export function VirtualCandidateGrid({
                 focused={candidate.id === focusedId}
                 {...(preview ? { preview } : {})}
                 {...(isMarked ? { marked: isMarked(candidate) } : {})}
+                {...(isKept ? { kept: isKept(candidate) } : {})}
                 {...(tileCursor ? { cursor: tileCursor } : {})}
                 {...(flash?.id === candidate.id ? { flashRing: flash.ring } : {})}
                 {...(onActivate ? { onActivate } : {})}

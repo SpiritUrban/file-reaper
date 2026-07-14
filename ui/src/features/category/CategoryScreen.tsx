@@ -139,13 +139,30 @@ export function CategoryScreen({ categoryId }: CategoryScreenProps) {
     categoryId,
     settings,
   );
-  // T-117: Keep ховає файл з усіх категорій сесії одразу — навіть якщо цю
-  // категорію завантажено раніше і сервер про Keep у ній ще не знає.
+  // T-117 / T-147: Keep персистентний на Core; UI-видимість залежить від режиму.
+  // Поза Live Preview — Keep одразу ховає (T-117). У Live Preview keep/marked
+  // лишаються на місці затемненими (§10.6), доки `hideProcessed` не сховає їх.
   const keptIds = useKeptIds();
-  const candidates = useMemo(
-    () => fetched.filter((c) => !keptIds.has(c.id)),
-    [fetched, keptIds],
-  );
+  // Реактивність до selectionStore (плитки + hideProcessed-фільтр).
+  const markedSummary = useMarkedSummary();
+  const livePreview = useLivePreview();
+  const candidates = useMemo(() => {
+    if (livePreview.enabled) {
+      // T-147: за замовчуванням не викидаємо keep — сітка не стрибає.
+      if (!livePreview.hideProcessed) return fetched;
+      return fetched.filter(
+        (c) => !keptIds.has(c.id) && !selectionStore.isMarked(c.id),
+      );
+    }
+    return fetched.filter((c) => !keptIds.has(c.id));
+    // markedSummary.count — інвалідація при mark/unmark (hideProcessed).
+  }, [
+    fetched,
+    keptIds,
+    livePreview.enabled,
+    livePreview.hideProcessed,
+    markedSummary.count,
+  ]);
   const visible = useMemo(
     () => {
       const filtered = applyCandidateFilters(candidates, filters);
@@ -158,7 +175,6 @@ export function CategoryScreen({ categoryId }: CategoryScreenProps) {
   const thresholdFields = CATEGORY_THRESHOLDS[categoryId] ?? [];
   const density = useGridDensity();
   // T-142: у Live Preview курсор над плитками — іконка озброєної дії.
-  const livePreview = useLivePreview();
   const armed = useArmedAction();
   const tileCursor = livePreview.enabled ? armedActionCursor(armed) : undefined;
 
@@ -193,10 +209,6 @@ export function CategoryScreen({ categoryId }: CategoryScreenProps) {
   // T-123: геометрія від VirtualCandidateGrid — потрібна лише для ↑/↓
   // (рядок = стільки позицій, скільки колонок), ре-рендер тут зайвий.
   const columnsRef = useRef(1);
-
-  // Реактивність до selectionStore: будь-яка mark/unmark у будь-якій
-  // категорії провокує ре-рендер, тож плитки завжди показують свіжий стан.
-  useMarkedSummary();
 
   const markRange = (fromId: number, toId: number) => {
     const list = visibleRef.current;
@@ -257,10 +269,10 @@ export function CategoryScreen({ categoryId }: CategoryScreenProps) {
     flashTimerRef.current = setTimeout(() => setFlash(null), 350);
   };
 
-  // T-143: виконати озброєну дію по плитці миттєво (усе деструктивне однаково
-  // йде через Quarantine, тож без підтверджень — §10.3). Візуальний відгук:
-  // reap → плитка позначається (червоний оверлей T-116), keep → плитка зникає
-  // (спільний keepStore T-117); плюс короткий пульс-обвід кольором дії.
+  // T-143/T-147: виконати озброєну дію по плитці миттєво (усе деструктивне
+  // однаково йде через Quarantine, тож без підтверджень — §10.3). Візуальний
+  // відгук: reap → затемнення + ╳ на місці; keep → затемнення + ✓ на місці
+  // (сітка не стрибає, §10.6); hideProcessed ховає обидва. Пульс-обвід — flash.
   const applyArmedAction = (candidate: Candidate, action: ArmedAction) => {
     switch (action) {
       case "reap":
@@ -420,6 +432,7 @@ export function CategoryScreen({ categoryId }: CategoryScreenProps) {
           density={density}
           focusedId={focusedId}
           isMarked={(candidate) => selectionStore.isMarked(candidate.id)}
+          isKept={(candidate) => keptIds.has(candidate.id)}
           {...(tileCursor ? { tileCursor } : {})}
           flash={flash}
           onActivate={handleActivate}
