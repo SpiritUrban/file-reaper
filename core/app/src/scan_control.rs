@@ -24,13 +24,40 @@ pub struct VolumeScanOutcome {
     pub cancelled: bool,
 }
 
+/// Метадані батча / progress-тіка від сканера.
+///
+/// Порожній `batch` + заповнені `units_*` / `stage` = лише прогрес (MFT pass1,
+/// walk enumeration) без запису в індекс — інакше UI зависає на «0 файлів».
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ScanBatchMeta {
+    /// Файлів уже здано з **поточного** тому (після цього батча).
+    pub volume_files_so_far: u64,
+    /// Відомий підсумок на томі; `None` = невідомо.
+    pub volume_files_total: Option<u64>,
+    /// Одиниці підфази (записи MFT / об'єкти walk).
+    pub units_done: u64,
+    pub units_total: Option<u64>,
+    /// `"mft_dirs"` | `"mft_files"` | `"walking"` | `"indexing"` | `""`.
+    pub stage: &'static str,
+}
+
 /// Прогрес для події `scan.progress`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanProgress {
     pub volume: char,
     pub strategy: ScanStrategy,
     pub phase: ScanProgressPhase,
+    /// Усього файлів у сесії (усі завершені томи + поточний).
     pub files_indexed: u64,
+    /// Файлів на поточному томі.
+    pub volume_files_indexed: u64,
+    /// Оцінка / точний total на поточному томі, якщо сканер знає.
+    pub volume_files_total: Option<u64>,
+    /// Одиниці поточної підфази (MFT-записи / walk-об'єкти), коли files ще 0.
+    pub stage_units_done: u64,
+    pub stage_units_total: Option<u64>,
+    /// `"mft_dirs"` | `"mft_files"` | `"walking"` | `"indexing"` | `""`.
+    pub stage: &'static str,
     pub volume_index: u32,
     pub volume_count: u32,
     pub done: bool,
@@ -45,8 +72,12 @@ pub enum ScanProgressPhase {
     VolumeProgress,
     /// Том завершено (або скасовано на ньому).
     VolumeFinished,
-    /// Уся сесія завершена.
+    /// Усі томи проскановано; shell може ще ганяти каскад дублікатів.
     SessionFinished,
+    /// Каскад дублікатів (T-126) — shell-фаза після індексу.
+    DuplicatesCascade,
+    /// Уся робота сесії (скан + каскад) завершена.
+    SessionComplete,
 }
 
 impl ScanProgressPhase {
@@ -56,6 +87,8 @@ impl ScanProgressPhase {
             ScanProgressPhase::VolumeProgress => "volume_progress",
             ScanProgressPhase::VolumeFinished => "volume_finished",
             ScanProgressPhase::SessionFinished => "session_finished",
+            ScanProgressPhase::DuplicatesCascade => "duplicates_cascade",
+            ScanProgressPhase::SessionComplete => "session_complete",
         }
     }
 }
@@ -66,7 +99,7 @@ pub trait CancellableVolumeScanner: Send {
         &self,
         volume: char,
         cancel: &CancellationToken,
-        on_batch: &mut dyn FnMut(Vec<FileRecord>) -> Result<(), CoreError>,
+        on_batch: &mut dyn FnMut(Vec<FileRecord>, ScanBatchMeta) -> Result<(), CoreError>,
     ) -> Result<VolumeScanOutcome, CoreError>;
 }
 
@@ -157,11 +190,17 @@ pub fn run_scan_session(
             break;
         }
         let volume_index = i as u32;
+        let session_before_volume = total_files;
         on_progress(ScanProgress {
             volume,
             strategy,
             phase: ScanProgressPhase::VolumeStarted,
-            files_indexed: 0,
+            files_indexed: total_files,
+            volume_files_indexed: 0,
+            volume_files_total: None,
+            stage_units_done: 0,
+            stage_units_total: None,
+            stage: "",
             volume_index,
             volume_count,
             done: false,
@@ -169,39 +208,65 @@ pub fn run_scan_session(
         });
 
         let mut volume_files = 0u64;
-        let mut batch_sink = |batch: Vec<FileRecord>| -> Result<(), CoreError> {
-            let n = batch.len() as u64;
-            volume_files = volume_files.saturating_add(n);
-            total_files = total_files.saturating_add(n);
-            on_batch(volume, batch)?;
-            on_progress(ScanProgress {
-                volume,
-                strategy,
-                phase: ScanProgressPhase::VolumeProgress,
-                files_indexed: volume_files,
-                volume_index,
-                volume_count,
-                done: false,
-                cancelled: cancel.is_cancelled(),
-            });
-            Ok(())
-        };
+        let mut volume_total: Option<u64> = None;
+        let mut stage_units_done = 0u64;
+        let mut stage_units_total: Option<u64> = None;
+        let mut stage: &'static str = "";
+
+        let mut batch_sink =
+            |batch: Vec<FileRecord>, meta: ScanBatchMeta| -> Result<(), CoreError> {
+                volume_files = meta.volume_files_so_far;
+                volume_total = meta.volume_files_total.or(volume_total);
+                total_files = session_before_volume.saturating_add(volume_files);
+                stage_units_done = meta.units_done;
+                stage_units_total = meta.units_total.or(stage_units_total);
+                if !meta.stage.is_empty() {
+                    stage = meta.stage;
+                } else if !batch.is_empty() {
+                    stage = "indexing";
+                }
+                // Лічильник ДО важкої категоризації — UI одразу бачить ріст.
+                on_progress(ScanProgress {
+                    volume,
+                    strategy,
+                    phase: ScanProgressPhase::VolumeProgress,
+                    files_indexed: total_files,
+                    volume_files_indexed: volume_files,
+                    volume_files_total: volume_total,
+                    stage_units_done,
+                    stage_units_total,
+                    stage,
+                    volume_index,
+                    volume_count,
+                    done: false,
+                    cancelled: cancel.is_cancelled(),
+                });
+                // Порожній batch = лише progress-тік (MFT pass1 / walk enum).
+                if !batch.is_empty() {
+                    on_batch(volume, batch)?;
+                }
+                Ok(())
+            };
 
         let outcome = scanner.scan_volume(volume, cancel, &mut batch_sink)?;
         // Якщо сканер порахував файли без батчів — узгодити total.
         if outcome.files_indexed > volume_files {
-            total_files = total_files
-                .saturating_sub(volume_files)
-                .saturating_add(outcome.files_indexed);
             volume_files = outcome.files_indexed;
+            total_files = session_before_volume.saturating_add(volume_files);
         }
+        volume_total = volume_total.or(Some(volume_files));
 
         let cancelled_here = outcome.cancelled || cancel.is_cancelled();
         on_progress(ScanProgress {
             volume,
             strategy,
             phase: ScanProgressPhase::VolumeFinished,
-            files_indexed: volume_files,
+            files_indexed: total_files,
+            volume_files_indexed: volume_files,
+            volume_files_total: volume_total,
+            stage_units_done,
+            stage_units_total,
+            stage,
             volume_index,
             volume_count,
             done: false,
@@ -215,6 +280,9 @@ pub fn run_scan_session(
         volumes_completed = volumes_completed.saturating_add(1);
     }
 
+    // done=false: shell ще проганяє каскад дублікатів (T-126) і емітить
+    // фінальний done=true після нього — інакше UI гасить «сканування…»
+    // на хвилини хешування без зворотного зв'язку.
     on_progress(ScanProgress {
         volume: volumes.first().copied().unwrap_or('?'),
         strategy: strategies
@@ -223,9 +291,14 @@ pub fn run_scan_session(
             .unwrap_or(ScanStrategy::DirectoryWalk),
         phase: ScanProgressPhase::SessionFinished,
         files_indexed: total_files,
+        volume_files_indexed: total_files,
+        volume_files_total: Some(total_files),
+        stage_units_done: 0,
+        stage_units_total: None,
+        stage: "",
         volume_index: volume_count.saturating_sub(1),
         volume_count,
-        done: true,
+        done: false,
         cancelled: session_cancelled,
     });
 
@@ -258,8 +331,9 @@ impl CancellableVolumeScanner for SteppedTestScanner {
         &self,
         volume: char,
         cancel: &CancellationToken,
-        on_batch: &mut dyn FnMut(Vec<FileRecord>) -> Result<(), CoreError>,
+        on_batch: &mut dyn FnMut(Vec<FileRecord>, ScanBatchMeta) -> Result<(), CoreError>,
     ) -> Result<VolumeScanOutcome, CoreError> {
+        let total = (self.steps * self.files_per_step) as u64;
         let mut files_indexed = 0u64;
         for step in 0..self.steps {
             if cancel.is_cancelled() {
@@ -274,7 +348,16 @@ impl CancellableVolumeScanner for SteppedTestScanner {
                 batch.push(test_record(id, volume, step, i));
             }
             files_indexed += batch.len() as u64;
-            on_batch(batch)?;
+            on_batch(
+                batch,
+                ScanBatchMeta {
+                    volume_files_so_far: files_indexed,
+                    volume_files_total: Some(total),
+                    units_done: files_indexed,
+                    units_total: Some(total),
+                    stage: "indexing",
+                },
+            )?;
             if !self.step_delay.is_zero() {
                 std::thread::sleep(self.step_delay);
             }
@@ -330,7 +413,7 @@ pub fn measure_cancel_latency(
     });
 
     start_flag.store(true, Ordering::Release);
-    let mut sink = |_: Vec<FileRecord>| Ok(());
+    let mut sink = |_: Vec<FileRecord>, _: ScanBatchMeta| Ok(());
     let outcome = scanner.scan_volume('T', &token, &mut sink)?;
     let t0 = join.join().expect("cancel thread");
     let latency = t0.elapsed();

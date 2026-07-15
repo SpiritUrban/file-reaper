@@ -535,12 +535,22 @@ export interface ScanStopAck {
   stopping: boolean;
 }
 
-/** Подія scan.progress (T-033). */
+/** Подія scan.progress (T-033 / лічильники індексу). */
 export interface ScanProgressEvent {
   volume: string;
   strategy: string;
   phase: string;
+  /** Усього файлів у сесії (усі томи + поточний). */
   filesIndexed: number;
+  /** Файлів на поточному томі. */
+  volumeFilesIndexed: number;
+  /** Відомий total на томі; відсутній для MFT-стріму. */
+  volumeFilesTotal?: number | null;
+  /** MFT-записи / walk-об'єкти (росте, коли filesIndexed ще 0). */
+  stageUnitsDone?: number;
+  stageUnitsTotal?: number | null;
+  /** mft_dirs | mft_files | walking | indexing | cascade | "" */
+  stage?: string;
   volumeIndex: number;
   volumeCount: number;
   done: boolean;

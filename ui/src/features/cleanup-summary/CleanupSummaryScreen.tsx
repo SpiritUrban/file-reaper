@@ -151,11 +151,21 @@ function CategoryRow({
 }
 
 export function CleanupSummaryScreen() {
-  const { cleanup, scanRunning, status, quarantine, settings } = useAppState();
+  const {
+    cleanup,
+    scanRunning,
+    scanProgress,
+    scanStartedThisSession,
+    status,
+    quarantine,
+    settings,
+  } = useAppState();
   // Спільний порядок зі Sidebar (T-105); вимкнені детектори приховано (T-152).
   const rows = categoryRowsByWeight(cleanup.categories, settings);
   const hasTotal = cleanup.reclaimableBytes > 0;
   const hasQuarantine = quarantine.heldCount > 0;
+  const waitingToStart =
+    !scanRunning && !scanStartedThisSession && !hasTotal && status === "ready";
 
   return (
     <div className="flex h-full flex-col px-6 py-4">
@@ -167,7 +177,9 @@ export function CleanupSummaryScreen() {
         </h1>
         <span className="text-xs text-ink-faint">
           {scanRunning
-            ? "сканування…"
+            ? scanProgress
+              ? `${scanProgress.filesIndexed.toLocaleString("uk-UA")} файлів · скан`
+              : "сканування…"
             : status === "hydrating"
               ? "відновлення стану…"
               : hasTotal
@@ -176,9 +188,31 @@ export function CleanupSummaryScreen() {
                       <AnimatedInteger value={cleanup.uniqueFiles} /> кандидатів
                     </>
                   )
-                : "—"}
+                : waitingToStart
+                  ? "натисніть «Почати сканування»"
+                  : "—"}
         </span>
       </div>
+
+      {waitingToStart ? (
+        <div className="mb-4 rounded border border-dashed border-line bg-panel-2/50 px-4 py-3 text-sm text-ink-dim">
+          Даних ще немає. У попапі натисніть{" "}
+          <span className="font-medium text-ink">«Почати сканування»</span> — або
+          кнопку ⟳ зверху. Поки скан іде, тут і в Sidebar з’являться обсяги
+          категорій.
+        </div>
+      ) : null}
+
+      {scanRunning && !hasTotal ? (
+        <div className="mb-4 rounded border border-accent/30 bg-accent/10 px-4 py-3 text-sm text-ink-dim">
+          Індекс наповнюється
+          {scanProgress
+            ? ` (${scanProgress.filesIndexed.toLocaleString("uk-UA")} файлів на ${scanProgress.volume})`
+            : ""}
+          . Детектори вже працюють — цифра зверху і рядки категорій оновляться
+          живцем, щойно з’являться кандидати.
+        </div>
+      ) : null}
 
       {/* Ряди категорій з живими обсягами (T-111) */}
       <div className="flex flex-col divide-y divide-line border-y border-line overflow-y-auto">

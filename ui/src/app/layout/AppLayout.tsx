@@ -8,6 +8,8 @@ import { useEffect, useRef } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
 import { DetailsPanel } from "@/components/DetailsPanel";
+import { ScanActivityBanner } from "@/components/ScanActivityBanner";
+import { ScanStartOverlay } from "@/components/ScanStartOverlay";
 import { ToastViewport } from "@/components/ToastViewport";
 import { CategoryScreen } from "@/features/category/CategoryScreen";
 import { CleanupSummaryScreen } from "@/features/cleanup-summary/CleanupSummaryScreen";
@@ -24,7 +26,6 @@ import { useMarkedSummary } from "@/store/selection";
 import { useAppState } from "@/store/appState";
 import type { CategoryId } from "@/ipc/types";
 import { hotkeys, type HotkeyActionEventDetail } from "@/hotkeys";
-import { command } from "@/ipc/client";
 
 import { Sidebar } from "./Sidebar";
 import { TopBar } from "./TopBar";
@@ -47,7 +48,6 @@ export function AppLayout() {
   const marked = useMarkedSummary();
   const appState = useAppState();
   const { enabled: livePreviewEnabled } = useLivePreview();
-  const firstRunHandledRef = useRef(false);
 
   const activeCategory = categoryIdFromPath(pathname);
   const isQuarantine = pathname === "/quarantine";
@@ -57,19 +57,7 @@ export function AppLayout() {
     pathname === "/" ||
     (!activeCategory && !isQuarantine && !isSettings && !isHealth);
 
-  // T-114: Автостарт скану на першому запуску (чистий профіль)
-  useEffect(() => {
-    if (
-      appState.status === "ready" &&
-      appState.isFirstRun &&
-      !firstRunHandledRef.current
-    ) {
-      firstRunHandledRef.current = true;
-      command("scan.start", { payload: {} }).catch((error) =>
-        console.warn("Автостарт скану при першому запуску не пройшов:", error),
-      );
-    }
-  }, [appState.status, appState.isFirstRun]);
+  // Старт скану — лише явна дія (ScanStartOverlay / ⟳), не тихий автостарт.
 
   useEffect(() => {
     hotkeys.setActiveContexts([
@@ -185,6 +173,7 @@ export function AppLayout() {
           markedCount={marked.count}
           markedBytes={marked.bytes}
         />
+        <ScanActivityBanner />
         <main className="min-h-0 flex-1">
           <section className={screenClass(isCleanup)} aria-hidden={!isCleanup}>
             <CleanupSummaryScreen />
@@ -228,7 +217,9 @@ export function AppLayout() {
       {/* Немодальна панель деталей (T-123): поруч із сіткою, не поверх неї. */}
       <DetailsPanel />
       <ToastViewport />
-      {/* Єдиний оверлей у продукті (T-135): REAP-кнопка/Ctrl+Enter. */}
+      {/* Старт: явна кнопка, коли даних ще немає. */}
+      <ScanStartOverlay />
+      {/* Єдиний деструктивний оверлей (T-135): REAP-кнопка/Ctrl+Enter. */}
       <ReapConfirmOverlay />
     </div>
   );

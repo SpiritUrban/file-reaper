@@ -4,6 +4,7 @@
 //! Tauri State, фоновий потік і адаптери MFT/walk.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -16,7 +17,8 @@ use trashradar_app::detectors::{
 };
 use trashradar_app::ports::{HotIndex, ScanEnvironment};
 use trashradar_app::scan_control::{
-    run_scan_session, CancellableVolumeScanner, ScanController, ScanProgress, VolumeScanOutcome,
+    run_scan_session, CancellableVolumeScanner, ScanBatchMeta, ScanController, ScanProgress,
+    ScanProgressPhase, VolumeScanOutcome,
 };
 use trashradar_app::scan_strategy::{choose_scan_strategy, VolumeCapabilities};
 use trashradar_app::workers::CancellationToken;
@@ -35,10 +37,12 @@ use trashradar_domain::settings::AppSettings;
 use trashradar_hash::FileHasher;
 use trashradar_index_memory::InMemoryIndex;
 use trashradar_platform_win::WinScanEnvironment;
-use trashradar_scan_walk::{full_path, PathExclusions, WalkConfig};
+use trashradar_scan_walk::{PathExclusions, WalkConfig, WalkPathResolver};
 
 use crate::events;
 use crate::ipc::{record_command, record_command_error};
+
+static NEXT_SCAN_SESSION_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Спільний стан Core для скану (managed Tauri State).
 pub struct ScanRuntime {
@@ -360,7 +364,21 @@ pub struct ScanProgressEvent {
     pub volume: String,
     pub strategy: String,
     pub phase: String,
+    /// Усього файлів у сесії (усі томи + поточний).
     pub files_indexed: u64,
+    /// Файлів на поточному томі.
+    pub volume_files_indexed: u64,
+    /// Відомий total на поточному томі (`null` = ще невідомо / MFT стрім).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume_files_total: Option<u64>,
+    /// MFT-записи / walk-об'єкти поточної підфази (росте навіть коли files=0).
+    #[serde(default)]
+    pub stage_units_done: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage_units_total: Option<u64>,
+    /// `"mft_dirs"` | `"mft_files"` | `"walking"` | `"indexing"` | `""`.
+    #[serde(default)]
+    pub stage: String,
     pub volume_index: u32,
     pub volume_count: u32,
     pub done: bool,
@@ -374,6 +392,11 @@ impl ScanProgressEvent {
             strategy: p.strategy.as_str().to_string(),
             phase: p.phase.as_str().to_string(),
             files_indexed: p.files_indexed,
+            volume_files_indexed: p.volume_files_indexed,
+            volume_files_total: p.volume_files_total,
+            stage_units_done: p.stage_units_done,
+            stage_units_total: p.stage_units_total,
+            stage: p.stage.to_string(),
             volume_index: p.volume_index,
             volume_count: p.volume_count,
             done: p.done,
@@ -450,7 +473,7 @@ impl CancellableVolumeScanner for AutoVolumeScanner {
         &self,
         volume: char,
         cancel: &CancellationToken,
-        on_batch: &mut dyn FnMut(Vec<FileRecord>) -> Result<(), CoreError>,
+        on_batch: &mut dyn FnMut(Vec<FileRecord>, ScanBatchMeta) -> Result<(), CoreError>,
     ) -> Result<VolumeScanOutcome, CoreError> {
         scan_one_volume_auto(volume, &self.user_excluded, cancel, on_batch)
     }
@@ -487,7 +510,7 @@ fn scan_one_volume_auto(
     volume: char,
     user_excluded: &[String],
     cancel: &CancellationToken,
-    on_batch: &mut dyn FnMut(Vec<FileRecord>) -> Result<(), CoreError>,
+    on_batch: &mut dyn FnMut(Vec<FileRecord>, ScanBatchMeta) -> Result<(), CoreError>,
 ) -> Result<VolumeScanOutcome, CoreError> {
     let env = WinScanEnvironment;
     let strategy = choose_scan_strategy(&VolumeCapabilities {
@@ -496,6 +519,7 @@ fn scan_one_volume_auto(
     })
     .strategy;
     let exclusions = exclusions_for_volume(volume, user_excluded);
+    tracing::info!(target: "scan_diag", volume = %volume, ?strategy, "strategy selected");
     match strategy {
         ScanStrategy::Mft => scan_mft_cancellable(volume, &exclusions, cancel, on_batch),
         ScanStrategy::DirectoryWalk | ScanStrategy::UsnDelta => {
@@ -508,29 +532,69 @@ fn scan_mft_cancellable(
     volume: char,
     exclusions: &PathExclusions,
     cancel: &CancellationToken,
-    on_batch: &mut dyn FnMut(Vec<FileRecord>) -> Result<(), CoreError>,
+    on_batch: &mut dyn FnMut(Vec<FileRecord>, ScanBatchMeta) -> Result<(), CoreError>,
 ) -> Result<VolumeScanOutcome, CoreError> {
     #[cfg(windows)]
     {
-        const BATCH: usize = 10_000;
-        // T-151: фільтр виключень на межі батча; files_indexed рахуємо по
-        // фактично зданих записах, а не по сирій статистиці парсера.
-        let mut files_kept = 0u64;
-        let (_stats, cancelled) = trashradar_scan_mft::pipeline::scan_volume_to_index_cancel(
-            volume,
-            BATCH,
-            || cancel.is_cancelled(),
-            |mut batch: Vec<FileRecord>| {
-                retain_not_excluded(&mut batch, exclusions);
-                if batch.is_empty() {
-                    return Ok(());
-                }
-                files_kept += batch.len() as u64;
-                on_batch(batch)
-            },
-        )?;
+        use std::cell::{Cell, RefCell};
+        // Менший батч → частіші тіки UI (було 10k — довгі паузи на 0).
+        const BATCH: usize = 2_000;
+        let files_kept = Cell::new(0u64);
+        // Throttle progress-only тіків (pass1): ~5/с.
+        let last_tick = Cell::new(
+            std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(1))
+                .unwrap_or_else(std::time::Instant::now),
+        );
+        // Два callback-и (progress + sink) ділять один on_batch.
+        let batch_cb = RefCell::new(on_batch);
+        let (_stats, cancelled) =
+            trashradar_scan_mft::pipeline::scan_volume_to_index_cancel_progress(
+                volume,
+                BATCH,
+                || cancel.is_cancelled(),
+                |p| {
+                    let now = std::time::Instant::now();
+                    let due = now.duration_since(last_tick.get())
+                        >= std::time::Duration::from_millis(200)
+                        || p.records_scanned >= p.records_total;
+                    if !due {
+                        return;
+                    }
+                    last_tick.set(now);
+                    let stage = if p.pass == 1 { "mft_dirs" } else { "mft_files" };
+                    let _ = (batch_cb.borrow_mut())(
+                        Vec::new(),
+                        ScanBatchMeta {
+                            volume_files_so_far: p.files_emitted.max(files_kept.get()),
+                            volume_files_total: None,
+                            units_done: p.records_scanned,
+                            units_total: Some(p.records_total.max(1)),
+                            stage,
+                        },
+                    );
+                },
+                |mut batch: Vec<FileRecord>| {
+                    retain_not_excluded(&mut batch, exclusions);
+                    if batch.is_empty() {
+                        return Ok(());
+                    }
+                    let n = files_kept.get() + batch.len() as u64;
+                    files_kept.set(n);
+                    (batch_cb.borrow_mut())(
+                        batch,
+                        ScanBatchMeta {
+                            volume_files_so_far: n,
+                            volume_files_total: None,
+                            units_done: 0,
+                            units_total: None,
+                            stage: "indexing",
+                        },
+                    )
+                },
+            )?;
         Ok(VolumeScanOutcome {
-            files_indexed: files_kept,
+            files_indexed: files_kept.get(),
             cancelled,
         })
     }
@@ -545,7 +609,7 @@ fn scan_walk_cancellable(
     volume: char,
     exclusions: PathExclusions,
     cancel: &CancellationToken,
-    on_batch: &mut dyn FnMut(Vec<FileRecord>) -> Result<(), CoreError>,
+    on_batch: &mut dyn FnMut(Vec<FileRecord>, ScanBatchMeta) -> Result<(), CoreError>,
 ) -> Result<VolumeScanOutcome, CoreError> {
     if cancel.is_cancelled() {
         return Ok(VolumeScanOutcome {
@@ -559,7 +623,24 @@ fn scan_walk_cancellable(
         exclusions,
         ..WalkConfig::default()
     };
+
+    // Живий тік під час enumeration (walk збирає все, потім віддає) —
+    // інакше UI стоїть на 0, поки walk_volume не завершиться.
+    let _ = on_batch(
+        Vec::new(),
+        ScanBatchMeta {
+            volume_files_so_far: 0,
+            volume_files_total: None,
+            units_done: 0,
+            units_total: None,
+            stage: "walking",
+        },
+    );
+
+    let walk_started = Instant::now();
+    tracing::info!(target: "scan_diag", volume = %volume, "directory walk started");
     let all = trashradar_scan_walk::walk_volume(volume, config)?;
+    tracing::info!(target: "scan_diag", volume = %volume, entries = all.len(), elapsed_ms = walk_started.elapsed().as_millis(), cancelled = cancel.is_cancelled(), "directory walk finished");
     if cancel.is_cancelled() {
         return Ok(VolumeScanOutcome {
             files_indexed: 0,
@@ -567,16 +648,44 @@ fn scan_walk_cancellable(
         });
     }
 
-    const BATCH: usize = 5_000;
+    let volume_files_total = all.iter().filter(|e| !e.is_directory).count() as u64;
+    tracing::info!(target: "scan_diag", volume = %volume, entries = all.len(), files = volume_files_total, "walk results ready for indexing");
+    // Total відомий — одразу показуємо 0 / N перед індексацією.
+    let _ = on_batch(
+        Vec::new(),
+        ScanBatchMeta {
+            volume_files_so_far: 0,
+            volume_files_total: Some(volume_files_total),
+            units_done: all.len() as u64,
+            units_total: Some(all.len() as u64),
+            stage: "indexing",
+        },
+    );
+
+    const BATCH: usize = 1_000;
     let mut files_indexed = 0u64;
     let mut batch = Vec::new();
     let mut next_id = 0u64;
+    let resolver = WalkPathResolver::from_entries(volume, &all);
+
+    let mut deliver = |batch: Vec<FileRecord>, files_indexed: u64| -> Result<(), CoreError> {
+        on_batch(
+            batch,
+            ScanBatchMeta {
+                volume_files_so_far: files_indexed,
+                volume_files_total: Some(volume_files_total),
+                units_done: files_indexed,
+                units_total: Some(volume_files_total),
+                stage: "indexing",
+            },
+        )
+    };
 
     for e in &all {
         if cancel.is_cancelled() {
             if !batch.is_empty() {
                 files_indexed += batch.len() as u64;
-                on_batch(std::mem::take(&mut batch))?;
+                deliver(std::mem::take(&mut batch), files_indexed)?;
             }
             return Ok(VolumeScanOutcome {
                 files_indexed,
@@ -586,7 +695,7 @@ fn scan_walk_cancellable(
         if e.is_directory {
             continue;
         }
-        let Some(path) = full_path(volume, &all, e) else {
+        let Some(path) = resolver.full_path(e) else {
             continue;
         };
         batch.push(FileRecord {
@@ -608,12 +717,12 @@ fn scan_walk_cancellable(
         next_id += 1;
         if batch.len() >= BATCH {
             files_indexed += batch.len() as u64;
-            on_batch(std::mem::take(&mut batch))?;
+            deliver(std::mem::take(&mut batch), files_indexed)?;
         }
     }
     if !batch.is_empty() {
         files_indexed += batch.len() as u64;
-        on_batch(batch)?;
+        deliver(batch, files_indexed)?;
     }
     Ok(VolumeScanOutcome {
         files_indexed,
@@ -647,6 +756,8 @@ pub async fn scan_start<R: Runtime>(
     };
     let strategies = strategies_for(&volumes);
     let volume_count = volumes.len() as u32;
+    let session_id = NEXT_SCAN_SESSION_ID.fetch_add(1, Ordering::Relaxed);
+    tracing::info!(target: "scan_diag", session_id, ?volumes, ?strategies, "scan request accepted");
 
     let token = match state.controller.begin() {
         Ok(t) => t,
@@ -668,6 +779,8 @@ pub async fn scan_start<R: Runtime>(
     if let Err(e) = thread::Builder::new()
         .name("trashradar-scan".into())
         .spawn(move || {
+            let session_started = Instant::now();
+            tracing::info!(target: "scan_diag", session_id, "scan worker started");
             // Свіжий live-стан на старті сесії (T-055 / T-121).
             if let Ok(mut live) = last_totals.lock() {
                 live.clear();
@@ -700,12 +813,19 @@ pub async fn scan_start<R: Runtime>(
                 &strategies,
                 &scanner,
                 &token,
-                |p| emit_progress(&app2, &p),
-                |_vol, batch| {
+                |p| {
+                    tracing::info!(target: "scan_diag", session_id, volume = %p.volume, phase = ?p.phase, stage = p.stage, files_indexed = p.files_indexed, volume_files_indexed = p.volume_files_indexed, volume_files_total = ?p.volume_files_total, stage_units_done = p.stage_units_done, stage_units_total = ?p.stage_units_total, volume_index = p.volume_index, volume_count = p.volume_count, done = p.done, cancelled = p.cancelled, elapsed_ms = session_started.elapsed().as_millis(), "scan progress emitted");
+                    emit_progress(&app2, &p);
+                },
+                |vol, batch| {
+                    let batch_started = Instant::now();
+                    let batch_len = batch.len();
+                    let index_before = HotIndex::len(index.as_ref()).unwrap_or(0);
                     // 1) сирі записи в індекс
                     index.insert_batch(batch.clone())?;
                     // 2) детектори → primary + hits
                     let cat = orch.categorize_batch(&batch);
+                    let categorized = cat.updated.len();
                     if !cat.updated.is_empty() {
                         index.upsert_batch(cat.updated)?;
                     }
@@ -722,20 +842,52 @@ pub async fn scan_start<R: Runtime>(
                             events::emit_cleanup_totals(&app2, &snap);
                         }
                     }
+                    tracing::info!(target: "scan_diag", session_id, volume = %vol, batch_files = batch_len, index_before, index_after = HotIndex::len(index.as_ref()).unwrap_or(0), categorized, detector_hits = cat.hits.len(), batch_elapsed_ms = batch_started.elapsed().as_millis(), session_elapsed_ms = session_started.elapsed().as_millis(), "scan batch committed");
                     Ok(())
                 },
             );
-            // T-126: каскад пошуку дублікатів (T-058…066) над свіжим індексом —
-            // той самий `token`, тому `scan.stop` скасовує і хешування.
-            run_duplicates_cascade(
-                &app2,
-                index.as_ref(),
-                &last_totals,
-                &also_in,
-                &duplicates,
-                &hash_cache,
-                &token,
-            );
+            match &result {
+                Ok(summary) => tracing::info!(target: "scan_diag", session_id, files_indexed = summary.files_indexed, volumes_completed = summary.volumes_completed, cancelled = summary.cancelled, index_len = HotIndex::len(index.as_ref()).unwrap_or(0), elapsed_ms = session_started.elapsed().as_millis(), "scan pipeline finished"),
+                Err(error) => tracing::error!(target: "scan_diag", session_id, %error, index_len = HotIndex::len(index.as_ref()).unwrap_or(0), elapsed_ms = session_started.elapsed().as_millis(), "scan pipeline failed"),
+            }
+            // T-126: каскад дублікатів — UI лишається «зайнятим» (done=false),
+            // щоб не виглядало, ніби все вже готово, поки йде хешування.
+            let (files_indexed, session_cancelled) = match &result {
+                Ok(summary) => (summary.files_indexed, summary.cancelled),
+                Err(_) => (0, token.is_cancelled()),
+            };
+            if !session_cancelled {
+                emit_progress(
+                    &app2,
+                    &ScanProgress {
+                        volume: volumes.first().copied().unwrap_or('?'),
+                        strategy: strategies
+                            .first()
+                            .copied()
+                            .unwrap_or(ScanStrategy::DirectoryWalk),
+                        phase: ScanProgressPhase::DuplicatesCascade,
+                        files_indexed,
+                        volume_files_indexed: files_indexed,
+                        volume_files_total: Some(files_indexed),
+                        stage_units_done: 0,
+                        stage_units_total: None,
+                        stage: "cascade",
+                        volume_index: volume_count.saturating_sub(1),
+                        volume_count,
+                        done: false,
+                        cancelled: false,
+                    },
+                );
+                run_duplicates_cascade(
+                    &app2,
+                    index.as_ref(),
+                    &last_totals,
+                    &also_in,
+                    &duplicates,
+                    &hash_cache,
+                    &token,
+                );
+            }
 
             // Фінальний snapshot без втрати підсумку (T-055 / T-006 flush).
             let _ = throttle.flush(Instant::now());
@@ -753,6 +905,28 @@ pub async fn scan_start<R: Runtime>(
                 );
                 debug_assert!(matches, "T-055: live unique має збігатися з індексом");
             }
+            // Закриття busy-стану UI (після томів + каскаду).
+            emit_progress(
+                &app2,
+                &ScanProgress {
+                    volume: volumes.first().copied().unwrap_or('?'),
+                    strategy: strategies
+                        .first()
+                        .copied()
+                        .unwrap_or(ScanStrategy::DirectoryWalk),
+                    phase: ScanProgressPhase::SessionComplete,
+                    files_indexed,
+                    volume_files_indexed: files_indexed,
+                    volume_files_total: Some(files_indexed),
+                    stage_units_done: 0,
+                    stage_units_total: None,
+                    stage: "",
+                    volume_index: volume_count.saturating_sub(1),
+                    volume_count,
+                    done: true,
+                    cancelled: session_cancelled || token.is_cancelled(),
+                },
+            );
             match &result {
                 Ok(summary) => tracing::info!(
                     files = summary.files_indexed,

@@ -155,6 +155,17 @@ where
     Ok(stats)
 }
 
+/// Прогрес MFT-скану для UI (pass 1 = карта тек, pass 2 = файли в індекс).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MftIndexProgress {
+    /// 1 = читання MFT (директорії), 2 = індексація файлів.
+    pub pass: u8,
+    pub records_scanned: u64,
+    pub records_total: u64,
+    /// Файлів уже здано sink-ом (лише pass 2).
+    pub files_emitted: u64,
+}
+
 /// Як [`scan_volume_to_index`], з кооперативною відміною (T-033).
 /// Повертає `(stats, cancelled)` — часткові батчі вже в `sink`.
 #[cfg(windows)]
@@ -167,13 +178,42 @@ pub fn scan_volume_to_index_cancel<F>(
 where
     F: FnMut(Vec<FileRecord>) -> Result<(), CoreError>,
 {
+    scan_volume_to_index_cancel_progress(drive, batch_size, is_cancelled, |_| {}, sink)
+}
+
+/// Як [`scan_volume_to_index_cancel`], з `on_progress` після кожного chunk MFT
+/// — щоб UI не зависав на «0 файлів» під час довгого pass 1.
+#[cfg(windows)]
+pub fn scan_volume_to_index_cancel_progress<F, P>(
+    drive: char,
+    batch_size: usize,
+    is_cancelled: impl Fn() -> bool,
+    mut on_progress: P,
+    mut sink: F,
+) -> Result<(IndexingStats, bool), CoreError>
+where
+    F: FnMut(Vec<FileRecord>) -> Result<(), CoreError>,
+    P: FnMut(MftIndexProgress),
+{
     // Прохід 1: тільки директорії — вони потрібні резолверу шляхів.
     let mut dirs = Vec::new();
-    let (pass1, cancelled1) = crate::volume::enumerate_with_cancel(drive, &is_cancelled, |e| {
-        if e.is_directory {
-            dirs.push(e);
-        }
-    })?;
+    let (pass1, cancelled1) = crate::volume::enumerate_with_cancel_progress(
+        drive,
+        &is_cancelled,
+        |e| {
+            if e.is_directory {
+                dirs.push(e);
+            }
+        },
+        |scanned, total| {
+            on_progress(MftIndexProgress {
+                pass: 1,
+                records_scanned: scanned,
+                records_total: total,
+                files_emitted: 0,
+            });
+        },
+    )?;
     if cancelled1 {
         return Ok((
             IndexingStats {
@@ -186,12 +226,39 @@ where
     let resolver = PathResolver::from_entries(drive, &dirs);
     drop(dirs);
 
-    // Прохід 2: файли → батчі (стоп на межі запису / chunk).
-    let mut batcher = Batcher::new(&resolver, batch_size, sink);
-    let (scan_stats, cancelled2) =
-        crate::volume::enumerate_with_cancel(drive, &is_cancelled, |e| batcher.push(e))?;
+    // Прохід 2: файли → батчі. Рахуємо files_emitted у обгортці sink.
+    let files_emitted = std::cell::Cell::new(0u64);
+    let mut batcher = Batcher::new(&resolver, batch_size, |batch: Vec<FileRecord>| {
+        let n = batch.len() as u64;
+        let result = sink(batch);
+        if result.is_ok() {
+            files_emitted.set(files_emitted.get().saturating_add(n));
+        }
+        result
+    });
+
+    let (scan_stats, cancelled2) = crate::volume::enumerate_with_cancel_progress(
+        drive,
+        &is_cancelled,
+        |e| batcher.push(e),
+        |scanned, total| {
+            on_progress(MftIndexProgress {
+                pass: 2,
+                records_scanned: scanned,
+                records_total: total,
+                files_emitted: files_emitted.get(),
+            });
+        },
+    )?;
     let mut stats = batcher.finish()?;
     stats.corrupt = scan_stats.corrupt;
+    // Фінальний тік — UI бачить 100% MFT і точний files_emitted.
+    on_progress(MftIndexProgress {
+        pass: 2,
+        records_scanned: scan_stats.records_scanned,
+        records_total: scan_stats.records_scanned.max(1),
+        files_emitted: stats.files_indexed,
+    });
     Ok((stats, cancelled2))
 }
 

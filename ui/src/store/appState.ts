@@ -6,6 +6,7 @@ import type {
   AppStateSnapshot,
   CategorySummary,
   CleanupTotal,
+  DuplicatesCascadeEvent,
   QuarantineBadge,
   QuarantineChangedEvent,
   ScanProgressEvent,
@@ -19,12 +20,21 @@ export interface AppState {
   status: StoreStatus;
   cleanup: CleanupTotal;
   scanRunning: boolean;
+  /** Останній `scan.progress` — для банера «що зараз робиться». */
+  scanProgress: ScanProgressEvent | null;
+  /** Останній `duplicates.cascade_updated` — фаза хешування дублікатів. */
+  cascadeProgress: DuplicatesCascadeEvent | null;
+  /**
+   * Чи вже запускали скан у цій сесії UI (кнопка «Почати» / ⟳).
+   * Після цього попап старту не показується, навіть якщо totals ще 0.
+   */
+  scanStartedThisSession: boolean;
   settings: AppSettings | null;
   /** Живі томи для смужок дисків Sidebar (T-106). */
   volumes: VolumeUsageInfo[];
   /** Бейдж Quarantine (T-106): snapshot + події quarantine.changed. */
   quarantine: QuarantineBadge;
-  /** Перший запуск (T-114): сигнал для автостарту скану. */
+  /** Перший запуск (маркер профілю) — підказка в попапі старту. */
   isFirstRun: boolean;
   error: string | null;
 }
@@ -41,6 +51,9 @@ const INITIAL_STATE: AppState = {
   status: "idle",
   cleanup: EMPTY_CLEANUP,
   scanRunning: false,
+  scanProgress: null,
+  cascadeProgress: null,
+  scanStartedThisSession: false,
   settings: null,
   volumes: [],
   quarantine: EMPTY_QUARANTINE,
@@ -78,6 +91,15 @@ export class AppStateStore {
     this.unlisten = [];
     this.startPromise = null;
     this.buffered = null;
+  }
+
+  /** Позначити, що користувач (або UI) ініціював скан у цій сесії. */
+  markScanStarted(): void {
+    this.project((state) =>
+      state.scanStartedThisSession
+        ? { ...state, scanRunning: true }
+        : { ...state, scanStartedThisSession: true, scanRunning: true },
+    );
   }
 
   private publish(next: AppState): void {
@@ -119,7 +141,24 @@ export class AppStateStore {
           this.project((state) => ({ ...state, settings: event.settings })),
         ),
         subscribe<ScanProgressEvent>("scan.progress", (event) =>
-          this.project((state) => ({ ...state, scanRunning: !event.done })),
+          this.project((state) => ({
+            ...state,
+            scanProgress: event,
+            scanRunning: !event.done,
+            scanStartedThisSession: true,
+          })),
+        ),
+        subscribe<DuplicatesCascadeEvent>("duplicates.cascade_updated", (event) =>
+          this.project((state) => ({
+            ...state,
+            cascadeProgress: event,
+            // Поки refining / не complete — вважаємо роботу ще активною.
+            scanRunning:
+              state.scanRunning ||
+              (event.phase !== "complete" &&
+                event.phase !== "cancelled" &&
+                event.phase !== "idle"),
+          })),
         ),
         subscribe<QuarantineChangedEvent>("quarantine.changed", (event) =>
           this.project((state) => ({
@@ -139,6 +178,9 @@ export class AppStateStore {
         status: "ready",
         cleanup: snapshot.cleanup,
         scanRunning: snapshot.scanRunning,
+        scanProgress: null,
+        cascadeProgress: null,
+        scanStartedThisSession: snapshot.scanRunning,
         settings: snapshot.settings,
         volumes: snapshot.volumes ?? [],
         quarantine: snapshot.quarantine ?? EMPTY_QUARANTINE,
@@ -178,4 +220,69 @@ export function useAppState(): AppState {
     appStateStore.getSnapshot,
     appStateStore.getSnapshot,
   );
+}
+
+/** Коротка фаза для банера (лічильники — окремим рядком у ScanActivityBanner). */
+export function describeScanActivity(state: AppState): string | null {
+  if (!state.scanRunning && !state.scanProgress) return null;
+
+  const progress = state.scanProgress;
+  if (progress && !progress.done) {
+    switch (progress.phase) {
+      case "volume_started":
+        return `Сканування ${progress.volume} · старт · ${strategyLabel(progress.strategy)}`;
+      case "volume_progress":
+        return `Сканування ${progress.volume} · ${strategyLabel(progress.strategy)}`;
+      case "volume_finished":
+        return `Том ${progress.volume} завершено · ${progress.filesIndexed.toLocaleString("uk-UA")} файлів`;
+      case "session_finished":
+        return `Індекс зібрано · ${progress.filesIndexed.toLocaleString("uk-UA")} файлів · аналіз…`;
+      case "duplicates_cascade":
+        return describeCascade(state.cascadeProgress);
+      case "session_complete":
+        return null;
+      default:
+        if (state.scanRunning) return "Сканування…";
+    }
+  }
+
+  if (state.scanRunning && state.cascadeProgress) {
+    return describeCascade(state.cascadeProgress);
+  }
+
+  if (state.scanRunning) return "Сканування…";
+  return null;
+}
+
+function describeCascade(cascade: DuplicatesCascadeEvent | null): string {
+  if (!cascade) return "Пошук дублікатів…";
+  switch (cascade.phase) {
+    case "size_grouping":
+      return "Дублікати: групування за розміром…";
+    case "partial_hashing":
+      return `Дублікати: частковий хеш · ${cascade.groupCount} груп`;
+    case "full_hashing":
+      return `Дублікати: повний хеш · ${cascade.groupCount} груп`;
+    case "complete":
+      return cascade.groupCount > 0
+        ? `Дублікати: підтверджено ${cascade.groupCount} груп`
+        : "Дублікати: збігів не знайдено";
+    case "cancelled":
+      return "Пошук дублікатів скасовано";
+    default:
+      return "Пошук дублікатів…";
+  }
+}
+
+function strategyLabel(strategy: string): string {
+  switch (strategy) {
+    case "mft":
+      return "швидкий шлях (MFT)";
+    case "directory_walk":
+      return "обхід каталогів";
+    case "usn_delta":
+      return "дельта USN";
+    default:
+      return strategy;
+  }
 }

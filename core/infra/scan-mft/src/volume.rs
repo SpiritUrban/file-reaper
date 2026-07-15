@@ -208,7 +208,19 @@ pub fn enumerate_with(drive: char, sink: impl FnMut(ScanEntry)) -> Result<ScanSt
 pub fn enumerate_with_cancel(
     drive: char,
     is_cancelled: impl Fn() -> bool,
+    sink: impl FnMut(ScanEntry),
+) -> Result<(ScanStats, bool), CoreError> {
+    enumerate_with_cancel_progress(drive, is_cancelled, sink, |_, _| {})
+}
+
+/// Як [`enumerate_with_cancel`], плюс `on_progress(records_scanned, records_total)`
+/// після кожного chunk читання — для живого UI-лічильника (інакше pass1
+/// MFT хвилинами мовчить на «0 файлів»).
+pub fn enumerate_with_cancel_progress(
+    drive: char,
+    is_cancelled: impl Fn() -> bool,
     mut sink: impl FnMut(ScanEntry),
+    mut on_progress: impl FnMut(u64, u64),
 ) -> Result<(ScanStats, bool), CoreError> {
     let handle = open_volume(drive)?;
     let vol = query_volume_data(&handle)?;
@@ -233,6 +245,9 @@ pub fn enumerate_with_cancel(
         )
     })?;
 
+    // Початковий total — UI одразу бачить «0 / N записів MFT».
+    on_progress(0, total_records);
+
     let mut stats = ScanStats::default();
     let mut buffer = vec![0u8; MAX_CHUNK_BYTES as usize];
     let mut cancelled = false;
@@ -246,6 +261,7 @@ pub fn enumerate_with_cancel(
         let Some(lcn) = lcn else {
             // Розріджений екстент $MFT: записи в ньому відсутні, лише зсуваємо лічильник.
             stats.records_scanned += run_bytes / rec_size;
+            on_progress(stats.records_scanned.min(total_records), total_records);
             if stats.records_scanned >= total_records {
                 break;
             }
@@ -296,6 +312,7 @@ pub fn enumerate_with_cancel(
                 pos += rec_size as usize;
             }
             done += chunk as u64;
+            on_progress(stats.records_scanned.min(total_records), total_records);
         }
     }
 

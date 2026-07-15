@@ -18,7 +18,7 @@ mod walk;
 pub use exclude::PathExclusions;
 pub use walk::{
     full_path, walk_path, walk_path_with_stats, walk_volume, walk_volume_with, WalkConfig,
-    WalkStats, ROOT_REF,
+    WalkPathResolver, WalkStats, ROOT_REF,
 };
 
 use trashradar_app::ports::ScanSource;

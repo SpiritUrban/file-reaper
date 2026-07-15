@@ -14,7 +14,7 @@ import { AnimatedBytes, AnimatedInteger } from "@/components/AnimatedCounter";
 import { command, ipcErrorMessage } from "@/ipc/client";
 import { formatBytes } from "@/store/format";
 import { toast } from "@/store/toasts";
-import { useAppState } from "@/store/appState";
+import { appStateStore, useAppState } from "@/store/appState";
 import {
   AGE_PRESETS,
   KIND_LABELS,
@@ -146,7 +146,8 @@ function countUnitLabel(unit: "files" | "groups" | "folders"): string {
 
 /** Рестарт скану всіх томів — статус/рескан, не навігація (ui.md §2). */
 function rescanAll(): void {
-  void command<ScanStartAck>("scan.start").catch((error) =>
+  appStateStore.markScanStarted();
+  void command<ScanStartAck>("scan.start", { payload: {} }).catch((error) =>
     toast({ message: ipcErrorMessage(error), tone: "warning" }),
   );
 }
@@ -203,7 +204,7 @@ export function TopBar({
   markedCount = 0,
   markedBytes = 0,
 }: TopBarProps) {
-  const { cleanup, volumes } = useAppState();
+  const { cleanup, volumes, scanRunning } = useAppState();
   const livePreview = useLivePreview();
   const filters = useCandidateFilters(categoryId);
   const summary = categoryId
@@ -237,12 +238,20 @@ export function TopBar({
         <button
           type="button"
           onClick={rescanAll}
-          className="rounded px-1 text-ink-dim hover:bg-panel-2"
-          title="Пересканувати"
-          aria-label="Пересканувати"
+          disabled={scanRunning}
+          className={`rounded px-1 hover:bg-panel-2 ${
+            scanRunning
+              ? "animate-spin text-accent"
+              : "text-ink-dim"
+          }`}
+          title={scanRunning ? "Сканування триває…" : "Почати / пересканувати"}
+          aria-label={scanRunning ? "Сканування триває" : "Почати сканування"}
         >
           ⟳
         </button>
+        {scanRunning ? (
+          <span className="hidden text-xs text-accent sm:inline">йде скан…</span>
+        ) : null}
       </div>
 
       {/* Фільтр-чипси: лише в контексті категорії (ui.md §2) */}

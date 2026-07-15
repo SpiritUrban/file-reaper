@@ -505,41 +505,54 @@ fn system_time_to_filetime(st: SystemTime) -> Option<FsTimestamp> {
 }
 
 /// Реконструює повний шлях запису за синтетичними `parent_ref` (корінь = 0).
-pub fn full_path(drive: char, entries: &[ScanEntry], entry: &ScanEntry) -> Option<String> {
-    if entry.file_ref == ROOT_REF {
-        return Some(format!("{}:\\", drive.to_ascii_uppercase()));
-    }
-
-    let dirs: HashMap<u64, (u64, &str)> = entries
-        .iter()
-        .filter(|e| e.is_directory)
-        .map(|e| (e.file_ref, (e.parent_ref, e.name.as_str())))
-        .collect();
-
-    let mut chain: Vec<&str> = Vec::new();
-    let mut cur_parent = entry.parent_ref;
-    chain.push(entry.name.as_str());
-
-    // Піднімаємось до кореня.
-    let mut guard = 0usize;
-    while cur_parent != ROOT_REF {
-        if guard > 1024 {
-            return None;
-        }
-        let (parent, name) = dirs.get(&cur_parent)?;
-        chain.push(name);
-        cur_parent = *parent;
-        guard += 1;
-    }
-
-    let mut path = format!("{}:", drive.to_ascii_uppercase());
-    for name in chain.iter().rev() {
-        path.push('\\');
-        path.push_str(name);
-    }
-    Some(path)
+pub struct WalkPathResolver<'a> {
+    drive: char,
+    dirs: HashMap<u64, (u64, &'a str)>,
 }
 
+impl<'a> WalkPathResolver<'a> {
+    pub fn from_entries(drive: char, entries: &'a [ScanEntry]) -> Self {
+        let dirs = entries
+            .iter()
+            .filter(|e| e.is_directory)
+            .map(|e| (e.file_ref, (e.parent_ref, e.name.as_str())))
+            .collect();
+        Self {
+            drive: drive.to_ascii_uppercase(),
+            dirs,
+        }
+    }
+
+    pub fn full_path(&self, entry: &ScanEntry) -> Option<String> {
+        if entry.file_ref == ROOT_REF {
+            return Some(format!("{}:\\", self.drive));
+        }
+        let mut chain: Vec<&str> = Vec::new();
+        let mut cur_parent = entry.parent_ref;
+        chain.push(entry.name.as_str());
+        let mut guard = 0usize;
+        while cur_parent != ROOT_REF {
+            if guard > 1024 {
+                return None;
+            }
+            let (parent, name) = self.dirs.get(&cur_parent)?;
+            chain.push(name);
+            cur_parent = *parent;
+            guard += 1;
+        }
+        let mut path = format!("{}:", self.drive);
+        for name in chain.iter().rev() {
+            path.push('\\');
+            path.push_str(name);
+        }
+        Some(path)
+    }
+}
+
+/// Сумісний one-shot API. Для циклів використовуйте [`WalkPathResolver`].
+pub fn full_path(drive: char, entries: &[ScanEntry], entry: &ScanEntry) -> Option<String> {
+    WalkPathResolver::from_entries(drive, entries).full_path(entry)
+}
 #[cfg(test)]
 mod tests {
     use super::*;

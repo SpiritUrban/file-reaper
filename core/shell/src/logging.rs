@@ -17,10 +17,11 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use tracing_subscriber::filter::filter_fn;
 use tracing_subscriber::fmt;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::{EnvFilter, Layer};
 
 /// Стеля розміру активного файла лога.
 const MAX_LOG_BYTES: u64 = 5 * 1024 * 1024;
@@ -42,11 +43,24 @@ pub fn init() -> Result<PathBuf, String> {
     let writer = RotatingWriter::open(&path, MAX_LOG_BYTES, MAX_BACKUPS)
         .map_err(|e| format!("не вдалося відкрити файл лога {}: {e}", path.display()))?;
 
+    let scan_path = dir.join("scan-diagnostic.log");
+    let scan_writer =
+        RotatingWriter::open(&scan_path, 20 * 1024 * 1024, MAX_BACKUPS).map_err(|e| {
+            format!(
+                "не вдалося відкрити діагностичний лог {}: {e}",
+                scan_path.display()
+            )
+        })?;
+
     let filter = EnvFilter::try_from_env("TRASHRADAR_LOG")
         .unwrap_or_else(|_| EnvFilter::new(DEFAULT_FILTER));
 
     let file_layer = fmt::layer().with_writer(writer).with_ansi(false);
-    // У debug-збірці дублюємо у stderr — зручно при `tauri dev`.
+    let scan_layer = fmt::layer()
+        .with_writer(scan_writer)
+        .with_ansi(false)
+        .with_filter(filter_fn(|metadata| metadata.target() == "scan_diag"));
+    // У debug-збірці дублюємо у stderr — зручно при 	auri dev.
     let stderr_layer = if cfg!(debug_assertions) {
         Some(fmt::layer().with_writer(io::stderr).with_ansi(false))
     } else {
@@ -56,6 +70,7 @@ pub fn init() -> Result<PathBuf, String> {
     tracing_subscriber::registry()
         .with(filter)
         .with(file_layer)
+        .with(scan_layer)
         .with(stderr_layer)
         .try_init()
         .map_err(|e| format!("підписник логів уже встановлено: {e}"))?;

@@ -13,7 +13,7 @@ import { AnimatedBytes, AnimatedInteger } from "@/components/AnimatedCounter";
 import { Meter } from "@/components/Meter";
 import { categoryRowsByWeight } from "@/store/categories";
 import { toast } from "@/store/toasts";
-import { useAppState } from "@/store/appState";
+import { appStateStore, useAppState } from "@/store/appState";
 import { command, ipcErrorMessage } from "@/ipc/client";
 import type { HotkeyActionEventDetail } from "@/hotkeys";
 import type { ScanStartAck, VolumeUsageInfo } from "@/ipc/types";
@@ -34,6 +34,7 @@ function usedFraction(volume: VolumeUsageInfo): number | null {
 
 /** Рескан одного тому: статус і рестарт скану — не навігація (ui.md §1). */
 function rescanVolume(volume: string): void {
+  appStateStore.markScanStarted();
   void command<ScanStartAck>("scan.start", {
     payload: { volumes: [volume] },
   }).catch((error) =>
