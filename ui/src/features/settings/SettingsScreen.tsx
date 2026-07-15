@@ -21,14 +21,15 @@
  * вимкнення йде через `settings.set` → Core перераховує індекс і шле свіжі
  * totals — категорія зникає з Sidebar/Summary/цифри миттєво, без рескану.
  *
- * Заглушка наступної задачі: редактор гарячих клавіш — T-153.
+ * Гарячі клавіші (T-153): [Переглянути] розгортає HotkeysEditor — живий стан
+ * реєстру T-103, перепризначення з перевіркою конфліктів, localStorage.
  */
 
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { ThresholdInput } from "@/components/ThresholdInput";
-import { DEFAULT_HOTKEYS } from "@/hotkeys";
+import { hotkeys } from "@/hotkeys";
 import { command, ipcErrorMessage, isTauri } from "@/ipc/client";
 import { ARMED_ACTIONS, type ArmedAction } from "@/store/armedAction";
 import { useAppState } from "@/store/appState";
@@ -48,6 +49,8 @@ import {
 } from "@/store/livePreview";
 import { toast } from "@/store/toasts";
 import type { AppSettings, CacheUsage, HealthInfo } from "@/ipc/types";
+
+import { HotkeysEditor } from "./HotkeysEditor";
 
 const MIB = 1024 * 1024;
 const GIB = 1024 * MIB;
@@ -179,20 +182,6 @@ function Section({
   );
 }
 
-/** Заглушка контрола, що належить наступній задачі беклогу. */
-function PlannedButton({ label, taskRef }: { label: string; taskRef: string }) {
-  return (
-    <button
-      type="button"
-      disabled
-      title={`Редактор — задача ${taskRef}`}
-      className="cursor-not-allowed rounded border border-line bg-panel-2 px-2 py-0.5 text-ink-faint"
-    >
-      {label} · {taskRef}
-    </button>
-  );
-}
-
 const SELECT_CLASS =
   "rounded border border-line bg-panel-2 px-1.5 py-0.5 text-ink focus:border-accent focus:outline-none";
 
@@ -287,6 +276,9 @@ export function SettingsScreen() {
   const [health, setHealth] = useState<HealthInfo | null>(null);
   const [cacheUsage, setCacheUsage] = useState<CacheUsage | null>(null);
   const [clearingCache, setClearingCache] = useState(false);
+  // T-153: таблиця гарячих клавіш згорнута за замовчуванням (ui.md §9 wireframe:
+  // «Гарячі клавіші … [Переглянути]»).
+  const [showHotkeys, setShowHotkeys] = useState(false);
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -507,10 +499,21 @@ export function SettingsScreen() {
       <Section title="Керування">
         <Row label="Гарячі клавіші">
           <span className="text-ink-dim">
-            комбінацій: {DEFAULT_HOTKEYS.length} (зведення ui.md §11)
+            комбінацій: {hotkeys.list().length} (зведення ui.md §11)
           </span>
-          <PlannedButton label="Переглянути" taskRef="T-153" />
+          <button
+            type="button"
+            onClick={() => setShowHotkeys((current) => !current)}
+            className="rounded border border-line bg-panel-2 px-2 py-0.5 text-ink hover:border-accent"
+          >
+            {showHotkeys ? "Згорнути" : "Переглянути"}
+          </button>
         </Row>
+        {showHotkeys ? (
+          <div className="py-1.5 pl-2">
+            <HotkeysEditor />
+          </div>
+        ) : null}
         <Row label="Live Preview: дія кліку за замовч.">
           <select
             className={SELECT_CLASS}

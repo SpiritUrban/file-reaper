@@ -1,4 +1,11 @@
-/** Typed configurable hotkey registry — docs/ui.md §11 (T-103). */
+/**
+ * Typed configurable hotkey registry — docs/ui.md §11 (T-103).
+ *
+ * T-153: перепризначення персистяться в localStorage як відхилення від
+ * DEFAULT_HOTKEYS (той самий шар, що й livePreviewStore — поведінка webview,
+ * не Core settings.json). Конфліктне перепризначення відхиляється
+ * HotkeyConflictError, реєстр і сховище не змінюються.
+ */
 
 export type HotkeyContext =
   | "global"
@@ -87,6 +94,8 @@ export class HotkeyRegistry {
   private bindings: HotkeyBinding[];
   private activeContexts = new Set<HotkeyContext>(["global"]);
   private target: Window | null = null;
+  private readonly listeners = new Set<() => void>();
+  private version = 0;
 
   constructor(bindings: readonly HotkeyBinding[] = DEFAULT_HOTKEYS) {
     this.bindings = bindings.map(normalizeBinding);
@@ -96,6 +105,15 @@ export class HotkeyRegistry {
   list(): readonly HotkeyBinding[] {
     return this.bindings;
   }
+
+  /** Підписка для React (useSyncExternalStore): rebind/reset нотифікують. */
+  subscribe = (listener: () => void): (() => void) => {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  };
+
+  /** Снапшот-лічильник змін: інкрементується на кожен rebind/reset. */
+  getVersion = (): number => this.version;
 
   setActiveContexts(contexts: Iterable<HotkeyContext>): void {
     this.activeContexts = new Set(["global", ...contexts]);
@@ -120,6 +138,20 @@ export class HotkeyRegistry {
     }
     assertNoConflicts(next);
     this.bindings = next;
+    this.notify();
+  }
+
+  /** Повернути всі комбінації до типових (T-153 «Скинути всі»). */
+  reset(bindings: readonly HotkeyBinding[] = DEFAULT_HOTKEYS): void {
+    const next = bindings.map(normalizeBinding);
+    assertNoConflicts(next);
+    this.bindings = next;
+    this.notify();
+  }
+
+  private notify(): void {
+    this.version += 1;
+    for (const listener of this.listeners) listener();
   }
 
   attach(target: Window): () => void {
@@ -188,7 +220,8 @@ function codeAlias(code: string): string {
   return code;
 }
 
-function chordFromEvent(event: KeyboardEvent): string {
+/** Комбінація з живої події клавіатури — для запису в редакторі (T-153). */
+export function chordFromEvent(event: KeyboardEvent): string {
   return [
     event.ctrlKey ? "Ctrl" : null,
     event.altKey ? "Alt" : null,
@@ -232,3 +265,85 @@ function isEditableTarget(target: EventTarget | null): boolean {
 }
 
 export const hotkeys = new HotkeyRegistry();
+
+// ─── Персистенція перепризначень (T-153) ────────────────────────────────────
+
+const STORAGE_KEY = "trashradar.hotkeys";
+
+/** Лише відхилення від DEFAULT_HOTKEYS: action → chord. */
+type StoredOverrides = Partial<Record<HotkeyAction, string>>;
+
+function loadOverrides(): StoredOverrides {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return {};
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== "object" || parsed === null) return {};
+    const overrides: StoredOverrides = {};
+    for (const [action, chord] of Object.entries(parsed)) {
+      if (typeof chord === "string") {
+        overrides[action as HotkeyAction] = chord;
+      }
+    }
+    return overrides;
+  } catch {
+    return {};
+  }
+}
+
+function persistOverrides(overrides: StoredOverrides): void {
+  try {
+    if (Object.keys(overrides).length === 0) {
+      localStorage.removeItem(STORAGE_KEY);
+    } else {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(overrides));
+    }
+  } catch {
+    // Приватний режим — редактор працює без збереження між сесіями.
+  }
+}
+
+/** Типова комбінація дії з DEFAULT_HOTKEYS. */
+export function defaultChord(action: HotkeyAction): string {
+  const binding = DEFAULT_HOTKEYS.find((item) => item.action === action);
+  return binding ? normalizeChord(binding.chord) : "";
+}
+
+/**
+ * Перепризначити і зберегти. Конфлікт у перетинних контекстах →
+ * HotkeyConflictError, реєстр і сховище не змінюються.
+ */
+export function rebindHotkey(action: HotkeyAction, chord: string): void {
+  hotkeys.rebind(action, chord);
+  const overrides = loadOverrides();
+  const normalized = normalizeChord(chord);
+  if (normalized === defaultChord(action)) {
+    delete overrides[action];
+  } else {
+    overrides[action] = normalized;
+  }
+  persistOverrides(overrides);
+}
+
+/** Скинути всі комбінації до типових і очистити сховище. */
+export function resetHotkeys(): void {
+  hotkeys.reset();
+  persistOverrides({});
+}
+
+// Відновлення збережених перепризначень на старті. Запис, що став
+// невалідним (конфлікт зі зміненими дефолтами, невідома дія), пропускається
+// і прибирається зі сховища — реєстр завжди у несуперечливому стані.
+(() => {
+  const overrides = loadOverrides();
+  let dirty = false;
+  for (const [action, chord] of Object.entries(overrides)) {
+    try {
+      hotkeys.rebind(action as HotkeyAction, chord as string);
+    } catch {
+      delete overrides[action as HotkeyAction];
+      dirty = true;
+    }
+  }
+  if (dirty) persistOverrides(overrides);
+})();
