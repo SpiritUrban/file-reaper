@@ -287,10 +287,16 @@
   категоризував **каскад дублікатів** (ферма їх не заявляє) — будь-яка зміна
   порога/налаштувань після завершеного каскаду спорожнювала «Дублікати» і
   also_in «також у: Дублікати». **Виправлено:** (а) `clear_unmatched` не
-  чіпає primary з `detector_id=duplicates_cascade`; (б) після farm-also_in
-  rebuild `reapply_cached_duplicates` відновлює Duplicates-маркери й
-  re-promote Uncategorized-учасників з кешу `ScanRuntime.duplicates`.
-  Shell-тест `apply_settings_preserves_duplicates_cascade_primary_and_live_totals`.
+  чіпає primary `category=Duplicates` (не `detector_id` — `CompactFileRecord`
+  T-015 **не персистить** detector_id/explanation, тож перевірка за id у
+  hot-індексі ніколи б не спрацювала); (б) після farm-also_in rebuild
+  `reapply_cached_duplicates` відновлює also_in «Дублікати» і re-promote
+  Uncategorized-учасників з кешу `ScanRuntime.duplicates`. Shell-тести:
+  `apply_settings_preserves_duplicates_*`.
+- CompactFileRecord (T-015): `explanation` і `detector_id` завжди `""` після
+  pack→unpack — `category.window` / DetailsPanel показують порожнє
+  пояснення детектора для всіх категорій (не лише дублікатів). Окремий
+  борг: або sidecar-мапа explanation, або розширити компактний запис.
 - T-071: architecture.md §12 каже «**вбудована** ffmpeg-функціональність» —
   реалізовано як **ffmpeg sidecar-процес** (`std::process`), не in-process
   бібліотека. Рішення користувача (2026-07-10): мультиплатформність —

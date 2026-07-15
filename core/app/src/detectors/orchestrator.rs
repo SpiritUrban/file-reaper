@@ -23,15 +23,21 @@ use trashradar_domain::category::CategoryId;
 use trashradar_domain::error::CoreError;
 
 /// `detector_id`, який shell-каскад дублікатів (T-126) ставить на primary
-/// `CategoryId::Duplicates`. Ферма `mvp_predicate_registry` таких записів не
-/// заявляє — `clear_unmatched` не повинен знімати їхню категорію, інакше
-/// будь-який `apply_settings` після каскаду спорожнює «Дублікати».
+/// `CategoryId::Duplicates` при upsert. **Не** надійний ідентифікатор у
+/// hot-індексі: `CompactFileRecord` (T-015) не персистить `detector_id`/
+/// `explanation` — після pack/unpack вони завжди порожні. Захист clear —
+/// через [`is_duplicates_cascade_primary`] (категорія).
 pub const DUPLICATES_CASCADE_DETECTOR_ID: &str = "duplicates_cascade";
 
 /// Primary, що належить каскаду, а не предикатній фермі.
+///
+/// Критерій — `category == Duplicates`: жоден детектор `mvp_predicate_registry`
+/// не видає цю категорію (лише shell-каскад T-126). Перевірка `detector_id`
+/// **не** працює на `InMemoryIndex` (див. коментар до константи).
 #[inline]
 fn is_duplicates_cascade_primary(record: &FileRecord) -> bool {
-    record.detector_id == DUPLICATES_CASCADE_DETECTOR_ID
+    record.category == CategoryId::Duplicates
+        || record.detector_id == DUPLICATES_CASCADE_DETECTOR_ID
 }
 
 /// Підсумок одного прогону категоризації.
@@ -887,8 +893,8 @@ mod tests {
         );
     }
 
-    /// T-152 / pre-existing: primary від каскаду дублікатів (не ферма) не
-    /// знімається `clear_unmatched` — інакше apply_settings спорожнює категорію.
+    /// T-152: primary Duplicates (каскад, не ферма) не знімається
+    /// `clear_unmatched` — критерій category (detector_id у hot-індексі губиться).
     #[test]
     fn recalculate_preserves_duplicates_cascade_primary() {
         let mut reg = DetectorRegistry::new();
@@ -898,10 +904,10 @@ mod tests {
             1_000,
             true,
         ));
-        let mut cascade = rec(1, 50); // нижче порогу large — ферма не матчить
+        // Як після unpack з CompactFileRecord: category є, detector_id порожній.
+        let mut cascade = rec(1, 50);
         cascade.category = CategoryId::Duplicates;
-        cascade.detector_id = DUPLICATES_CASCADE_DETECTOR_ID.into();
-        cascade.explanation = "дублікат · 2 копії по 0.0 ГБ".into();
+        cascade.detector_id.clear();
         cascade.safety = SafetyLevel::SafeToBulk;
 
         let mut farm_owned = rec(2, 50);
@@ -922,8 +928,6 @@ mod tests {
             .find(|r| r.candidate_id == CandidateId(1))
             .unwrap();
         assert_eq!(r1.category, CategoryId::Duplicates);
-        assert_eq!(r1.detector_id, DUPLICATES_CASCADE_DETECTOR_ID);
-        assert!(!r1.explanation.is_empty());
         let r2 = all
             .iter()
             .find(|r| r.candidate_id == CandidateId(2))

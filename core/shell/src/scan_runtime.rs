@@ -1693,9 +1693,11 @@ mod tests {
         assert_eq!(
             primary.category,
             CategoryId::Duplicates,
-            "primary duplicates_cascade збережено"
+            "primary Duplicates збережено (CompactFileRecord не тримає detector_id)"
         );
-        assert_eq!(primary.detector_id, DUPLICATES_CASCADE_DETECTOR_ID);
+        // detector_id/explanation у InMemoryIndex завжди "" після pack (T-015) —
+        // не assert-имо їх; UI «Дублікати» бере групи з duplicates.groups, не
+        // explanation з FileRecord.
 
         let large = records
             .iter()
@@ -1717,5 +1719,53 @@ mod tests {
             after.unique_bytes.0 >= cascade_size,
             "цифра «можна звільнити» містить cascade primary"
         );
+    }
+
+    /// Регресія: CompactFileRecord губить detector_id — захист clear має
+    /// працювати за category=Duplicates, інакше apply_settings стирає primary
+    /// навіть із заповненим detector_id на insert.
+    #[test]
+    fn apply_settings_preserves_duplicates_even_when_detector_id_stripped() {
+        let size = 50_000u64;
+        let runtime = ScanRuntime::new();
+        runtime
+            .index
+            .insert_batch(vec![FileRecord {
+                candidate_id: CandidateId(1),
+                path: r"C:\dup.bin".into(),
+                size: ByteSize(size),
+                created_at: None,
+                modified_at: None,
+                accessed_at: None,
+                kind: FileKind::Other,
+                unit: CandidateUnit::File,
+                category: CategoryId::Duplicates,
+                safety: SafetyLevel::SafeToBulk,
+                decision: Decision::Undecided,
+                detector_id: DUPLICATES_CASCADE_DETECTOR_ID.into(),
+                explanation: "дублікат".into(),
+                attributes: FileAttributes::default(),
+            }])
+            .unwrap();
+
+        // Після pack/unpack detector_id уже порожній — як у проді.
+        let stripped = &runtime.index.get_all()[0];
+        assert_eq!(stripped.category, CategoryId::Duplicates);
+        assert!(
+            stripped.detector_id.is_empty(),
+            "передумова: hot index не персистить detector_id"
+        );
+        assert!(stripped.explanation.is_empty());
+
+        // Без кешу груп: лише category-based skip у recalculate.
+        assert!(runtime.duplicates.lock().unwrap().groups.is_empty());
+        runtime.apply_settings(&AppSettings::default()).unwrap();
+
+        let after = runtime.index.get_all();
+        assert_eq!(after[0].category, CategoryId::Duplicates);
+        let summary = runtime.last_totals.lock().unwrap().summary();
+        let dup_idx = CategoryId::Duplicates.mvp_index().unwrap();
+        assert_eq!(summary.by_category[dup_idx].bytes, size);
+        assert_eq!(summary.unique_bytes.0, size);
     }
 }
