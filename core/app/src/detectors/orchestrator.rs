@@ -22,6 +22,18 @@ use trashradar_domain::candidate::{Decision, FileRecord, SafetyLevel};
 use trashradar_domain::category::CategoryId;
 use trashradar_domain::error::CoreError;
 
+/// `detector_id`, який shell-каскад дублікатів (T-126) ставить на primary
+/// `CategoryId::Duplicates`. Ферма `mvp_predicate_registry` таких записів не
+/// заявляє — `clear_unmatched` не повинен знімати їхню категорію, інакше
+/// будь-який `apply_settings` після каскаду спорожнює «Дублікати».
+pub const DUPLICATES_CASCADE_DETECTOR_ID: &str = "duplicates_cascade";
+
+/// Primary, що належить каскаду, а не предикатній фермі.
+#[inline]
+fn is_duplicates_cascade_primary(record: &FileRecord) -> bool {
+    record.detector_id == DUPLICATES_CASCADE_DETECTOR_ID
+}
+
 /// Підсумок одного прогону категоризації.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct CategorizationStats {
@@ -115,7 +127,11 @@ impl<'a> DetectorOrchestrator<'a> {
             if let Some(primary) = hits.first() {
                 result.updated.push(apply_primary_hit(record, primary));
                 result.stats.records_updated += 1;
-            } else if clear_unmatched && record.category != CategoryId::Uncategorized {
+            } else if clear_unmatched
+                && record.category != CategoryId::Uncategorized
+                && !is_duplicates_cascade_primary(record)
+            {
+                // T-126/T-152: каскад дублікатів не в фермі — не clear.
                 result.updated.push(clear_category(record));
                 result.stats.records_cleared += 1;
             }
@@ -191,7 +207,9 @@ impl<'a> DetectorOrchestrator<'a> {
             if let Some(primary) = hits.first() {
                 apply_primary_hit_mut(record, primary);
                 stats.records_updated += 1;
-            } else if record.category != CategoryId::Uncategorized {
+            } else if record.category != CategoryId::Uncategorized
+                && !is_duplicates_cascade_primary(record)
+            {
                 clear_category_mut(record);
                 stats.records_cleared += 1;
             }
@@ -867,6 +885,50 @@ mod tests {
                 .category,
             CategoryId::OldFiles
         );
+    }
+
+    /// T-152 / pre-existing: primary від каскаду дублікатів (не ферма) не
+    /// знімається `clear_unmatched` — інакше apply_settings спорожнює категорію.
+    #[test]
+    fn recalculate_preserves_duplicates_cascade_primary() {
+        let mut reg = DetectorRegistry::new();
+        reg.register(CountingDetector::new(
+            "large",
+            CategoryId::LargeFiles,
+            1_000,
+            true,
+        ));
+        let mut cascade = rec(1, 50); // нижче порогу large — ферма не матчить
+        cascade.category = CategoryId::Duplicates;
+        cascade.detector_id = DUPLICATES_CASCADE_DETECTOR_ID.into();
+        cascade.explanation = "дублікат · 2 копії по 0.0 ГБ".into();
+        cascade.safety = SafetyLevel::SafeToBulk;
+
+        let mut farm_owned = rec(2, 50);
+        farm_owned.category = CategoryId::Archives;
+        farm_owned.detector_id = "archives".into();
+        farm_owned.explanation = "архів".into();
+
+        let index = MemIndex::new(vec![cascade, farm_owned]);
+        let orch = DetectorOrchestrator::new(&reg);
+        let stats = orch
+            .recalculate_index(&index, &CancellationToken::new())
+            .expect("ok");
+
+        assert_eq!(stats.records_cleared, 1, "лише farm-owned без hit");
+        let all = index.get_all().unwrap();
+        let r1 = all
+            .iter()
+            .find(|r| r.candidate_id == CandidateId(1))
+            .unwrap();
+        assert_eq!(r1.category, CategoryId::Duplicates);
+        assert_eq!(r1.detector_id, DUPLICATES_CASCADE_DETECTOR_ID);
+        assert!(!r1.explanation.is_empty());
+        let r2 = all
+            .iter()
+            .find(|r| r.candidate_id == CandidateId(2))
+            .unwrap();
+        assert_eq!(r2.category, CategoryId::Uncategorized);
     }
 
     /// DoD perf: перерахунок 1 млн записів < 1 с (release + --ignored).

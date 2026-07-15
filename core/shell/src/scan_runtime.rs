@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Runtime, State};
 use trashradar_app::detectors::{
     DetectorHit, DetectorId, DetectorOrchestrator, DetectorRegistry, ThresholdValue,
+    DUPLICATES_CASCADE_DETECTOR_ID,
 };
 use trashradar_app::ports::{HotIndex, ScanEnvironment};
 use trashradar_app::scan_control::{
@@ -89,23 +90,36 @@ impl ScanRuntime {
         let stats = DetectorOrchestrator::new(&registry)
             .recalculate_index(self.index.as_ref(), &CancellationToken::new())?;
         *self.settings.write().expect("scan settings lock") = settings.clone();
-        let records = self.index.get_all();
 
         // T-121: перерахунок «також у» після зміни порогів — recalculate_index
         // уже прогнав ці ж hits і відкинув усі, крім primary; друга легка
         // вибірка (evaluate_record без запису в індекс) збирає повний набір
         // категорій на кандидата.
+        //
+        // T-152 fix: ферма не заявляє hits каскаду дублікатів — після clear
+        // also_in і (коли primary farm-категорії знято) Uncategorized-учасники
+        // груп відновлюються з кешованого `duplicates.groups`. Primary
+        // `duplicates_cascade` також захищений у `recalculate_index`.
         {
             let mut also_in = self.also_in.lock().expect("also_in lock");
             also_in.clear();
+            let records = self.index.get_all();
             for record in &records {
                 if record.decision == Decision::Keep {
                     continue;
                 }
                 record_hits(&mut also_in, &registry.evaluate_record(record));
             }
+            let groups = self
+                .duplicates
+                .lock()
+                .expect("duplicates lock")
+                .groups
+                .clone();
+            reapply_cached_duplicates(self.index.as_ref(), &mut also_in, &groups);
         }
 
+        let records = self.index.get_all();
         let mut totals = self.last_totals.lock().expect("live totals lock");
         totals.clear();
         totals.ingest_primary(&records);
@@ -140,6 +154,55 @@ fn record_hits(also_in: &mut HashMap<u64, CategoryMask>, hits: &[DetectorHit]) {
             .entry(hit.candidate_id.0)
             .or_default()
             .insert(hit.verdict.category);
+    }
+}
+
+/// Відновити hits каскаду дублікатів після farm-recalculate (T-152).
+///
+/// Для кожного не-keep учасника кешованої групи: (1) `also_in` += Duplicates;
+/// (2) якщо primary зараз `Uncategorized` (ферма зняла / ніколи не мала
+/// категорії) — промотувати в primary Duplicates, як `run_duplicates_cascade`.
+fn reapply_cached_duplicates(
+    index: &InMemoryIndex,
+    also_in: &mut HashMap<u64, CategoryMask>,
+    groups: &[MarkedDuplicateGroup],
+) {
+    if groups.is_empty() {
+        return;
+    }
+    let records = index.get_all();
+    let by_id: HashMap<CandidateId, &FileRecord> =
+        records.iter().map(|r| (r.candidate_id, r)).collect();
+    let mut promoted = Vec::new();
+    for group in groups {
+        for member in &group.members {
+            if member.keep {
+                continue;
+            }
+            also_in
+                .entry(member.candidate_id.0)
+                .or_default()
+                .insert(CategoryId::Duplicates);
+            if let Some(rec) = by_id.get(&member.candidate_id) {
+                if rec.category == CategoryId::Uncategorized {
+                    let mut promoted_rec = (*rec).clone();
+                    promoted_rec.category = CategoryId::Duplicates;
+                    promoted_rec.safety = SafetyLevel::SafeToBulk;
+                    promoted_rec.detector_id = DUPLICATES_CASCADE_DETECTOR_ID.into();
+                    promoted_rec.explanation =
+                        duplicate_explanation(group.size.0, group.members.len());
+                    promoted.push(promoted_rec);
+                }
+            }
+        }
+    }
+    if !promoted.is_empty() {
+        if let Err(e) = index.upsert_batch(promoted) {
+            tracing::warn!(
+                error = %e,
+                "T-152: не вдалося відновити категорію Дублікати після recalculate"
+            );
+        }
     }
 }
 
@@ -203,7 +266,7 @@ fn run_duplicates_cascade<R: Runtime>(
                         let mut promoted_rec = (*rec).clone();
                         promoted_rec.category = CategoryId::Duplicates;
                         promoted_rec.safety = SafetyLevel::SafeToBulk;
-                        promoted_rec.detector_id = "duplicates_cascade".into();
+                        promoted_rec.detector_id = DUPLICATES_CASCADE_DETECTOR_ID.into();
                         promoted_rec.explanation =
                             duplicate_explanation(group.size.0, group.members.len());
                         promoted.push(promoted_rec);
@@ -1507,5 +1570,152 @@ mod tests {
         assert_eq!(summary.unique_bytes.0, content.len() as u64);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// T-152 fix: індекс із primary `duplicates_cascade` → `apply_settings`
+    /// (дефолт) не знімає категорію Duplicates; live totals лишають внесок.
+    /// also_in «Дублікати» для multi-hit (primary farm + cascade reap)
+    /// теж відновлюється з кешу груп.
+    #[test]
+    fn apply_settings_preserves_duplicates_cascade_primary_and_live_totals() {
+        use trashradar_domain::duplicates::{
+            ContentHash, DuplicateRole, MarkedDuplicateGroup, MarkedDuplicateMember,
+        };
+
+        let cascade_size = 200_000u64;
+        let large_size = 200 * 1024 * 1024u64;
+        let runtime = ScanRuntime::new();
+
+        // id=1: cascade-only primary (малий Other — ферма не матчить).
+        // id=2: keep-екземпляр каскаду (не reclaimable).
+        // id=3: multi-hit reap — primary LargeFiles + also_in Duplicates.
+        runtime
+            .index
+            .insert_batch(vec![
+                FileRecord {
+                    candidate_id: CandidateId(1),
+                    path: r"C:\media\copy-a.bin".into(),
+                    size: ByteSize(cascade_size),
+                    created_at: None,
+                    modified_at: None,
+                    accessed_at: None,
+                    kind: FileKind::Other,
+                    unit: CandidateUnit::File,
+                    category: CategoryId::Duplicates,
+                    safety: SafetyLevel::SafeToBulk,
+                    decision: Decision::Undecided,
+                    detector_id: DUPLICATES_CASCADE_DETECTOR_ID.into(),
+                    explanation: "дублікат · 2 копії по 0.0 ГБ".into(),
+                    attributes: FileAttributes::default(),
+                },
+                FileRecord {
+                    candidate_id: CandidateId(2),
+                    path: r"C:\media\huge-keep.bin".into(),
+                    size: ByteSize(large_size),
+                    created_at: None,
+                    modified_at: None,
+                    accessed_at: None,
+                    kind: FileKind::Other,
+                    unit: CandidateUnit::File,
+                    category: CategoryId::LargeFiles,
+                    safety: SafetyLevel::ReviewRecommended,
+                    decision: Decision::Undecided,
+                    detector_id: "large_files".into(),
+                    explanation: "розмір 0.2 ГБ".into(),
+                    attributes: FileAttributes::default(),
+                },
+                FileRecord {
+                    candidate_id: CandidateId(3),
+                    path: r"C:\media\huge-reap.bin".into(),
+                    size: ByteSize(large_size),
+                    created_at: None,
+                    modified_at: None,
+                    accessed_at: None,
+                    kind: FileKind::Other,
+                    unit: CandidateUnit::File,
+                    category: CategoryId::LargeFiles,
+                    safety: SafetyLevel::ReviewRecommended,
+                    decision: Decision::Undecided,
+                    detector_id: "large_files".into(),
+                    explanation: "розмір 0.2 ГБ".into(),
+                    attributes: FileAttributes::default(),
+                },
+            ])
+            .unwrap();
+
+        runtime.duplicates.lock().unwrap().groups = vec![MarkedDuplicateGroup {
+            size: ByteSize(large_size),
+            content_hash: ContentHash::ZERO,
+            members: vec![
+                MarkedDuplicateMember {
+                    candidate_id: CandidateId(1),
+                    path: r"C:\media\copy-a.bin".into(),
+                    role: DuplicateRole::Reap,
+                    keep: false,
+                },
+                MarkedDuplicateMember {
+                    candidate_id: CandidateId(2),
+                    path: r"C:\media\huge-keep.bin".into(),
+                    role: DuplicateRole::Keep,
+                    keep: true,
+                },
+                MarkedDuplicateMember {
+                    candidate_id: CandidateId(3),
+                    path: r"C:\media\huge-reap.bin".into(),
+                    role: DuplicateRole::Reap,
+                    keep: false,
+                },
+            ],
+            keep_id: CandidateId(2),
+            policy: KeepPolicy::default(),
+            potential_reclaim_bytes: cascade_size + large_size,
+        }];
+
+        {
+            let mut live = runtime.last_totals.lock().unwrap();
+            live.clear();
+            live.ingest_primary(&runtime.index.get_all());
+        }
+        let dup_idx = CategoryId::Duplicates.mvp_index().unwrap();
+        assert_eq!(
+            runtime.last_totals.lock().unwrap().summary().by_category[dup_idx].bytes,
+            cascade_size
+        );
+
+        // Будь-яка зміна налаштувань (тут — дефолт) раніше знімала Duplicates.
+        runtime.apply_settings(&AppSettings::default()).unwrap();
+
+        let records = runtime.index.get_all();
+        let primary = records
+            .iter()
+            .find(|r| r.candidate_id == CandidateId(1))
+            .unwrap();
+        assert_eq!(
+            primary.category,
+            CategoryId::Duplicates,
+            "primary duplicates_cascade збережено"
+        );
+        assert_eq!(primary.detector_id, DUPLICATES_CASCADE_DETECTOR_ID);
+
+        let large = records
+            .iter()
+            .find(|r| r.candidate_id == CandidateId(3))
+            .unwrap();
+        assert_eq!(large.category, CategoryId::LargeFiles);
+        let also = runtime.also_in_categories(CandidateId(3), CategoryId::LargeFiles);
+        assert!(
+            also.contains(&CategoryId::Duplicates),
+            "маркер «також у: Дублікати» відновлено з кешу груп, got {also:?}"
+        );
+
+        let after = runtime.last_totals.lock().unwrap().summary();
+        assert_eq!(
+            after.by_category[dup_idx].bytes, cascade_size,
+            "live totals: внесок Duplicates збережено"
+        );
+        assert!(
+            after.unique_bytes.0 >= cascade_size,
+            "цифра «можна звільнити» містить cascade primary"
+        );
     }
 }

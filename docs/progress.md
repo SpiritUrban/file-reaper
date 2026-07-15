@@ -282,12 +282,15 @@
   нема чого; чекбокси цих категорій у UI показані неактивними з поясненням.
   ui.md §9.3 «[+ свій]» (власні шаблони папок) не має задачі в беклозі —
   позначено в UI як поза MVP.
-- Виявлено під час T-152 (пре-існуючий, НЕ виправлено): `apply_settings` →
-  `recalculate_index(clear_unmatched)` знімає категорію з записів, які
+- Виявлено під час T-152 (пре-існуючий): `apply_settings` →
+  `recalculate_index(clear_unmatched)` знімав категорію з записів, які
   категоризував **каскад дублікатів** (ферма їх не заявляє) — будь-яка зміна
-  порога/налаштувань після завершеного каскаду спорожнює категорію
-  «Дублікати» до наступного скану. Потребує окремого рішення (виняток для
-  detector_id=duplicates_cascade або повторний прогін каскадних hit-ів).
+  порога/налаштувань після завершеного каскаду спорожнювала «Дублікати» і
+  also_in «також у: Дублікати». **Виправлено:** (а) `clear_unmatched` не
+  чіпає primary з `detector_id=duplicates_cascade`; (б) після farm-also_in
+  rebuild `reapply_cached_duplicates` відновлює Duplicates-маркери й
+  re-promote Uncategorized-учасників з кешу `ScanRuntime.duplicates`.
+  Shell-тест `apply_settings_preserves_duplicates_cascade_primary_and_live_totals`.
 - T-071: architecture.md §12 каже «**вбудована** ffmpeg-функціональність» —
   реалізовано як **ffmpeg sidecar-процес** (`std::process`), не in-process
   бібліотека. Рішення користувача (2026-07-10): мультиплатформність —

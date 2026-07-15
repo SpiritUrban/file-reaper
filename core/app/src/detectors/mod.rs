@@ -40,6 +40,7 @@ pub use old_files::{OldFilesDetector, DETECTOR_ID as OLD_FILES_ID};
 pub use orchestrator::{
     apply_primary_hit, apply_primary_hit_mut, clear_category, clear_category_mut,
     CategorizationStats, CategorizeBatchResult, DetectorOrchestrator,
+    DUPLICATES_CASCADE_DETECTOR_ID,
 };
 pub use project_activity::{ProjectActivity, ProjectActivityIndex, DEFAULT_INACTIVE_AFTER_DAYS};
 pub use registry::DetectorRegistry;
