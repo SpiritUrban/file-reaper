@@ -1120,8 +1120,9 @@ impl trashradar_app::ports::QuarantineManifest for IndexDatabase {
         &self,
         entries: &[QuarantineEntry],
     ) -> std::result::Result<(), trashradar_domain::error::CoreError> {
-        let map_err =
-            |error: rusqlite::Error| trashradar_domain::error::CoreError::internal(error.to_string());
+        let map_err = |error: rusqlite::Error| {
+            trashradar_domain::error::CoreError::internal(error.to_string())
+        };
         let transaction = self.connection.unchecked_transaction().map_err(map_err)?;
         {
             let mut statement = transaction
@@ -1246,10 +1247,12 @@ impl trashradar_app::ports::QuarantineManifest for IndexDatabase {
         &self,
         confirmations: &[(QuarantineEntryId, QuarantineStatus, DestructiveAuditEvent)],
     ) -> std::result::Result<(), trashradar_domain::error::CoreError> {
-        let map_sql =
-            |error: rusqlite::Error| trashradar_domain::error::CoreError::internal(error.to_string());
-        let map_int =
-            |error: IndexSqliteError| trashradar_domain::error::CoreError::internal(error.to_string());
+        let map_sql = |error: rusqlite::Error| {
+            trashradar_domain::error::CoreError::internal(error.to_string())
+        };
+        let map_int = |error: IndexSqliteError| {
+            trashradar_domain::error::CoreError::internal(error.to_string())
+        };
         let transaction = self.connection.unchecked_transaction().map_err(map_sql)?;
         {
             let mut update = transaction
@@ -2839,8 +2842,7 @@ mod tests {
 
         // Конфлікт посередині (дубль id 2) → відкат УСЬОГО батчу.
         database.insert_quarantine_entry(&entry(2)).unwrap();
-        QuarantineManifest::insert_entries(&database, &[entry(1), entry(2), entry(3)])
-            .unwrap_err();
+        QuarantineManifest::insert_entries(&database, &[entry(1), entry(2), entry(3)]).unwrap_err();
         assert_eq!(
             database
                 .list_quarantine_entries()
@@ -2851,7 +2853,9 @@ mod tests {
             vec![2],
             "невдалий батч не має лишити часткових записів"
         );
-        database.remove_quarantine_entry(QuarantineEntryId(2)).unwrap();
+        database
+            .remove_quarantine_entry(QuarantineEntryId(2))
+            .unwrap();
 
         // Успішний батч: усі записи одним викликом.
         QuarantineManifest::insert_entries(&database, &[entry(1), entry(2), entry(3)]).unwrap();

@@ -1,5 +1,8 @@
 {
-  "reap_batch_millis": 1844.4829,
-  "reap_files_per_sec": 542.1573710442098,
-  "reaped_count": 1000
+  "reap_batch_millis": 1149.1164,
+  "reap_files_per_sec": 870.233859685581,
+  "reaped_count": 1000,
+  "journal_millis": 16.7883,
+  "moves_millis": 1095.4573,
+  "confirm_millis": 31.2454
 }

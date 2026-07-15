@@ -7,11 +7,11 @@
 //! in_flight → move → confirmation + append-only аудит на кожен файл).
 //!
 //! Гейти за політикою T-019/T-035: тайминг на shared-runner — WARN на
-//! регрес >15% + жорстка катастрофічна стеля; ціль §15 (2 с) — WARN-лінія,
-//! бо per-file транзакції T-079 коливаються довкола неї (борг у
-//! progress.md, відхилення T-154); `--strict` робить регрес помилкою
-//! (локально на машині baseline); кількість переміщених файлів і стан
-//! manifest — жорсткі інваріанти.
+//! регрес >15% + жорстка стеля = ціль §15 (2 с; досяжна після фазового
+//! батчування manifest-транзакцій T-154 — SQLite-фази ~50 мс, домінує
+//! move-фаза); `--strict` робить регрес помилкою (локально на машині
+//! baseline); кількість переміщених файлів і стан manifest — жорсткі
+//! інваріанти.
 //!
 //! Використання (Windows; на інших ОС — no-op, продукт MVP Windows-only):
 //!   cargo run --release
@@ -29,13 +29,11 @@ const REAP_FILES: u64 = 1_000;
 const FILE_BYTES: usize = 4_096;
 /// Допустимий регрес baseline (політика T-019).
 const TOLERANCE: f64 = 1.15;
-/// Ціль §15: 2 с на батч. Поточний per-file транзакційний шлях T-079
-/// коливається довкола цілі (~2 мс/файл: 2 durable-коміти + аудит + move) —
-/// перевищення цілі дає WARN, не FAIL; борг батчування manifest-транзакцій
-/// зафіксовано у progress.md (відхилення T-154).
-const TARGET_BATCH_MS: f64 = 2_000.0;
-/// Жорстка катастрофічна стеля CI (запас на shared-runner і AV).
-const CEILING_BATCH_MS: f64 = 10_000.0;
+/// Ціль §15: 2 с на батч — жорстка стеля. Після фазового батчування
+/// manifest-транзакцій (T-154: усі in_flight одним tx → move'и →
+/// підтвердження + аудит одним tx) SQLite-фази займають ~50 мс, домінує
+/// move-фаза (~1.1–1.8 с: WinAPI move + guard + identity під AV-фільтром).
+const CEILING_BATCH_MS: f64 = 2_000.0;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Baseline {
@@ -45,6 +43,16 @@ struct Baseline {
     reap_files_per_sec: f64,
     /// Скільки файлів переміщено (має = REAP_FILES).
     reaped_count: u64,
+    /// Фазова розбивка (діагностика, не гейтиться окремо): durable-запис
+    /// усіх in_flight одним tx (T-154).
+    #[serde(default)]
+    journal_millis: f64,
+    /// Послідовні атомарні move (WinAPI, домінанта батчу).
+    #[serde(default)]
+    moves_millis: f64,
+    /// Підтвердження + аудит одним tx (T-154).
+    #[serde(default)]
+    confirm_millis: f64,
 }
 
 fn baseline_path() -> PathBuf {
@@ -61,6 +69,159 @@ fn write_baseline(baseline: &Baseline) {
     let data = serde_json::to_string_pretty(baseline).expect("serialize");
     std::fs::write(&path, data).expect("write baseline");
     println!("baseline записано: {}", path.display());
+}
+
+/// Таймінгові обгортки портів: фазова розбивка reap_batch без зміни
+/// продуктового шляху. Обгортка manifest ОБОВ'ЯЗКОВО делегує батч-методи —
+/// інакше замір міряв би дефолтні per-item цикли, а не SQLite-транзакції.
+#[cfg(windows)]
+mod probes {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Instant;
+
+    use trashradar_app::ports::{QuarantineFs, QuarantineManifest, RecoveryLocation, RestoreMove};
+    use trashradar_domain::error::CoreError;
+    use trashradar_domain::quarantine::{
+        DestructiveAuditEvent, DestructiveAuditRecord, FileIdentity, QuarantineEntry,
+        QuarantineEntryId, QuarantineStatus,
+    };
+
+    pub struct TimingFs<F: QuarantineFs> {
+        inner: F,
+        move_nanos: AtomicU64,
+    }
+
+    impl<F: QuarantineFs> TimingFs<F> {
+        pub fn new(inner: F) -> Self {
+            Self {
+                inner,
+                move_nanos: AtomicU64::new(0),
+            }
+        }
+
+        pub fn take_move_millis(&self) -> f64 {
+            self.move_nanos.swap(0, Ordering::Relaxed) as f64 / 1_000_000.0
+        }
+    }
+
+    impl<F: QuarantineFs> QuarantineFs for TimingFs<F> {
+        fn move_into_quarantine(
+            &self,
+            source: &str,
+            destination: &str,
+            expected: FileIdentity,
+            roots: &[String],
+        ) -> Result<(), CoreError> {
+            let started = Instant::now();
+            let result = self
+                .inner
+                .move_into_quarantine(source, destination, expected, roots);
+            self.move_nanos
+                .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            result
+        }
+
+        fn restore_from_quarantine(
+            &self,
+            surrogate_path: &str,
+            destination_path: &str,
+        ) -> Result<RestoreMove, CoreError> {
+            self.inner
+                .restore_from_quarantine(surrogate_path, destination_path)
+        }
+
+        fn purge_from_quarantine(&self, surrogate_path: &str) -> Result<(), CoreError> {
+            self.inner.purge_from_quarantine(surrogate_path)
+        }
+
+        fn recovery_location(
+            &self,
+            source_path: &str,
+            surrogate_path: &str,
+        ) -> Result<RecoveryLocation, CoreError> {
+            self.inner.recovery_location(source_path, surrogate_path)
+        }
+    }
+
+    pub struct TimingManifest<M: QuarantineManifest> {
+        inner: M,
+        journal_nanos: AtomicU64,
+        confirm_nanos: AtomicU64,
+    }
+
+    impl<M: QuarantineManifest> TimingManifest<M> {
+        pub fn new(inner: M) -> Self {
+            Self {
+                inner,
+                journal_nanos: AtomicU64::new(0),
+                confirm_nanos: AtomicU64::new(0),
+            }
+        }
+
+        pub fn inner(&self) -> &M {
+            &self.inner
+        }
+
+        pub fn take_millis(&self) -> (f64, f64) {
+            (
+                self.journal_nanos.swap(0, Ordering::Relaxed) as f64 / 1_000_000.0,
+                self.confirm_nanos.swap(0, Ordering::Relaxed) as f64 / 1_000_000.0,
+            )
+        }
+    }
+
+    impl<M: QuarantineManifest> QuarantineManifest for TimingManifest<M> {
+        fn insert_entry(&self, entry: &QuarantineEntry) -> Result<(), CoreError> {
+            self.inner.insert_entry(entry)
+        }
+
+        fn insert_entries(&self, entries: &[QuarantineEntry]) -> Result<(), CoreError> {
+            let started = Instant::now();
+            let result = self.inner.insert_entries(entries);
+            self.journal_nanos
+                .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            result
+        }
+
+        fn get_entry(&self, id: QuarantineEntryId) -> Result<Option<QuarantineEntry>, CoreError> {
+            self.inner.get_entry(id)
+        }
+
+        fn list_entries(&self) -> Result<Vec<QuarantineEntry>, CoreError> {
+            self.inner.list_entries()
+        }
+
+        fn remove_entry(&self, id: QuarantineEntryId) -> Result<(), CoreError> {
+            self.inner.remove_entry(id)
+        }
+
+        fn append_audit(&self, event: &DestructiveAuditEvent) -> Result<(), CoreError> {
+            self.inner.append_audit(event)
+        }
+
+        fn list_audit(&self) -> Result<Vec<DestructiveAuditRecord>, CoreError> {
+            self.inner.list_audit()
+        }
+
+        fn confirm_batch_with_audit(
+            &self,
+            confirmations: &[(QuarantineEntryId, QuarantineStatus, DestructiveAuditEvent)],
+        ) -> Result<(), CoreError> {
+            let started = Instant::now();
+            let result = self.inner.confirm_batch_with_audit(confirmations);
+            self.confirm_nanos
+                .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            result
+        }
+
+        fn update_status(
+            &self,
+            id: QuarantineEntryId,
+            status: QuarantineStatus,
+        ) -> Result<(), CoreError> {
+            self.inner.update_status(id, status)
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -119,7 +280,9 @@ fn measure_reap() -> Baseline {
         requests
     };
 
-    let reaper = TransactionalReaper::new(&NativeQuarantineFs, &database, &[]);
+    let filesystem = probes::TimingFs::new(NativeQuarantineFs);
+    let manifest = probes::TimingManifest::new(database);
+    let reaper = TransactionalReaper::new(&filesystem, &manifest, &[]);
 
     println!("Прогрів (discard)…");
     let warm_requests = build_requests("warm", 100_000);
@@ -132,6 +295,9 @@ fn measure_reap() -> Baseline {
         "  [warmup] {:.1} мс (не гейтиться)",
         warm_started.elapsed().as_secs_f64() * 1000.0
     );
+    // Скинути акумульовані warmup-фази перед заміром.
+    filesystem.take_move_millis();
+    manifest.take_millis();
 
     // Вимірюваний корпус створюється ПІСЛЯ warmup і з паузою: реал-тайм
     // антивірус асинхронно сканує щойно створені файли і блокує move
@@ -143,6 +309,11 @@ fn measure_reap() -> Baseline {
     let started = Instant::now();
     let outcomes = reaper.reap_batch(BatchId(2), requests).expect("reap batch");
     let reap_batch_millis = started.elapsed().as_secs_f64() * 1000.0;
+    let moves_millis = filesystem.take_move_millis();
+    let (journal_millis, confirm_millis) = manifest.take_millis();
+    println!(
+        "  [фази] журнал {journal_millis:.1} мс | move {moves_millis:.1} мс | підтвердження {confirm_millis:.1} мс"
+    );
 
     // Жорсткі інваріанти D4: кожен файл переміщено і підтверджено в журналі.
     assert_eq!(outcomes.len() as u64, REAP_FILES);
@@ -156,7 +327,8 @@ fn measure_reap() -> Baseline {
                 .exists(),
         "оригінали мають зникнути"
     );
-    let quarantined = database
+    let quarantined = manifest
+        .inner()
         .list_quarantine_entries()
         .expect("list manifest")
         .into_iter()
@@ -169,7 +341,7 @@ fn measure_reap() -> Baseline {
         "manifest має підтвердити обидва батчі"
     );
 
-    drop(database);
+    drop(manifest);
     let _ = std::fs::remove_dir_all(&root);
 
     Baseline {
@@ -180,6 +352,9 @@ fn measure_reap() -> Baseline {
             f64::INFINITY
         },
         reaped_count: REAP_FILES,
+        journal_millis,
+        moves_millis,
+        confirm_millis,
     }
 }
 
@@ -232,25 +407,35 @@ fn run_gate(bless: bool, strict: bool) -> i32 {
         "{:<20} {:>12.1} {:>12.1} {:>7.2}x  {} [ms]",
         "reap_batch_millis", baseline.reap_batch_millis, current.reap_batch_millis, ratio, verdict
     );
-
-    // Ціль §15 — WARN-лінія до батчування manifest-транзакцій (T-154).
-    if current.reap_batch_millis > TARGET_BATCH_MS {
-        println!(
-            "\nWARN §15: reap {:.1} мс > цілі {:.0} с — борг per-file транзакцій \
-             (див. відхилення T-154 у progress.md).",
-            current.reap_batch_millis,
-            TARGET_BATCH_MS / 1000.0
-        );
+    for (name, base, cur) in [
+        (
+            "  journal_millis",
+            baseline.journal_millis,
+            current.journal_millis,
+        ),
+        (
+            "  moves_millis",
+            baseline.moves_millis,
+            current.moves_millis,
+        ),
+        (
+            "  confirm_millis",
+            baseline.confirm_millis,
+            current.confirm_millis,
+        ),
+    ] {
+        println!("{name:<20} {base:>12.1} {cur:>12.1}        -  info [ms]");
     }
+
     if hard {
         eprintln!(
-            "\nРегрес >{:.0}% / катастрофічна стеля — гейт не пройдено.",
+            "\nРегрес >{:.0}% / стеля §15 — гейт не пройдено.",
             (TOLERANCE - 1.0) * 100.0
         );
         return 1;
     }
     println!(
-        "\nГейт пройдено: reap {} файлів < {:.0} с (guard).",
+        "\nГейт пройдено: reap {} файлів < {:.0} с (стеля §15).",
         REAP_FILES,
         CEILING_BATCH_MS / 1000.0
     );
