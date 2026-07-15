@@ -110,6 +110,17 @@ pub trait IndexStore {
 /// Persistent manifest Quarantine (T-078). Реалізація: `index-sqlite`.
 pub trait QuarantineManifest {
     fn insert_entry(&self, entry: &QuarantineEntry) -> Result<(), CoreError>;
+    /// Durable-запис усіх записів батчу одним рішенням сховища (T-154:
+    /// reap 1 000 файлів < 2 с — один коміт замість коміта на файл).
+    /// Реалізація має бути all-or-nothing: після аварії посеред виклику
+    /// у журналі або всі записи, або жодного (обидва стани reconcile
+    /// T-084 розв'язує звіркою з реальністю).
+    fn insert_entries(&self, entries: &[QuarantineEntry]) -> Result<(), CoreError> {
+        for entry in entries {
+            self.insert_entry(entry)?;
+        }
+        Ok(())
+    }
     fn get_entry(&self, id: QuarantineEntryId) -> Result<Option<QuarantineEntry>, CoreError>;
     fn list_entries(&self) -> Result<Vec<QuarantineEntry>, CoreError>;
     fn list_entries_by_batch(&self, batch_id: BatchId) -> Result<Vec<QuarantineEntry>, CoreError> {
@@ -130,6 +141,19 @@ pub trait QuarantineManifest {
     ) -> Result<(), CoreError> {
         self.update_status(id, status)?;
         self.append_audit(event)
+    }
+    /// Батчове підтвердження + аудит одним рішенням сховища (T-154).
+    /// Як і `insert_entries` — all-or-nothing при аварії; часткове
+    /// підтвердження (дефолт нижче) теж безпечне: непідтверджені записи
+    /// лишаються in_flight і докочуються reconcile T-084.
+    fn confirm_batch_with_audit(
+        &self,
+        confirmations: &[(QuarantineEntryId, QuarantineStatus, DestructiveAuditEvent)],
+    ) -> Result<(), CoreError> {
+        for (id, status, event) in confirmations {
+            self.confirm_with_audit(*id, *status, event)?;
+        }
+        Ok(())
     }
     fn update_status(
         &self,
@@ -169,6 +193,18 @@ pub trait HotIndex {
 
     /// Вставити або замінити записи з тим самим шляхом (T-030 create/modify).
     fn upsert_batch(&self, records: Vec<FileRecord>) -> Result<(), CoreError>;
+
+    /// Найбільший candidate_id в індексі (0 — порожній). Дефолт через
+    /// `get_all` коректний, але O(n) з клонуванням — гарячі реалізації
+    /// повинні перекрити (T-154: рестарт < 2 с на 1.5 млн записів).
+    fn max_candidate_id(&self) -> Result<u64, CoreError> {
+        Ok(self
+            .get_all()?
+            .into_iter()
+            .map(|record| record.candidate_id.0)
+            .max()
+            .unwrap_or(0))
+    }
 }
 
 /// Сховище і генерація превью. Реалізація: `preview` (E6).

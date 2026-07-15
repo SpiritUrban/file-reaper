@@ -102,6 +102,12 @@ impl PathInterner {
         }
     }
 
+    /// ID вже інтернованого рядка без мутації (точний збіг за регістром).
+    /// Валідний після `rebuild_lookup()`.
+    pub fn lookup_id(&self, s: &str) -> Option<u32> {
+        self.lookup.get(s).copied()
+    }
+
     /// Кількість інтернованих рядків.
     pub fn len(&self) -> usize {
         self.offsets.len() - 1
@@ -582,11 +588,27 @@ impl trashradar_app::ports::HotIndex for InMemoryIndex {
         Ok(self.search(query, limit))
     }
 
+    fn max_candidate_id(&self) -> Result<u64, CoreError> {
+        // Без get_all: прохід компактними записами без алокацій (T-154).
+        let inner = self.inner.read().unwrap();
+        Ok(inner
+            .records
+            .iter()
+            .map(|compact| compact.candidate_id)
+            .max()
+            .unwrap_or(0))
+    }
+
     fn remove_paths(&self, paths: &[String]) -> Result<usize, CoreError> {
         if paths.is_empty() {
             return Ok(0);
         }
-        let targets: Vec<String> = paths.iter().map(|p| p.replace('/', "\\")).collect();
+        // Set lower-case цілей: перевірка запису за O(1) замість O(targets)
+        // (T-154: remove_paths на 1.5 млн записів — гарячий шлях USN-дельти).
+        let targets: std::collections::HashSet<String> = paths
+            .iter()
+            .map(|p| p.replace('/', "\\").to_ascii_lowercase())
+            .collect();
         let mut inner = self.inner.write().unwrap();
         let before = inner.records.len();
         let resolved: Vec<String> = inner
@@ -598,7 +620,7 @@ impl trashradar_app::ports::HotIndex for InMemoryIndex {
         inner.records.retain(|_| {
             let path = &resolved[i];
             i += 1;
-            !targets.iter().any(|t| path.eq_ignore_ascii_case(t))
+            !targets.contains(&path.to_ascii_lowercase())
         });
         Ok(before - inner.records.len())
     }
@@ -611,29 +633,66 @@ impl trashradar_app::ports::HotIndex for InMemoryIndex {
         inner.dir_interner.rebuild_lookup();
         inner.filename_interner.rebuild_lookup();
 
+        // T-154: пошук позиції запису має бути O(1) на запис, а не O(n) —
+        // upsert 1.5 млн записів перерахунком детекторів інакше квадратичний.
+        // Швидкий шлях: (dir_id, filename_id) → позиція (без алокацій рядків;
+        // шляхи з одного джерела byte-ідентичні, інтернер дає точний збіг).
+        let mut by_ids: std::collections::HashMap<(u32, u32), usize> =
+            std::collections::HashMap::with_capacity(inner.records.len());
+        for (idx, compact) in inner.records.iter().enumerate() {
+            by_ids.insert((compact.dir_id, compact.filename_id), idx);
+        }
+        // Повільний шлях (лише при промаху точного збігу — нові файли або
+        // інший регістр): lower-case повний шлях → позиція; будується один
+        // раз на виклик, ліниво.
+        let mut by_lower: Option<std::collections::HashMap<String, usize>> = None;
+
         for record in records {
             let path_norm = record.path.replace('/', "\\");
-            let existing_paths: Vec<String> = inner
-                .records
-                .iter()
-                .map(|c| inner.resolve_path(c))
-                .collect();
-            let idx = existing_paths
-                .iter()
-                .position(|p| p.eq_ignore_ascii_case(&path_norm));
-
             let path = std::path::Path::new(&path_norm);
             let parent_str = path.parent().and_then(|p| p.to_str()).unwrap_or("");
             let file_name_str = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
+
+            let exact = inner
+                .dir_interner
+                .lookup_id(parent_str)
+                .zip(inner.filename_interner.lookup_id(file_name_str))
+                .and_then(|ids| by_ids.get(&ids).copied());
+            let idx = match exact {
+                Some(idx) => Some(idx),
+                None => {
+                    let lower = by_lower.get_or_insert_with(|| {
+                        inner
+                            .records
+                            .iter()
+                            .enumerate()
+                            .map(|(idx, c)| (inner.resolve_path(c).to_ascii_lowercase(), idx))
+                            .collect()
+                    });
+                    lower.get(&path_norm.to_ascii_lowercase()).copied()
+                }
+            };
+
             let dir_id = inner.dir_interner.intern(parent_str);
             let filename_id = inner.filename_interner.intern(file_name_str);
             let mut packed = record;
             packed.path = path_norm;
+            let path_lower = packed.path.to_ascii_lowercase();
             let compact = CompactFileRecord::pack(&packed, dir_id, filename_id);
-            if let Some(idx) = idx {
-                inner.records[idx] = compact;
-            } else {
-                inner.records.push(compact);
+            let slot = match idx {
+                Some(idx) => {
+                    inner.records[idx] = compact;
+                    idx
+                }
+                None => {
+                    inner.records.push(compact);
+                    inner.records.len() - 1
+                }
+            };
+            // Наступні записи цього ж батча мають бачити щойно вставлене.
+            by_ids.insert((dir_id, filename_id), slot);
+            if let Some(lower) = by_lower.as_mut() {
+                lower.insert(path_lower, slot);
             }
         }
         Ok(())

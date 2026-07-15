@@ -71,20 +71,96 @@ impl<'a, F: QuarantineFs, M: QuarantineManifest> TransactionalReaper<'a, F, M> {
         })
     }
 
-    /// Послідовний батч: перша помилка/аварія зупиняє нові move; вже завершені
-    /// та поточний in_flight лишаються відновлюваними за manifest (T-084).
+    /// Фазовий батч (T-154: reap 1 000 файлів < 2 с, §15): валідація всіх →
+    /// один durable-запис усіх in_flight → послідовні атомарні move → одне
+    /// підтвердження + аудит. Семантика crash-recovery T-084 незмінна: після
+    /// аварії у будь-якій фазі кожен запис журналу reconcile докочує
+    /// (файл уже в карантині) або відкочує (файл ще на місці) звіркою з
+    /// реальністю — жоден файл не губиться і не дублюється.
+    ///
+    /// Перша помилка move зупиняє нові move; вже переміщені файли
+    /// підтверджуються, незаймані записи відкочуються з журналу (їхній move
+    /// не стартував → файл гарантовано на місці), а запис невдалого move
+    /// лишається in_flight до reconcile — як і в `reap_one`.
     pub fn reap_batch(
         &self,
         batch_id: BatchId,
-        requests: Vec<ReapRequest>,
+        mut requests: Vec<ReapRequest>,
     ) -> Result<Vec<ReapOutcome>, CoreError> {
-        requests
+        for request in &mut requests {
+            validate_request(request)?;
+            request.entry.batch_id = Some(batch_id);
+            request.entry.status = QuarantineStatus::InFlight;
+        }
+
+        let entries: Vec<QuarantineEntry> = requests
+            .iter()
+            .map(|request| request.entry.clone())
+            .collect();
+        self.manifest.insert_entries(&entries)?;
+
+        let mut moved = 0usize;
+        let mut move_error = None;
+        for request in &requests {
+            match self.filesystem.move_into_quarantine(
+                &request.entry.original_path,
+                &request.destination_path,
+                request.expected_identity,
+                self.trashradar_roots,
+            ) {
+                Ok(()) => moved += 1,
+                Err(error) => {
+                    move_error = Some(error);
+                    break;
+                }
+            }
+        }
+
+        self.confirm_reaped(&requests[..moved])?;
+        if let Some(error) = move_error {
+            // Незаймані запити (за невдалим): move не стартував, файл на
+            // місці — запис можна прибрати одразу, не чекаючи reconcile.
+            for request in &requests[moved + 1..] {
+                self.manifest.remove_entry(request.entry.id)?;
+            }
+            return Err(error);
+        }
+
+        Ok(requests
             .into_iter()
             .map(|mut request| {
-                request.entry.batch_id = Some(batch_id);
-                self.reap_one(request)
+                request.entry.status = QuarantineStatus::Quarantined;
+                ReapOutcome {
+                    entry: request.entry,
+                    destination_path: request.destination_path,
+                }
             })
-            .collect()
+            .collect())
+    }
+
+    /// Підтвердження + аудит переміщених файлів одним durable-записом.
+    fn confirm_reaped(&self, requests: &[ReapRequest]) -> Result<(), CoreError> {
+        if requests.is_empty() {
+            return Ok(());
+        }
+        let confirmations: Vec<_> = requests
+            .iter()
+            .map(|request| {
+                (
+                    request.entry.id,
+                    QuarantineStatus::Quarantined,
+                    DestructiveAuditEvent {
+                        entry_id: request.entry.id,
+                        batch_id: request.entry.batch_id,
+                        operation: AuditOperation::Reap,
+                        actor: AuditActor::User,
+                        original_path: request.entry.original_path.clone(),
+                        size: request.entry.size,
+                    },
+                )
+            })
+            .collect();
+        self.manifest.confirm_batch_with_audit(&confirmations)
     }
 }
 
@@ -521,7 +597,11 @@ mod tests {
 
     impl CrashControl {
         fn hit(&self, phase: CrashPhase, counter: &Mutex<usize>) {
-            let mut call = counter.lock().unwrap();
+            // Панічна «аварія» отруює лок лічильника; «рестарт» (reconcile
+            // у стрес-тесті) продовжує роботу, як новий процес.
+            let mut call = counter
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             *call += 1;
             if self.phase == phase && *call == self.crash_call {
                 panic!("simulated hard process termination");
@@ -1057,6 +1137,217 @@ mod tests {
         }
     }
 
+    /// Обгортка manifest: рахує батч-виклики порту (T-154 — фазове
+    /// батчування не повинно тихо відкотитися до per-file комітів).
+    struct BatchCountingManifest<'m> {
+        inner: &'m FakeManifest,
+        batch_inserts: Mutex<usize>,
+        batch_confirms: Mutex<usize>,
+    }
+
+    impl QuarantineManifest for BatchCountingManifest<'_> {
+        fn insert_entry(&self, entry: &QuarantineEntry) -> Result<(), CoreError> {
+            self.inner.insert_entry(entry)
+        }
+        fn insert_entries(&self, entries: &[QuarantineEntry]) -> Result<(), CoreError> {
+            *self.batch_inserts.lock().unwrap() += 1;
+            self.inner.insert_entries(entries)
+        }
+        fn get_entry(&self, id: QuarantineEntryId) -> Result<Option<QuarantineEntry>, CoreError> {
+            self.inner.get_entry(id)
+        }
+        fn list_entries(&self) -> Result<Vec<QuarantineEntry>, CoreError> {
+            self.inner.list_entries()
+        }
+        fn remove_entry(&self, id: QuarantineEntryId) -> Result<(), CoreError> {
+            self.inner.remove_entry(id)
+        }
+        fn append_audit(&self, event: &DestructiveAuditEvent) -> Result<(), CoreError> {
+            self.inner.append_audit(event)
+        }
+        fn list_audit(&self) -> Result<Vec<DestructiveAuditRecord>, CoreError> {
+            self.inner.list_audit()
+        }
+        fn confirm_batch_with_audit(
+            &self,
+            confirmations: &[(QuarantineEntryId, QuarantineStatus, DestructiveAuditEvent)],
+        ) -> Result<(), CoreError> {
+            *self.batch_confirms.lock().unwrap() += 1;
+            self.inner.confirm_batch_with_audit(confirmations)
+        }
+        fn update_status(
+            &self,
+            id: QuarantineEntryId,
+            status: QuarantineStatus,
+        ) -> Result<(), CoreError> {
+            self.inner.update_status(id, status)
+        }
+    }
+
+    /// Обгортка FS: n-й move повертає помилку (не панікує) без переміщення.
+    struct FailingMoveFs<'f> {
+        inner: &'f FakeFs,
+        fail_move_call: usize,
+        moves: Mutex<usize>,
+    }
+
+    impl QuarantineFs for FailingMoveFs<'_> {
+        fn move_into_quarantine(
+            &self,
+            source: &str,
+            destination: &str,
+            expected: FileIdentity,
+            roots: &[String],
+        ) -> Result<(), CoreError> {
+            let mut calls = self.moves.lock().unwrap();
+            *calls += 1;
+            if *calls == self.fail_move_call {
+                return Err(CoreError::io("simulated move failure"));
+            }
+            drop(calls);
+            self.inner
+                .move_into_quarantine(source, destination, expected, roots)
+        }
+        fn restore_from_quarantine(
+            &self,
+            surrogate_path: &str,
+            destination_path: &str,
+        ) -> Result<RestoreMove, CoreError> {
+            self.inner
+                .restore_from_quarantine(surrogate_path, destination_path)
+        }
+        fn purge_from_quarantine(&self, surrogate_path: &str) -> Result<(), CoreError> {
+            self.inner.purge_from_quarantine(surrogate_path)
+        }
+        fn recovery_location(
+            &self,
+            source_path: &str,
+            surrogate_path: &str,
+        ) -> Result<RecoveryLocation, CoreError> {
+            self.inner.recovery_location(source_path, surrogate_path)
+        }
+    }
+
+    fn inert_crash() -> Arc<CrashControl> {
+        Arc::new(CrashControl {
+            phase: CrashPhase::AfterMove,
+            crash_call: usize::MAX,
+            inserts: Mutex::new(0),
+            moves: Mutex::new(0),
+            updates: Mutex::new(0),
+            audits: Mutex::new(Vec::new()),
+        })
+    }
+
+    /// T-154: успішний батч робить рівно один батч-запис журналу і рівно
+    /// одне батч-підтвердження — не по коміту на файл.
+    #[test]
+    fn reap_batch_uses_single_journal_and_confirm_batches() {
+        let requests: Vec<_> = (1..=3).map(request).collect();
+        let files = Arc::new(Mutex::new(
+            requests
+                .iter()
+                .map(|r| r.entry.original_path.clone())
+                .collect::<HashSet<_>>(),
+        ));
+        let crash = inert_crash();
+        let fs = FakeFs {
+            files: Arc::clone(&files),
+            crash: Arc::clone(&crash),
+        };
+        let inner = FakeManifest {
+            entries: Arc::new(Mutex::new(HashMap::new())),
+            crash,
+        };
+        let manifest = BatchCountingManifest {
+            inner: &inner,
+            batch_inserts: Mutex::new(0),
+            batch_confirms: Mutex::new(0),
+        };
+        let outcomes = TransactionalReaper::new(&fs, &manifest, &[])
+            .reap_batch(BatchId(9), requests)
+            .unwrap();
+        assert_eq!(outcomes.len(), 3);
+        assert!(outcomes
+            .iter()
+            .all(|o| o.entry.status == QuarantineStatus::Quarantined));
+        assert_eq!(*manifest.batch_inserts.lock().unwrap(), 1);
+        assert_eq!(*manifest.batch_confirms.lock().unwrap(), 1);
+        let audit = inner.list_audit().unwrap();
+        assert_eq!(audit.len(), 3);
+        assert!(audit
+            .iter()
+            .all(|record| record.event.operation == AuditOperation::Reap
+                && record.event.actor == AuditActor::User));
+    }
+
+    /// T-154: помилка move посеред батчу — переміщені підтверджені з аудитом,
+    /// незаймані відкочені з журналу, невдалий лишається in_flight і
+    /// розв'язується reconcile T-084 (файл на місці → rollback).
+    #[test]
+    fn reap_batch_move_error_confirms_moved_rolls_back_untouched() {
+        let requests: Vec<_> = (1..=4).map(request).collect();
+        let files = Arc::new(Mutex::new(
+            requests
+                .iter()
+                .map(|r| r.entry.original_path.clone())
+                .collect::<HashSet<_>>(),
+        ));
+        let crash = inert_crash();
+        let inner_fs = FakeFs {
+            files: Arc::clone(&files),
+            crash: Arc::clone(&crash),
+        };
+        let fs = FailingMoveFs {
+            inner: &inner_fs,
+            fail_move_call: 2,
+            moves: Mutex::new(0),
+        };
+        let manifest = FakeManifest {
+            entries: Arc::new(Mutex::new(HashMap::new())),
+            crash,
+        };
+        let error = TransactionalReaper::new(&fs, &manifest, &[])
+            .reap_batch(BatchId(9), requests.clone())
+            .unwrap_err();
+        assert!(error.message.contains("simulated move failure"));
+
+        {
+            let entries = manifest.entries.lock().unwrap();
+            assert_eq!(entries[&1].status, QuarantineStatus::Quarantined);
+            assert_eq!(entries[&2].status, QuarantineStatus::InFlight);
+            assert!(!entries.contains_key(&3), "untouched rolled back");
+            assert!(!entries.contains_key(&4), "untouched rolled back");
+        }
+        let audit = manifest.list_audit().unwrap();
+        assert_eq!(audit.len(), 1, "аудит лише для підтвердженого");
+        assert_eq!(audit[0].event.entry_id, QuarantineEntryId(1));
+        {
+            let physical = files.lock().unwrap();
+            assert!(physical.contains(&requests[0].destination_path));
+            for req in &requests[1..] {
+                assert!(physical.contains(&req.entry.original_path));
+            }
+        }
+
+        // Reconcile докочує залишок: невдалий move → файл на місці → rollback.
+        let result = QuarantineRecovery::new(&inner_fs, &manifest)
+            .reconcile(|entry| {
+                Ok(requests
+                    .iter()
+                    .find(|r| r.entry.id == entry.id)
+                    .unwrap()
+                    .destination_path
+                    .clone())
+            })
+            .unwrap();
+        assert_eq!(result.rolled_back, vec![QuarantineEntryId(2)]);
+        assert!(result.completed.is_empty());
+        let entries = manifest.entries.lock().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[&1].status, QuarantineStatus::Quarantined);
+    }
+
     #[test]
     fn stress_kill_mid_batch_never_loses_or_duplicates_file() {
         const FILES: u64 = 64;
@@ -1095,21 +1386,59 @@ mod tests {
             }))
             .is_err());
 
-            let physical = files.lock().unwrap();
-            for req in &requests {
-                let at_source = physical.contains(&req.entry.original_path);
-                let at_destination = physical.contains(&req.destination_path);
-                assert_ne!(
-                    at_source, at_destination,
-                    "id {} must have exactly one copy",
-                    req.entry.id.0
-                );
+            {
+                let physical = files.lock().unwrap();
+                for req in &requests {
+                    let at_source = physical.contains(&req.entry.original_path);
+                    let at_destination = physical.contains(&req.destination_path);
+                    assert_ne!(
+                        at_source, at_destination,
+                        "id {} must have exactly one copy",
+                        req.entry.id.0
+                    );
+                }
+                for entry in entries.lock().unwrap().values() {
+                    assert!(matches!(
+                        entry.status,
+                        QuarantineStatus::InFlight | QuarantineStatus::Quarantined
+                    ));
+                }
             }
-            for entry in entries.lock().unwrap().values() {
-                assert!(matches!(
-                    entry.status,
-                    QuarantineStatus::InFlight | QuarantineStatus::Quarantined
-                ));
+
+            // T-084/T-154: рестарт після аварії — reconcile розв'язує КОЖЕН
+            // in_flight (докочує чи відкочує), кінцевий стан консистентний.
+            let in_flight_before = entries
+                .lock()
+                .unwrap()
+                .values()
+                .filter(|entry| entry.status == QuarantineStatus::InFlight)
+                .count();
+            let destination_of = |entry: &QuarantineEntry| {
+                requests
+                    .iter()
+                    .find(|req| req.entry.id == entry.id)
+                    .unwrap()
+                    .destination_path
+                    .clone()
+            };
+            let result = QuarantineRecovery::new(&fs, &manifest)
+                .reconcile(|entry| Ok(destination_of(entry)))
+                .unwrap();
+            assert_eq!(
+                result.completed.len() + result.rolled_back.len(),
+                in_flight_before,
+                "reconcile має розв'язати кожен in_flight"
+            );
+            let physical = files.lock().unwrap();
+            let stored = entries.lock().unwrap();
+            for req in &requests {
+                match stored.get(&req.entry.id.0) {
+                    Some(entry) => {
+                        assert_eq!(entry.status, QuarantineStatus::Quarantined);
+                        assert!(physical.contains(&req.destination_path));
+                    }
+                    None => assert!(physical.contains(&req.entry.original_path)),
+                }
             }
         }
     }

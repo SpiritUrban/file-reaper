@@ -1116,6 +1116,50 @@ impl trashradar_app::ports::QuarantineManifest for IndexDatabase {
             .map_err(|error| trashradar_domain::error::CoreError::internal(error.to_string()))
     }
 
+    fn insert_entries(
+        &self,
+        entries: &[QuarantineEntry],
+    ) -> std::result::Result<(), trashradar_domain::error::CoreError> {
+        let map_err =
+            |error: rusqlite::Error| trashradar_domain::error::CoreError::internal(error.to_string());
+        let transaction = self.connection.unchecked_transaction().map_err(map_err)?;
+        {
+            let mut statement = transaction
+                .prepare_cached(
+                    "INSERT INTO quarantine_manifest (
+                        entry_id, batch_id, original_path, surrogate_name, size_bytes,
+                        quarantined_at_unix, expires_at_unix, status
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                )
+                .map_err(map_err)?;
+            for entry in entries {
+                statement
+                    .execute(params![
+                        sqlite_integer("quarantine entry id", entry.id.0).map_err(|error| {
+                            trashradar_domain::error::CoreError::internal(error.to_string())
+                        })?,
+                        entry
+                            .batch_id
+                            .map(|id| sqlite_integer("batch id", id.0))
+                            .transpose()
+                            .map_err(|error| {
+                                trashradar_domain::error::CoreError::internal(error.to_string())
+                            })?,
+                        entry.original_path,
+                        entry.surrogate_name,
+                        sqlite_integer("quarantine size", entry.size.0).map_err(|error| {
+                            trashradar_domain::error::CoreError::internal(error.to_string())
+                        })?,
+                        entry.quarantined_at_unix,
+                        entry.expires_at_unix,
+                        quarantine_status_name(entry.status),
+                    ])
+                    .map_err(map_err)?;
+            }
+        }
+        transaction.commit().map_err(map_err)
+    }
+
     fn get_entry(
         &self,
         id: QuarantineEntryId,
@@ -1196,6 +1240,50 @@ impl trashradar_app::ports::QuarantineManifest for IndexDatabase {
         transaction
             .commit()
             .map_err(|error| trashradar_domain::error::CoreError::internal(error.to_string()))
+    }
+
+    fn confirm_batch_with_audit(
+        &self,
+        confirmations: &[(QuarantineEntryId, QuarantineStatus, DestructiveAuditEvent)],
+    ) -> std::result::Result<(), trashradar_domain::error::CoreError> {
+        let map_sql =
+            |error: rusqlite::Error| trashradar_domain::error::CoreError::internal(error.to_string());
+        let map_int =
+            |error: IndexSqliteError| trashradar_domain::error::CoreError::internal(error.to_string());
+        let transaction = self.connection.unchecked_transaction().map_err(map_sql)?;
+        {
+            let mut update = transaction
+                .prepare_cached("UPDATE quarantine_manifest SET status = ?2 WHERE entry_id = ?1")
+                .map_err(map_sql)?;
+            let mut audit = transaction
+                .prepare_cached(
+                    "INSERT INTO destructive_audit (entry_id, batch_id, operation, actor, original_path, size_bytes) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                )
+                .map_err(map_sql)?;
+            for (id, status, event) in confirmations {
+                update
+                    .execute(params![
+                        sqlite_integer("quarantine entry id", id.0).map_err(map_int)?,
+                        quarantine_status_name(*status)
+                    ])
+                    .map_err(map_sql)?;
+                audit
+                    .execute(params![
+                        sqlite_integer("audit entry id", event.entry_id.0).map_err(map_int)?,
+                        event
+                            .batch_id
+                            .map(|batch| sqlite_integer("audit batch id", batch.0))
+                            .transpose()
+                            .map_err(map_int)?,
+                        audit_operation_name(event.operation),
+                        audit_actor_name(event.actor),
+                        event.original_path,
+                        sqlite_integer("audit size", event.size.0).map_err(map_int)?,
+                    ])
+                    .map_err(map_sql)?;
+            }
+        }
+        transaction.commit().map_err(map_sql)
     }
 }
 /// Thread-safe обгортка `IndexDatabase` для [`HashCache`] (rusqlite Connection !Sync).
@@ -2728,6 +2816,104 @@ mod tests {
             .is_err());
         reopened.remove_quarantine_entry(entry.id).unwrap();
         assert_eq!(reopened.get_quarantine_entry(entry.id).unwrap(), None);
+        cleanup(profile_dir);
+    }
+
+    /// T-154: батч-методи manifest — один транзакційний запис, all-or-nothing.
+    #[test]
+    fn quarantine_manifest_batch_writes_are_atomic_t154() {
+        use trashradar_app::ports::QuarantineManifest;
+
+        let profile_dir = temp_profile_dir("quarantine-batch");
+        let database = IndexDatabase::open_profile(&profile_dir).unwrap();
+        let entry = |id: u64| QuarantineEntry {
+            id: QuarantineEntryId(id),
+            batch_id: Some(BatchId(7)),
+            original_path: format!(r"C:\Users\Ada\Videos\raw-{id}.mov"),
+            surrogate_name: format!("{id:08}-raw.mov"),
+            size: ByteSize(1_000 + id),
+            quarantined_at_unix: 1_750_000_000,
+            expires_at_unix: 1_752_592_000,
+            status: QuarantineStatus::InFlight,
+        };
+
+        // Конфлікт посередині (дубль id 2) → відкат УСЬОГО батчу.
+        database.insert_quarantine_entry(&entry(2)).unwrap();
+        QuarantineManifest::insert_entries(&database, &[entry(1), entry(2), entry(3)])
+            .unwrap_err();
+        assert_eq!(
+            database
+                .list_quarantine_entries()
+                .unwrap()
+                .iter()
+                .map(|e| e.id.0)
+                .collect::<Vec<_>>(),
+            vec![2],
+            "невдалий батч не має лишити часткових записів"
+        );
+        database.remove_quarantine_entry(QuarantineEntryId(2)).unwrap();
+
+        // Успішний батч: усі записи одним викликом.
+        QuarantineManifest::insert_entries(&database, &[entry(1), entry(2), entry(3)]).unwrap();
+        assert_eq!(database.list_quarantine_entries().unwrap().len(), 3);
+
+        let audit_for = |id: u64, size: u64| DestructiveAuditEvent {
+            entry_id: QuarantineEntryId(id),
+            batch_id: Some(BatchId(7)),
+            operation: AuditOperation::Reap,
+            actor: AuditActor::User,
+            original_path: format!(r"C:\Users\Ada\Videos\raw-{id}.mov"),
+            size: ByteSize(size),
+        };
+
+        // Невалідний елемент посередині (size > i64::MAX) → відкат УСЬОГО
+        // підтвердження: статуси і аудит незмінні.
+        QuarantineManifest::confirm_batch_with_audit(
+            &database,
+            &[
+                (
+                    QuarantineEntryId(1),
+                    QuarantineStatus::Quarantined,
+                    audit_for(1, 1_001),
+                ),
+                (
+                    QuarantineEntryId(2),
+                    QuarantineStatus::Quarantined,
+                    audit_for(2, u64::MAX),
+                ),
+            ],
+        )
+        .unwrap_err();
+        assert!(database
+            .list_quarantine_entries()
+            .unwrap()
+            .iter()
+            .all(|e| e.status == QuarantineStatus::InFlight));
+        assert!(database.list_destructive_audit().unwrap().is_empty());
+
+        // Успішне батч-підтвердження: статуси + append-only аудит разом.
+        let confirmations: Vec<_> = (1..=3)
+            .map(|id| {
+                (
+                    QuarantineEntryId(id),
+                    QuarantineStatus::Quarantined,
+                    audit_for(id, 1_000 + id),
+                )
+            })
+            .collect();
+        QuarantineManifest::confirm_batch_with_audit(&database, &confirmations).unwrap();
+        assert!(database
+            .list_quarantine_entries()
+            .unwrap()
+            .iter()
+            .all(|e| e.status == QuarantineStatus::Quarantined));
+        let records = database.list_destructive_audit().unwrap();
+        assert_eq!(records.len(), 3);
+        assert!(records
+            .iter()
+            .zip(1u64..)
+            .all(|(record, id)| record.event.entry_id == QuarantineEntryId(id)));
+
         cleanup(profile_dir);
     }
 

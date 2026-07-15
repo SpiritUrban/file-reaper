@@ -448,13 +448,7 @@ pub fn apply_usn_read_outcome(
 
 /// Наступний вільний candidate_id у гарячому індексі.
 pub fn next_candidate_id_from_index(index: &impl HotIndex) -> Result<u64, CoreError> {
-    let max = index
-        .get_all()?
-        .into_iter()
-        .map(|r| r.candidate_id.0)
-        .max()
-        .unwrap_or(0);
-    Ok(max.saturating_add(1))
+    Ok(index.max_candidate_id()?.saturating_add(1))
 }
 
 /// Зручність: просунути курсор без змін (порожня дельта).

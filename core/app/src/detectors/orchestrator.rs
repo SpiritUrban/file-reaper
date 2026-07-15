@@ -131,8 +131,14 @@ impl<'a> DetectorOrchestrator<'a> {
             let hits = self.registry.evaluate_record(record);
             result.stats.hits += hits.len() as u64;
             if let Some(primary) = hits.first() {
-                result.updated.push(apply_primary_hit(record, primary));
+                let applied = apply_primary_hit(record, primary);
                 result.stats.records_updated += 1;
+                // Hot-індекс персистить лише category/safety (CompactFileRecord
+                // T-015 не зберігає detector_id/explanation) — незмінений
+                // запис не жене upsert по індексу на мільйони записів (T-154).
+                if applied.category != record.category || applied.safety != record.safety {
+                    result.updated.push(applied);
+                }
             } else if clear_unmatched
                 && record.category != CategoryId::Uncategorized
                 && !is_duplicates_cascade_primary(record)
@@ -146,10 +152,10 @@ impl<'a> DetectorOrchestrator<'a> {
         result
     }
 
-    /// Повний прогін hot-індексу: get_all → батчі → upsert оновлених.
+    /// Повний прогін hot-індексу: get_all → батчі → один upsert оновлених.
     ///
-    /// Кооперативна відміна між батчами. Часткові upsert уже застосовані
-    /// при cancel — валідний стан (як scan cancel, T-033).
+    /// Кооперативна відміна між батчами. При cancel оновлення не
+    /// застосовуються (індекс лишається в стані до прогону) — валідний стан.
     pub fn categorize_index(
         &self,
         index: &dyn HotIndex,
@@ -243,21 +249,28 @@ impl<'a> DetectorOrchestrator<'a> {
             ..CategorizationStats::default()
         };
 
+        // Оновлення накопичуються і застосовуються одним upsert наприкінці:
+        // upsert_batch платить O(індекс) за виклик (мапа позицій), тож
+        // per-чанковий flush на індексі в мільйони записів квадратичний
+        // (T-154). При cancel нічого не застосовано — валідний стан (жодних
+        // часткових перерахунків).
+        let mut updated: Vec<FileRecord> = Vec::new();
         for chunk in snapshot.chunks(self.batch_size) {
             if cancel.is_cancelled() {
                 stats.cancelled = true;
                 break;
             }
-            let batch = self.run_batch(chunk, clear_unmatched);
+            let mut batch = self.run_batch(chunk, clear_unmatched);
             stats.records_seen += batch.stats.records_seen;
             stats.records_skipped_keep += batch.stats.records_skipped_keep;
             stats.hits += batch.stats.hits;
             stats.records_updated += batch.stats.records_updated;
             stats.records_cleared += batch.stats.records_cleared;
             stats.batches += 1;
-            if !batch.updated.is_empty() {
-                index.upsert_batch(batch.updated)?;
-            }
+            updated.append(&mut batch.updated);
+        }
+        if !stats.cancelled && !updated.is_empty() {
+            index.upsert_batch(updated)?;
         }
         Ok(stats)
     }

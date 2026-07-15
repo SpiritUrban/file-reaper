@@ -1,0 +1,23 @@
+[package]
+name = "trashradar-bench-reap"
+description = "Бенчмарк-гейт транзакційного reap: 1 000 файлів на одному томі < 2 с (T-154, architecture.md §15)."
+version = "0.1.0"
+edition = "2021"
+license = "UNLICENSED"
+publish = false
+
+[[bin]]
+name = "reap-bench"
+path = "src/main.rs"
+
+[dependencies]
+trashradar-domain = { path = "../../core/domain" }
+trashradar-app = { path = "../../core/app" }
+trashradar-index-sqlite = { path = "../../core/infra/index-sqlite" }
+trashradar-quarantine-fs = { path = "../../core/infra/quarantine-fs" }
+trashradar-platform-win = { path = "../../core/infra/platform-win" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = 3

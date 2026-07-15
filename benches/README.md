@@ -7,6 +7,21 @@
 Бенчмарки винесені з `core/` (окремі крейти зі своїм target-каталогом),
 бо їхні еталонні сценарії спільні для кількох крейтів і для CI-гейта.
 
+## Мапа цілей §15 → автозаміри (T-154)
+
+Кожна метрика architecture.md §15 має автозамір; регрес блокує CI жорсткими
+стелями та детермінованими інваріантами. Дві метрики, де поточна реалізація
+ще не досягає цілі §15 (борг зафіксовано у progress.md, відхилення T-154),
+мають ціль як WARN-лінію + катастрофічний guard як жорстку стелю.
+
+| Метрика §15 | Ціль | Автозамір | Гейт у CI |
+|---|---|---|---|
+| Перша цифра (NTFS, ~1.5 млн файлів, теплий диск) | < 10 с | `scan-bench` (T-035) | **стеля 10 с** (synthetic конвеєр); живий том — локально `--volume` |
+| Повторний запуск (USN-дельта) | < 2 с | `rerun-bench` (T-154) | ціль 2 с — WARN (борг відновлення з SQLite); **guard 60 с** ловить квадратичні регреси |
+| Превью P0: кеш / генерація | < 100 мс / < 600 мс | тести `trashradar-app` `preview` (T-076) | джоб Core `cargo test --workspace` — **тест падає** при перевищенні |
+| Reap 1 000 файлів на одному томі | < 2 с | `reap-bench` (T-154) | ціль 2 с — WARN (борг per-file транзакцій); **guard 10 с** |
+| RAM Core після скану 1 ТБ | < 300 МБ | `scan-bench` `index_memory_bytes` (**стеля 300 МіБ**) + `index-bench` (регрес >15% жорстко) | детермінований hard-gate; повний RSS-профіль процесу — T-157 |
+
 ## `index-bench` — гейт in-memory індексу (T-019)
 
 Фіксує пам'ять і швидкість `InMemoryIndex` на детермінованому наборі з
@@ -92,3 +107,57 @@ cargo run --release --manifest-path benches/dup-bench/Cargo.toml -- --bless   # 
 
 Тайминги — як у T-019/T-035: на shared-runner WARN + absolute ceiling;
 `--strict` — жорсткий 15%-регрес локально.
+
+## `rerun-bench` — гейт повторного запуску (T-154)
+
+Ціль §15: **повторний запуск (USN-дельта) < 2 с до актуальної цифри**.
+Синтетичний детермінований корпус: 1 500 000 записів у SQLite (сетап, не
+гейтиться) → гейтований конвеєр рестарту:
+
+1. відновлення in-memory індексу з SQLite (T-017);
+2. USN-дельта ~11 тис. подій: create/modify/delete/rename (T-030);
+3. перерахунок предикатних детекторів (T-038);
+4. агрегація унікальної цифри (T-054).
+
+```sh
+cargo run --release --manifest-path benches/rerun-bench/Cargo.toml              # CI check
+cargo run --release --manifest-path benches/rerun-bench/Cargo.toml -- --strict  # hard timing
+cargo run --release --manifest-path benches/rerun-bench/Cargo.toml -- --bless   # rewrite baseline
+```
+
+| Метрика | Гейт | Пояснення |
+|---|---|---|
+| `rerun_total_millis` | WARN на регрес; ціль §15 2 с — WARN; **guard 60 с жорстко** | увесь конвеєр рестарту; guard ловить квадратичні шляхи (до фіксів T-154 — хвилини+) |
+| `restore_millis` / `usn_apply_millis` / `recalc_millis` / `totals_millis` | WARN + guard | розбивка фаз для діагностики регресу |
+| `files_after_delta` | **жорстко = 1 502 000** | create/delete/rename застосовані точно |
+
+Корпус свідомо песимістичний: **усі** 1.5 млн файлів — кандидати у
+persistent-індексі (реальний обсяг залежить від детекторів). Ціль §15 2 с
+на ньому поки не досягається (домінує відновлення з SQLite ~5 с) — див.
+відхилення T-154 у progress.md.
+
+## `reap-bench` — гейт транзакційного reap (T-154)
+
+Ціль §15: **reap 1 000 файлів на одному томі < 2 с**. Реальна FS
+(temp-каталог = один том), справжні `NativeQuarantineFs` + SQLite-manifest —
+повний шлях T-079 (durable in_flight → атомарний move → підтвердження +
+аудит). Прогрівний батч (AV/кеші FS/WAL) — не гейтиться; вимірюється другий
+(«теплий», як live-режим scan-bench).
+
+```sh
+cargo run --release --manifest-path benches/reap-bench/Cargo.toml              # CI check
+cargo run --release --manifest-path benches/reap-bench/Cargo.toml -- --strict  # hard timing
+cargo run --release --manifest-path benches/reap-bench/Cargo.toml -- --bless   # rewrite baseline
+```
+
+| Метрика | Гейт | Пояснення |
+|---|---|---|
+| `reap_batch_millis` | WARN на регрес; ціль §15 2 с — WARN; **guard 10 с жорстко** | журнал + move + підтвердження на 1 000 файлів |
+| `reaped_count` / стан manifest | **жорстко** | всі 1 000 переміщені і підтверджені |
+
+Поточний per-file транзакційний шлях T-079 (~2 мс/файл: 2 durable-коміти +
+аудит + move) коливається довкола цілі §15 — борг батчування
+manifest-транзакцій у progress.md (відхилення T-154). Перед заміром — пауза
+1.5 с: реал-тайм AV сканує щойно створені файли і спотворює замір до ~7×.
+
+Windows-only (WinAPI move/identity); на інших ОС — no-op.

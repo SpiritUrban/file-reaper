@@ -61,7 +61,7 @@ jobs:
       - run: cargo clippy -p trashradar-shell -- -D warnings
 
   bench:
-    name: Bench (index + scan + dup regression gates)
+    name: Bench (§15 regression gates)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -74,6 +74,8 @@ jobs:
             benches/index-bench
             benches/scan-bench
             benches/dup-bench
+            benches/rerun-bench
+            benches/reap-bench
 
       # T-019: in-memory index — memory hard-gate >15%; timings WARN + ceiling
       - name: index-bench (T-019)
@@ -94,6 +96,22 @@ jobs:
       # T-066: duplicate cascade first vs warm-cache session
       - name: dup-bench (T-066)
         working-directory: benches/dup-bench
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
+          cargo run --release
+
+      # T-154: restart pipeline (SQLite restore + USN delta + recalc) — §15 ceiling 2s
+      - name: rerun-bench (T-154)
+        working-directory: benches/rerun-bench
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
+          cargo run --release
+
+      # T-154: transactional reap of 1000 files on real FS — §15 ceiling 2s
+      - name: reap-bench (T-154)
+        working-directory: benches/reap-bench
         run: |
           cargo fmt --check
           cargo clippy --all-targets -- -D warnings
