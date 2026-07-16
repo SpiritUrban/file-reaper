@@ -112,6 +112,10 @@ impl PreviewRuntime {
             Arc::new(trashradar_app::preview::VideoKeyFrameSource(
                 Arc::clone(&video) as Arc<dyn VideoFrameSource>,
             )),
+            // Остання ланка: асоційована іконка (значок .exe / типу файла) —
+            // для коду/інсталяторів/документів без справжньої мініатюри плитка
+            // показує фірмову іконку замість generic-гліфа.
+            Arc::new(trashradar_preview::WindowsShellIconSource::new()),
         ];
         let cache = Arc::new(PreviewCacheManager::new(cache_dir, db));
         // 2 воркери: превью — фонове навантаження, не має конкурувати

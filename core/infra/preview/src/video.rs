@@ -228,6 +228,17 @@ fn discover_ffmpeg() -> Option<PathBuf> {
     } else {
         "ffmpeg"
     };
+    // Поруч із застосунком (бандл / ручне розміщення) — до PATH, щоб вкладений
+    // ffmpeg мав пріоритет над випадковим системним. Досить покласти
+    // `ffmpeg.exe` у теку з застосунком — відео-превью запрацюють без
+    // налаштування середовища (мультиплатформний sidecar, T-071).
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(candidate) = exe.parent().map(|dir| dir.join(exe_name)) {
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
     let path_var = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path_var) {
         let candidate = dir.join(exe_name);

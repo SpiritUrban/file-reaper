@@ -76,6 +76,44 @@ impl ThumbnailSource for WindowsShellThumbnailSource {
     }
 }
 
+/// Остання ланка ланцюжка (T-069+): **асоційована іконка** файла з Shell
+/// через `IShellItemImageFactory::GetImage` з `SIIGBF_ICONONLY`. На відміну від
+/// [`WindowsShellThumbnailSource`] (THUMBNAILONLY — лише справжні мініатюри),
+/// це джерело віддає фірмову/типову іконку: для `.exe` — вбудований значок
+/// застосунку (напр. GitHubDesktop.exe), для коду/документів — значок типу
+/// файла чи асоційованого застосунку. Ставиться **після** мініатюр і власних
+/// декодерів, щоб зображення/відео все одно показувались справжнім кадром, а
+/// іконка лише заповнювала прогалину замість generic-гліфа плитки.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct WindowsShellIconSource;
+
+impl WindowsShellIconSource {
+    /// Створити джерело.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl ThumbnailSource for WindowsShellIconSource {
+    fn thumbnail(&self, path: &str, max_edge: u32) -> Result<Option<RawThumbnail>, CoreError> {
+        if path.is_empty() {
+            return Err(CoreError::invalid_argument(
+                "Порожній шлях до файла превью.",
+            ));
+        }
+        let edge = max_edge.max(1);
+        #[cfg(windows)]
+        {
+            win::shell_icon(path, edge)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (path, edge);
+            Ok(None)
+        }
+    }
+}
+
 #[cfg(windows)]
 mod win {
     use std::ffi::c_void;
@@ -182,6 +220,9 @@ mod win {
     /// `SIIGBF_RESIZETOFIT` (0) | `SIIGBF_THUMBNAILONLY` (0x8): вписати в розмір,
     /// лише справжні мініатюри — без generic-іконок.
     const SIIGBF_THUMBNAILONLY: u32 = 0x0000_0008;
+    /// `SIIGBF_ICONONLY` (0x4): асоційована іконка (значок .exe / типу файла),
+    /// коли справжньої мініатюри немає.
+    const SIIGBF_ICONONLY: u32 = 0x0000_0004;
     /// `DIB_RGB_COLORS`.
     const DIB_RGB_COLORS: u32 = 0;
     /// `BI_RGB`.
@@ -197,11 +238,24 @@ mod win {
     /// Отримати системну мініатюру файла. `Ok(None)` — системної мініатюри немає.
     pub fn shell_thumbnail(path: &str, max_edge: u32) -> Result<Option<RawThumbnail>, CoreError> {
         let _apartment = ComApartment::enter()?;
-        unsafe { extract(path, max_edge) }
+        unsafe { extract(path, max_edge, SIIGBF_THUMBNAILONLY) }
     }
 
-    /// Внутрішнє видобування (COM уже ініціалізовано на потоці).
-    unsafe fn extract(path: &str, max_edge: u32) -> Result<Option<RawThumbnail>, CoreError> {
+    /// Отримати асоційовану іконку файла (значок .exe / типу). `Ok(None)` —
+    /// shell не дав зображення. Розмір іконок обмежений; завеликий запит Shell
+    /// може відхилити, тому просимо не більше 256px — далі fit_within downstream.
+    pub fn shell_icon(path: &str, max_edge: u32) -> Result<Option<RawThumbnail>, CoreError> {
+        let _apartment = ComApartment::enter()?;
+        unsafe { extract(path, max_edge.min(256), SIIGBF_ICONONLY) }
+    }
+
+    /// Внутрішнє видобування (COM уже ініціалізовано на потоці). `flags` —
+    /// `SIIGBF_THUMBNAILONLY` (справжня мініатюра) або `SIIGBF_ICONONLY` (іконка).
+    unsafe fn extract(
+        path: &str,
+        max_edge: u32,
+        flags: u32,
+    ) -> Result<Option<RawThumbnail>, CoreError> {
         let wpath = wide(path);
         let mut factory_ptr: *mut c_void = std::ptr::null_mut();
         let hr = SHCreateItemFromParsingName(
@@ -222,13 +276,13 @@ mod win {
             cy: max_edge as i32,
         };
         let mut hbitmap: *mut c_void = std::ptr::null_mut();
-        let hr_img = ((*vtbl).get_image)(factory_ptr, size, SIIGBF_THUMBNAILONLY, &mut hbitmap);
+        let hr_img = ((*vtbl).get_image)(factory_ptr, size, flags, &mut hbitmap);
 
         // Незалежно від результату — звільняємо фабрику.
         ((*vtbl).release)(factory_ptr);
 
         if hr_img < 0 || hbitmap.is_null() {
-            // Немає системної мініатюри для цього файла (THUMBNAILONLY).
+            // Немає зображення для цього файла з цими прапорцями.
             return Ok(None);
         }
 
@@ -335,6 +389,33 @@ mod tests {
         let src = WindowsShellThumbnailSource::new();
         let out = src.thumbnail("/tmp/whatever.png", 128).expect("no error");
         assert!(out.is_none());
+    }
+
+    #[test]
+    fn icon_source_empty_path_is_invalid_argument() {
+        let src = WindowsShellIconSource::new();
+        let err = src.thumbnail("", 128).expect_err("порожній шлях = помилка");
+        assert_eq!(
+            err.code,
+            trashradar_domain::error::ErrorCode::InvalidArgument
+        );
+    }
+
+    /// `.exe` має вбудовану іконку — джерело іконок віддає її навіть без
+    /// thumbnail-провайдера (значки не потребують десктоп-shell так, як
+    /// мініатюри). М'яка перевірка (Ok), щоб CI без shell не падав; на робочій
+    /// станції очікуємо Some.
+    #[cfg(windows)]
+    #[test]
+    fn icon_source_on_real_exe_yields_icon_without_error() {
+        let src = WindowsShellIconSource::new();
+        let exe = std::env::current_exe().expect("current exe");
+        let out = src.thumbnail(&exe.to_string_lossy(), 128);
+        assert!(out.is_ok(), "валідний .exe: очікували Ok(_), got {out:?}");
+        if let Ok(Some(icon)) = out {
+            assert!(icon.width > 0 && icon.height > 0);
+            assert_eq!(icon.bgra.len(), (icon.width * icon.height * 4) as usize);
+        }
     }
 
     /// DoD T-069 (elevated не потрібен, але потрібен десктоп-shell з
