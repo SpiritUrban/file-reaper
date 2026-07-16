@@ -44,6 +44,7 @@ import { command, ipcErrorMessage, subscribe } from "@/ipc/client";
 import { formatBytes } from "@/store/format";
 import { useReapedIds } from "@/store/reaped";
 import { selectionStore, useMarkedSummary } from "@/store/selection";
+import { tileContextMenuStore } from "@/store/tileContextMenu";
 import type {
   Candidate,
   DuplicatesGroupsAck,
@@ -144,6 +145,10 @@ function GroupRow({
               candidate={memberToCandidate(member, group.size, keepId)}
               marked={member.candidateId !== keepId}
               onActivate={() => onSelectKeep(member.candidateId)}
+              onSecondaryActivate={(candidate, event) => {
+                event.preventDefault();
+                tileContextMenuStore.open(candidate, event.clientX, event.clientY);
+              }}
             />
           </div>
         ))}

@@ -808,6 +808,13 @@ pub async fn scan_start<R: Runtime>(
             let scanner = AutoVolumeScanner {
                 user_excluded: settings.scan.excluded_paths.clone(),
             };
+            // Глобально-унікальний candidate_id на всю сесію: per-volume сканери
+            // (scan-mft `Batcher`, walk) видають id з 0 у КОЖНОМУ томі — тож без
+            // цього зсуву id колізіонують між томами (C:/D:/…), і `find_record`
+            // повертає файл не того тому → превʼю/«відкрити»/reap б'ють по чужому
+            // файлу. Централізуємо тут, у єдиному стоці: працює для будь-якої
+            // стратегії (MFT / walk / USN-дельта).
+            let mut next_global_id: u64 = 0;
             let result = run_scan_session(
                 &volumes,
                 &strategies,
@@ -817,9 +824,16 @@ pub async fn scan_start<R: Runtime>(
                     tracing::info!(target: "scan_diag", session_id, volume = %p.volume, phase = ?p.phase, stage = p.stage, files_indexed = p.files_indexed, volume_files_indexed = p.volume_files_indexed, volume_files_total = ?p.volume_files_total, stage_units_done = p.stage_units_done, stage_units_total = ?p.stage_units_total, volume_index = p.volume_index, volume_count = p.volume_count, done = p.done, cancelled = p.cancelled, elapsed_ms = session_started.elapsed().as_millis(), "scan progress emitted");
                     emit_progress(&app2, &p);
                 },
-                |vol, batch| {
+                |vol, mut batch| {
                     let batch_started = Instant::now();
                     let batch_len = batch.len();
+                    // Перепризначаємо id ПЕРЕД індексом і детекторами, щоб усе
+                    // нижче (hits, also_in, live totals, surrogate-імена reap)
+                    // бачило той самий унікальний id.
+                    for record in &mut batch {
+                        record.candidate_id = CandidateId(next_global_id);
+                        next_global_id += 1;
+                    }
                     let index_before = HotIndex::len(index.as_ref()).unwrap_or(0);
                     // 1) сирі записи в індекс
                     index.insert_batch(batch.clone())?;

@@ -63,6 +63,7 @@ import { applySearchQuery, useSearchState } from "@/store/search";
 import { selectionStore, useMarkedSummary } from "@/store/selection";
 import { keepCandidate, useKeptIds } from "@/store/keep";
 import { useReapedIds } from "@/store/reaped";
+import { tileContextMenuStore } from "@/store/tileContextMenu";
 import { toast } from "@/store/toasts";
 import type { Candidate, CategoryId } from "@/ipc/types";
 
@@ -270,12 +271,16 @@ export function CategoryScreen({ categoryId }: CategoryScreenProps) {
     }
   };
 
-  // T-143: ПКМ у Live Preview = протилежна дія (reap↔keep дзеркально); поза
-  // режимом / при none — не перехоплюємо (свого контекст-меню немає).
+  // ПКМ: у Live Preview з озброєною дією — протилежна дія (reap↔keep, T-143);
+  // інакше — контекстне меню плитки (копіювати шлях/ім'я, відкрити в папці,
+  // Keep, у Quarantine).
   const handleSecondary = (candidate: Candidate, event: React.MouseEvent) => {
-    if (!livePreview.enabled || armed === "none") return;
     event.preventDefault();
-    applyArmedAction(candidate, oppositeAction(armed));
+    if (livePreview.enabled && armed !== "none") {
+      applyArmedAction(candidate, oppositeAction(armed));
+      return;
+    }
+    tileContextMenuStore.open(candidate, event.clientX, event.clientY);
   };
 
   // T-123: перемістити фокус на delta позицій (±1 = ліво/право, ±columns =

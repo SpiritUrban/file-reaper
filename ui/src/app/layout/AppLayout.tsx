@@ -10,6 +10,7 @@ import { useLocation, useNavigate } from "react-router-dom";
 import { DetailsPanel } from "@/components/DetailsPanel";
 import { ScanActivityBanner } from "@/components/ScanActivityBanner";
 import { ScanStartOverlay } from "@/components/ScanStartOverlay";
+import { TileContextMenu } from "@/components/TileContextMenu";
 import { ToastViewport } from "@/components/ToastViewport";
 import { CategoryScreen } from "@/features/category/CategoryScreen";
 import { CleanupSummaryScreen } from "@/features/cleanup-summary/CleanupSummaryScreen";
@@ -221,6 +222,9 @@ export function AppLayout() {
       <ScanStartOverlay />
       {/* Єдиний деструктивний оверлей (T-135): REAP-кнопка/Ctrl+Enter. */}
       <ReapConfirmOverlay />
+      {/* Контекстне меню плитки (ПКМ): копіювати шлях/ім'я, відкрити в папці,
+          Keep, у Quarantine. Один екземпляр на застосунок. */}
+      <TileContextMenu />
     </div>
   );
 }
