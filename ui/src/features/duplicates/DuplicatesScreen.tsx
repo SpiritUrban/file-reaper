@@ -42,6 +42,7 @@ import { useCallback, useEffect, useState } from "react";
 import { CandidateTile } from "@/components/CandidateTile";
 import { command, ipcErrorMessage, subscribe } from "@/ipc/client";
 import { formatBytes } from "@/store/format";
+import { useReapedIds } from "@/store/reaped";
 import { selectionStore, useMarkedSummary } from "@/store/selection";
 import type {
   Candidate,
@@ -181,7 +182,16 @@ export function DuplicatesScreen() {
     };
   }, [load]);
 
-  const groups = ack?.groups ?? [];
+  // T-138: reaped-члени вже у Quarantine — прибираємо їх з груп одразу (екран
+  // рефетчиться лише на duplicates.cascade_updated, тож без цього вони б висіли
+  // мертвими до наступного каскаду). Група, де лишилась ≤1 копія, — уже не дубль.
+  const reapedIds = useReapedIds();
+  const groups = (ack?.groups ?? [])
+    .map((group) => ({
+      ...group,
+      members: group.members.filter((m) => !reapedIds.has(m.candidateId)),
+    }))
+    .filter((group) => group.members.length >= 2);
   const state = ack?.state;
   // T-129: показані groups — ще попередній підтверджений набір, поки триває
   // новий каскад (T-061 refining). Не плутати з "0 груп ще ніколи не було".

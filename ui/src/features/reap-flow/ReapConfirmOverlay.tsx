@@ -48,6 +48,7 @@ import { useAppState } from "@/store/appState";
 import { formatBytes } from "@/store/format";
 import { useThumbnail } from "@/store/preview";
 import { reapOverlayStore, useReapOverlayOpen } from "@/store/reapOverlay";
+import { reapedStore } from "@/store/reaped";
 import { selectionStore, useMarkedSummary } from "@/store/selection";
 import { toast } from "@/store/toasts";
 import type { Candidate, ReapExecuteAck, QuarantineRestoreOutcome, VolumeUsageInfo } from "@/ipc/types";
@@ -242,10 +243,15 @@ export function ReapConfirmOverlay() {
   const submitReap = () => {
     if (candidates.length === 0 || submitting) return;
     setSubmitting(true);
+    const reapedIds = candidates.map((c) => c.id);
     command<ReapExecuteAck>("reap.execute", {
-      payload: { candidateIds: candidates.map((c) => c.id) },
+      payload: { candidateIds: reapedIds },
     })
       .then((ack) => {
+        // Reaped-файли фізично переміщено — ховаємо їх з усіх категорій сесії
+        // одразу (Core уже застосував Decision::Keep, але сітка не рефетчиться
+        // на totals-події, T-138); selectionStore.clear() лише знімає позначення.
+        reapedStore.reap(reapedIds);
         selectionStore.clear();
         reapOverlayStore.close();
         toast({
@@ -258,6 +264,8 @@ export function ReapConfirmOverlay() {
                 payload: { batchId: ack.batchId },
               })
                 .then(() => {
+                  // Файли повернулись на диск — повертаємо плитки у сітку сесії.
+                  reapedStore.unreap(reapedIds);
                   toast({ message: "Відновлено з Quarantine", tone: "success" });
                 })
                 .catch((err) => {

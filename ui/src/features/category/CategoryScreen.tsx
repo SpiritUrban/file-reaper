@@ -62,6 +62,7 @@ import { quarantinePreviewTargetStore } from "@/store/quarantinePreviewTarget";
 import { applySearchQuery, useSearchState } from "@/store/search";
 import { selectionStore, useMarkedSummary } from "@/store/selection";
 import { keepCandidate, useKeptIds } from "@/store/keep";
+import { useReapedIds } from "@/store/reaped";
 import { toast } from "@/store/toasts";
 import type { Candidate, CategoryId } from "@/ipc/types";
 
@@ -86,22 +87,27 @@ export function CategoryScreen({ categoryId }: CategoryScreenProps) {
   // Поза Live Preview — Keep одразу ховає (T-117). У Live Preview keep/marked
   // лишаються на місці затемненими (§10.6), доки `hideProcessed` не сховає їх.
   const keptIds = useKeptIds();
+  // T-138: reaped-файли переміщено у Quarantine — ховаються завжди, навіть у
+  // Live Preview без hideProcessed (на відміну від keep, який там лишається).
+  const reapedIds = useReapedIds();
   // Реактивність до selectionStore (плитки + hideProcessed-фільтр).
   const markedSummary = useMarkedSummary();
   const livePreview = useLivePreview();
   const candidates = useMemo(() => {
     if (livePreview.enabled) {
-      // T-147: за замовчуванням не викидаємо keep — сітка не стрибає.
-      if (!livePreview.hideProcessed) return fetched;
+      // T-147: за замовчуванням не викидаємо keep — сітка не стрибає (але
+      // reaped завжди зникає: файла вже нема на диску).
+      if (!livePreview.hideProcessed) return fetched.filter((c) => !reapedIds.has(c.id));
       return fetched.filter(
-        (c) => !keptIds.has(c.id) && !selectionStore.isMarked(c.id),
+        (c) => !reapedIds.has(c.id) && !keptIds.has(c.id) && !selectionStore.isMarked(c.id),
       );
     }
-    return fetched.filter((c) => !keptIds.has(c.id));
+    return fetched.filter((c) => !reapedIds.has(c.id) && !keptIds.has(c.id));
     // markedSummary.count — інвалідація при mark/unmark (hideProcessed).
   }, [
     fetched,
     keptIds,
+    reapedIds,
     livePreview.enabled,
     livePreview.hideProcessed,
     markedSummary.count,
