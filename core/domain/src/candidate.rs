@@ -187,6 +187,31 @@ pub struct FileAttributes {
     pub is_temporary: bool,
 }
 
+impl FileAttributes {
+    /// Дегідратований хмарний плейсхолдер (OneDrive / Google DriveFS / інший
+    /// HSM-провайдер): вміст файла НЕ локальний, будь-яке читання «гідратує»
+    /// його — тобто тягне з хмари синхронною блокуючою мережевою операцією
+    /// (а офлайн — блокує). Визначається за raw Windows-бітами (зберігаються
+    /// в індексі через `raw_bits`): `OFFLINE`, `RECALL_ON_OPEN`,
+    /// `RECALL_ON_DATA_ACCESS`. Повністю завантажений локально файл не має
+    /// жодного з них.
+    ///
+    /// Каскад дублікатів (`app::duplicates`) пропускає такі файли: інакше
+    /// stage 2 (head+tail 64 КіБ кожного файла size-колізії) завантажив би
+    /// гігабайти хмарного вмісту й міг зависнути назавжди на першому ж
+    /// офлайн-плейсхолдері.
+    pub fn is_cloud_dehydrated(&self) -> bool {
+        const FILE_ATTRIBUTE_OFFLINE: u32 = 0x0000_1000;
+        const FILE_ATTRIBUTE_RECALL_ON_OPEN: u32 = 0x0004_0000;
+        const FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
+        self.raw_bits
+            & (FILE_ATTRIBUTE_OFFLINE
+                | FILE_ATTRIBUTE_RECALL_ON_OPEN
+                | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS)
+            != 0
+    }
+}
+
 /// Запис кандидата на видалення, збережений у persistent-індексі.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileRecord {
@@ -221,6 +246,23 @@ pub enum FileRecordSort {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cloud_dehydrated_detects_recall_and_offline_bits() {
+        let cloud = |bits: u32| FileAttributes {
+            raw_bits: bits,
+            ..Default::default()
+        };
+        // OFFLINE / RECALL_ON_OPEN / RECALL_ON_DATA_ACCESS — кожен окремо.
+        assert!(cloud(0x0000_1000).is_cloud_dehydrated());
+        assert!(cloud(0x0004_0000).is_cloud_dehydrated());
+        assert!(cloud(0x0040_0000).is_cloud_dehydrated());
+        // Разом зі звичайними бітами (READONLY|ARCHIVE) — все одно так.
+        assert!(cloud(0x0040_0000 | 0x0000_0021).is_cloud_dehydrated());
+        // Повністю локальний файл (ARCHIVE|READONLY) — ні.
+        assert!(!cloud(0x0000_0021).is_cloud_dehydrated());
+        assert!(!FileAttributes::default().is_cloud_dehydrated());
+    }
 
     #[test]
     fn classifies_representative_extensions_per_kind() {

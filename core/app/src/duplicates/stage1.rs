@@ -17,11 +17,17 @@ pub struct SizeStageResult {
 ///
 /// - пропускає [`Decision::Keep`];
 /// - size==0 відкидає domain-функція;
-/// - лише [`CandidateUnit::File`] (папки-одиниці не дублікати).
+/// - лише [`CandidateUnit::File`] (папки-одиниці не дублікати);
+/// - пропускає дегідратовані хмарні плейсхолдери (OneDrive/DriveFS):
+///   [`FileAttributes::is_cloud_dehydrated`] — щоб stage 2/3 не гідратували
+///   (не тягли з хмари) і не зависали на офлайн-файлах.
 pub fn run_size_stage<'a>(records: impl IntoIterator<Item = &'a FileRecord>) -> SizeStageResult {
     let mut files_seen = 0u64;
     let groups = group_by_exact_size(records.into_iter().filter_map(|r| {
-        if r.unit != CandidateUnit::File || r.decision == Decision::Keep {
+        if r.unit != CandidateUnit::File
+            || r.decision == Decision::Keep
+            || r.attributes.is_cloud_dehydrated()
+        {
             return None;
         }
         files_seen += 1;
@@ -89,6 +95,21 @@ mod tests {
         assert_eq!(out.stats.files_seen, 2);
         assert_eq!(out.groups.len(), 1);
         assert_eq!(out.groups[0].members.len(), 2);
+    }
+
+    /// Дегідратований хмарний плейсхолдер (OneDrive/DriveFS) не потрапляє у
+    /// size-групи — інакше stage 2 гідратував би його читанням head/tail.
+    #[test]
+    fn run_skips_cloud_dehydrated_placeholders() {
+        // 0x400000 = FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS.
+        let mut cloud = rec(20, 700);
+        cloud.attributes.raw_bits = 0x0040_0000;
+        assert!(cloud.attributes.is_cloud_dehydrated());
+        let records = [cloud, rec(21, 700), rec(22, 700)];
+        let out = run_size_stage(&records);
+        assert_eq!(out.stats.files_seen, 2, "хмарний плейсхолдер не рахується");
+        assert_eq!(out.groups.len(), 1);
+        assert_eq!(out.groups[0].members.len(), 2, "лише два локальні файли");
     }
 
     struct MemIndex {

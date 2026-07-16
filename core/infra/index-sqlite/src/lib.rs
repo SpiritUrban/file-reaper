@@ -39,6 +39,32 @@ const SCHEMA_VERSION_V7: i64 = 7;
 const LATEST_SCHEMA_VERSION: i64 = SCHEMA_VERSION_V7;
 const WRITER_QUEUE_CHANNEL_CLOSED: &str = "sqlite index writer queue is closed";
 
+/// Вставка запису manifest, ідемпотентна щодо ЗАЛИШКОВОГО `in_flight` рядка.
+///
+/// `entry_id`/`surrogate_name` детерміновані з candidate_id, тож перерваний
+/// reap (move не стартував/не докотився → рядок лишився `in_flight` до
+/// startup-reconcile, T-084) створює для того самого кандидата PRIMARY KEY.
+/// Без `ON CONFLICT` повторний reap у тій самій сесії падав би на UNIQUE, і
+/// ЖОДЕН файл батчу не потрапляв би в карантин, доки застосунок не
+/// перезапустять. `DO UPDATE ... WHERE status='in_flight'` перезаписує лише
+/// такий залишок (resume перерваного reap) — термінальні `quarantined`/
+/// `restored`/`purged` рядки лишаються недоторканими (предикат хибний → no-op,
+/// без помилки). Джерело гарантовано на місці й незмінне: `validate_file_identity`
+/// (T-086) відпрацював перед цим insert.
+const QUARANTINE_ENTRY_UPSERT_SQL: &str = "INSERT INTO quarantine_manifest (
+        entry_id, batch_id, original_path, surrogate_name, size_bytes,
+        quarantined_at_unix, expires_at_unix, status
+     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+     ON CONFLICT(entry_id) DO UPDATE SET
+        batch_id = excluded.batch_id,
+        original_path = excluded.original_path,
+        surrogate_name = excluded.surrogate_name,
+        size_bytes = excluded.size_bytes,
+        quarantined_at_unix = excluded.quarantined_at_unix,
+        expires_at_unix = excluded.expires_at_unix,
+        status = excluded.status
+     WHERE quarantine_manifest.status = 'in_flight'";
+
 /// Migration v1 creates the persistent file-record layer used by scanner output and
 /// MVP detectors. The migration runner executes this script for databases created
 /// by T-010; later tasks add the batched writer (T-013) and paged read API (T-014).
@@ -727,10 +753,7 @@ impl IndexDatabase {
     /// Прочитати запис кешу хешів (без перевірки size+mtime — це app-шар).
     pub fn insert_quarantine_entry(&self, entry: &QuarantineEntry) -> Result<()> {
         self.connection.execute(
-            "INSERT INTO quarantine_manifest (
-                entry_id, batch_id, original_path, surrogate_name, size_bytes,
-                quarantined_at_unix, expires_at_unix, status
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            QUARANTINE_ENTRY_UPSERT_SQL,
             params![
                 sqlite_integer("quarantine entry id", entry.id.0)?,
                 entry
@@ -1126,12 +1149,7 @@ impl trashradar_app::ports::QuarantineManifest for IndexDatabase {
         let transaction = self.connection.unchecked_transaction().map_err(map_err)?;
         {
             let mut statement = transaction
-                .prepare_cached(
-                    "INSERT INTO quarantine_manifest (
-                        entry_id, batch_id, original_path, surrogate_name, size_bytes,
-                        quarantined_at_unix, expires_at_unix, status
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                )
+                .prepare_cached(QUARANTINE_ENTRY_UPSERT_SQL)
                 .map_err(map_err)?;
             for entry in entries {
                 statement
@@ -2840,26 +2858,49 @@ mod tests {
             status: QuarantineStatus::InFlight,
         };
 
-        // Конфлікт посередині (дубль id 2) → відкат УСЬОГО батчу.
+        // Залишковий `in_flight` рядок (перерваний reap, T-084) для id 2 у
+        // батчі НЕ валить батч: детермінований entry_id зробив би повторний
+        // reap того самого кандидата вічно неможливим (PRIMARY KEY), тож
+        // upsert перезаписує саме такий залишок (resume), а 1 і 3 вставляє.
         database.insert_quarantine_entry(&entry(2)).unwrap();
-        QuarantineManifest::insert_entries(&database, &[entry(1), entry(2), entry(3)]).unwrap_err();
+        let mut resumed = entry(2);
+        resumed.batch_id = Some(BatchId(99)); // новий батч перезаписує in_flight
+        QuarantineManifest::insert_entries(&database, &[entry(1), resumed, entry(3)]).unwrap();
+        assert_eq!(database.list_quarantine_entries().unwrap().len(), 3);
         assert_eq!(
+            database.get_quarantine_entry(QuarantineEntryId(2)).unwrap().unwrap().batch_id,
+            Some(BatchId(99)),
+            "залишковий in_flight має перезаписатись новим батчем"
+        );
+
+        // Термінальний рядок upsert НЕ чіпає: id 2 → quarantined, повторний
+        // insert того самого id — no-op (предикат WHERE хибний), без помилки.
+        database
+            .update_quarantine_status(QuarantineEntryId(2), QuarantineStatus::Quarantined)
+            .unwrap();
+        let mut clobber = entry(2);
+        clobber.batch_id = Some(BatchId(123));
+        QuarantineManifest::insert_entries(&database, &[clobber]).unwrap();
+        let kept = database.get_quarantine_entry(QuarantineEntryId(2)).unwrap().unwrap();
+        assert_eq!(kept.status, QuarantineStatus::Quarantined);
+        assert_eq!(kept.batch_id, Some(BatchId(99)), "quarantined рядок недоторканий");
+        database
+            .update_quarantine_status(QuarantineEntryId(2), QuarantineStatus::InFlight)
+            .unwrap();
+
+        // Атомарність (T-154): справжня помилка посеред батчу (size > i64::MAX)
+        // відкочує УВЕСЬ транзакційний запис — жодного часткового рядка.
+        let mut oversized = entry(4);
+        oversized.size = ByteSize(u64::MAX);
+        QuarantineManifest::insert_entries(&database, &[entry(5), oversized, entry(6)]).unwrap_err();
+        assert!(
             database
                 .list_quarantine_entries()
                 .unwrap()
                 .iter()
-                .map(|e| e.id.0)
-                .collect::<Vec<_>>(),
-            vec![2],
+                .all(|e| e.id.0 <= 3),
             "невдалий батч не має лишити часткових записів"
         );
-        database
-            .remove_quarantine_entry(QuarantineEntryId(2))
-            .unwrap();
-
-        // Успішний батч: усі записи одним викликом.
-        QuarantineManifest::insert_entries(&database, &[entry(1), entry(2), entry(3)]).unwrap();
-        assert_eq!(database.list_quarantine_entries().unwrap().len(), 3);
 
         let audit_for = |id: u64, size: u64| DestructiveAuditEvent {
             entry_id: QuarantineEntryId(id),
