@@ -8,6 +8,7 @@
     "dev:ui": "npm --prefix ui run dev",
     "build": "node scripts/tauri.mjs build",
     "build:ui": "npm --prefix ui run build",
-    "typecheck": "npm --prefix ui run typecheck"
+    "typecheck": "npm --prefix ui run typecheck",
+    "test:grid": "node scripts/check-grid-invariants.mjs"
   }
 }

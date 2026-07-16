@@ -309,14 +309,22 @@ export async function loadScrubStrip(
 export function useLargePreview(
   candidate: Pick<Candidate, "id" | "path" | "unit"> | null,
 ): string | null {
-  const [src, setSrc] = useState<string | null>(null);
+  const [src, setSrc] = useState<string | null>(() =>
+    candidate ? (thumbnailCache.get(candidate.id) ?? null) : null,
+  );
 
   useEffect(() => {
-    setSrc(null);
-    if (!candidate || candidate.unit !== "file") return;
+    if (!candidate || candidate.unit !== "file") {
+      setSrc(null);
+      return;
+    }
 
     const id = candidate.id;
     const path = candidate.path;
+    // Миттєвий draft: якщо плитка вже отримала мініатюру — показуємо її
+    // одразу, поки йде cold `preview.large` / large_sharp (T-073 ступінь 1
+    // на клієнті; Core теж віддасть draft з дискового кешу, якщо є).
+    setSrc(thumbnailCache.get(id) ?? null);
     let cancelled = false;
     let off: (() => void) | undefined;
 
@@ -326,11 +334,17 @@ export function useLargePreview(
       await ensurePreviewReadyBus();
       if (cancelled) return;
       off = onPreviewReady(path, (event) => {
-        if (cancelled || event.kind !== "large_sharp") return;
-        setSrc(event.dataUrl);
-        // Sharp — фінальна доставка; слухача можна зняти.
-        off?.();
-        off = undefined;
+        if (cancelled) return;
+        // large_sharp — фінальна підміна; thumbnail — interim, якщо ще
+        // нічого немає (плитка й Live Preview гріють один і той самий path).
+        if (event.kind === "large_sharp") {
+          setSrc(event.dataUrl);
+          off?.();
+          off = undefined;
+        } else if (event.kind === "thumbnail") {
+          setSrc((prev) => prev ?? event.dataUrl);
+          thumbnailCache.set(id, event.dataUrl);
+        }
       });
       try {
         const ack = await command<PreviewLargeAck>("preview.large", {

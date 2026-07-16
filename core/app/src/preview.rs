@@ -26,14 +26,41 @@ pub enum PreviewPriority {
     P0 = 3,
 }
 
+/// Вид задачі превью. Один шлях може мати **паралельно** мініатюру (P1)
+/// і large (P0): раніше `submit` замінював будь-яку pending-задачу для
+/// того самого path → hover одночасно з `preview.thumbnail` і
+/// `preview.large` лишав лише останню, інша (часто large_sharp) ніколи
+/// не виконувалась.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PreviewJobKind {
+    Thumbnail,
+    Large,
+    Prefetch,
+    /// Одноразові/тестові задачі без окремого слота.
+    Generic,
+}
+
+fn task_key(path: &str, kind: PreviewJobKind) -> String {
+    let tag = match kind {
+        PreviewJobKind::Thumbnail => "thumb",
+        PreviewJobKind::Large => "large",
+        PreviewJobKind::Prefetch => "prefetch",
+        PreviewJobKind::Generic => "generic",
+    };
+    format!("{path}\u{1}{tag}")
+}
+
 struct QueuedTask {
     path: String,
+    /// path + kind — унікальний ідентифікатор у черзі/running.
+    key: String,
     priority: PreviewPriority,
     created_at: Instant,
     job: Box<dyn FnOnce(CancellationToken) + Send + 'static>,
 }
 
 struct RunningTask {
+    path: String,
     priority: PreviewPriority,
     cancellation: CancellationToken,
 }
@@ -112,13 +139,29 @@ impl PreviewScheduler {
         }
     }
 
-    /// Додати задачу до черги.
+    /// Додати задачу до черги (generic kind — тести / одноразові jobs).
     ///
-    /// Якщо задача для цього шляху вже є в черзі очікування, вона замінюється.
-    /// Якщо приходить задача пріоритету `P0` (Live Preview), а вільних потоків немає,
-    /// планувальник негайно скасовує одне з активних фонових завдань `P3`.
+    /// Production: [`Self::submit_job`] з явним [`PreviewJobKind`], щоб
+    /// thumbnail і large для одного файла не витісняли одне одного.
     pub fn submit<F>(&self, path: String, priority: PreviewPriority, job: F)
     where
+        F: FnOnce(CancellationToken) + Send + 'static,
+    {
+        self.submit_job(path, PreviewJobKind::Generic, priority, job);
+    }
+
+    /// Додати задачу певного виду. Заміна pending — лише для тієї ж
+    /// пари `(path, kind)`; інші види того самого файла лишаються в черзі.
+    ///
+    /// Якщо приходить `P0` (Live Preview), а вільних потоків немає,
+    /// планувальник скасовує одне активне фонове `P3`.
+    pub fn submit_job<F>(
+        &self,
+        path: String,
+        kind: PreviewJobKind,
+        priority: PreviewPriority,
+        job: F,
+    ) where
         F: FnOnce(CancellationToken) + Send + 'static,
     {
         let mut state = self.state.lock().unwrap();
@@ -126,11 +169,13 @@ impl PreviewScheduler {
             return;
         }
 
-        // Замінюємо існуючу заплановану задачу для цього шляху
-        state.pending.retain(|task| task.path != path);
+        let key = task_key(&path, kind);
+        // Замінюємо лише ту саму (path, kind) — не чіпаємо large/thumbnail сусідів.
+        state.pending.retain(|task| task.key != key);
 
         state.pending.push(QueuedTask {
             path: path.clone(),
+            key: key.clone(),
             priority,
             created_at: Instant::now(),
             job: Box::new(job),
@@ -141,14 +186,14 @@ impl PreviewScheduler {
             let active_jobs = state.running.len();
             if active_jobs >= state.worker_count {
                 let mut p3_to_cancel = None;
-                for (running_path, running_task) in state.running.iter() {
+                for (running_key, running_task) in state.running.iter() {
                     if running_task.priority == PreviewPriority::P3 {
-                        p3_to_cancel = Some(running_path.clone());
+                        p3_to_cancel = Some(running_key.clone());
                         break;
                     }
                 }
-                if let Some(cancel_path) = p3_to_cancel {
-                    if let Some(running) = state.running.get(&cancel_path) {
+                if let Some(cancel_key) = p3_to_cancel {
+                    if let Some(running) = state.running.get(&cancel_key) {
                         running.cancellation.cancel();
                     }
                 }
@@ -158,12 +203,14 @@ impl PreviewScheduler {
         self.changed.notify_one();
     }
 
-    /// Скасувати задачу для вказаного шляху (якщо вона в черзі або виконується).
+    /// Скасувати всі задачі для шляху (будь-який kind — у черзі або running).
     pub fn cancel(&self, path: &str) {
         let mut state = self.state.lock().unwrap();
         state.pending.retain(|task| task.path != path);
-        if let Some(running) = state.running.get(path) {
-            running.cancellation.cancel();
+        for running in state.running.values() {
+            if running.path == path {
+                running.cancellation.cancel();
+            }
         }
     }
 
@@ -179,10 +226,11 @@ impl PreviewScheduler {
         state.running.len()
     }
 
-    /// Перевірити чи задача для вказаного шляху є в черзі або виконується.
+    /// Перевірити чи будь-яка задача для шляху є в черзі або виконується.
     pub fn is_queued_or_running(&self, path: &str) -> bool {
         let state = self.state.lock().unwrap();
-        state.pending.iter().any(|t| t.path == path) || state.running.contains_key(path)
+        state.pending.iter().any(|t| t.path == path)
+            || state.running.values().any(|t| t.path == path)
     }
 }
 
@@ -217,9 +265,11 @@ fn worker_loop(state_lock: Arc<Mutex<SchedulerState>>, changed: Arc<Condvar>) {
         };
 
         let cancellation = CancellationToken::new();
+        let task_key = task.key.clone();
         state.running.insert(
-            task.path.clone(),
+            task_key.clone(),
             RunningTask {
+                path: task.path.clone(),
                 priority: task.priority,
                 cancellation: cancellation.clone(),
             },
@@ -231,7 +281,7 @@ fn worker_loop(state_lock: Arc<Mutex<SchedulerState>>, changed: Arc<Condvar>) {
         let _ = panic::catch_unwind(AssertUnwindSafe(|| (task.job)(cancellation.clone())));
 
         let mut state = state_lock.lock().unwrap();
-        state.running.remove(&task.path);
+        state.running.remove(&task_key);
         changed.notify_all();
     }
 }
@@ -455,8 +505,11 @@ impl PreviewPrefetcher {
             let size = candidate.size;
             let modified_at = candidate.modified_at;
             let max_edge = self.max_edge;
-            self.scheduler
-                .submit(path.clone(), PreviewPriority::P2, move |token| {
+            self.scheduler.submit_job(
+                path.clone(),
+                PreviewJobKind::Prefetch,
+                PreviewPriority::P2,
+                move |token| {
                     if token.is_cancelled() {
                         return;
                     }
@@ -476,7 +529,8 @@ impl PreviewPrefetcher {
                         modified_at,
                         &bytes,
                     );
-                });
+                },
+            );
             scheduled_paths.push(candidate.source_path.clone());
         }
         self.metrics.lock().unwrap().scheduled += scheduled_paths.len() as u64;
@@ -613,8 +667,11 @@ impl TwoStagePreviewer {
         let sources = self.sources.clone();
         let encoder = Arc::clone(&self.encoder);
         let path_owned = source_path.to_string();
-        self.scheduler
-            .submit(path_owned.clone(), PreviewPriority::P0, move |token| {
+        self.scheduler.submit_job(
+            path_owned.clone(),
+            PreviewJobKind::Large,
+            PreviewPriority::P0,
+            move |token| {
                 if token.is_cancelled() {
                     return;
                 }
@@ -627,16 +684,42 @@ impl TwoStagePreviewer {
                 let Some(bytes) = encode_thumbnail(encoder.as_ref(), &raw) else {
                     return;
                 };
-                if let Ok(preview_path) =
-                    cache.save_preview(&path_owned, PreviewKind::Large, size, modified_at, &bytes)
-                {
-                    on_delivery(PreviewDelivery {
-                        source_path: path_owned.clone(),
-                        quality: PreviewQuality::Sharp,
-                        preview_path,
-                    });
-                }
-            });
+                // Доставка не залежить від успіху індексу кешу (як T-120
+                // для мініатюр): UI має отримати Sharp навіть коли DB/диск
+                // профілю недоступні. При збої save — тимчасовий файл.
+                let preview_path = match cache.save_preview(
+                    &path_owned,
+                    PreviewKind::Large,
+                    size,
+                    modified_at,
+                    &bytes,
+                ) {
+                    Ok(path) => path,
+                    Err(_) => {
+                        use std::collections::hash_map::DefaultHasher;
+                        use std::hash::{Hash, Hasher};
+                        let mut hasher = DefaultHasher::new();
+                        path_owned.hash(&mut hasher);
+                        let tmp = std::env::temp_dir().join(format!(
+                            "trashradar-large-{:x}.png",
+                            hasher.finish()
+                        ));
+                        if std::fs::write(&tmp, &bytes).is_err() {
+                            return;
+                        }
+                        match tmp.to_str() {
+                            Some(s) => s.to_string(),
+                            None => return,
+                        }
+                    }
+                };
+                on_delivery(PreviewDelivery {
+                    source_path: path_owned.clone(),
+                    quality: PreviewQuality::Sharp,
+                    preview_path,
+                });
+            },
+        );
 
         Ok(if draft_delivered {
             TwoStageOutcome::DraftThenSharpScheduled
@@ -685,6 +768,38 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
     use std::time::Duration;
+
+    #[test]
+    fn thumbnail_and_large_jobs_for_same_path_coexist() {
+        // Регрес Live Preview: hover ставить і P1 thumbnail, і P0 large.
+        // Вони НЕ мають витісняти одне одного з pending.
+        let scheduler = PreviewScheduler::new(1, 0.0);
+        let (block_tx, block_rx) = mpsc::channel();
+        scheduler.submit("blocker".to_string(), PreviewPriority::P1, move |_| {
+            block_rx.recv().unwrap();
+        });
+        // Дати blocker зайняти worker.
+        std::thread::sleep(Duration::from_millis(30));
+
+        scheduler.submit_job(
+            r"C:\media\clip.mp4".into(),
+            PreviewJobKind::Thumbnail,
+            PreviewPriority::P1,
+            |_| {},
+        );
+        scheduler.submit_job(
+            r"C:\media\clip.mp4".into(),
+            PreviewJobKind::Large,
+            PreviewPriority::P0,
+            |_| {},
+        );
+        assert_eq!(
+            scheduler.pending_count(),
+            2,
+            "thumbnail + large для одного path мають обидва чекати"
+        );
+        let _ = block_tx.send(());
+    }
 
     #[test]
     fn test_priority_ordering() {

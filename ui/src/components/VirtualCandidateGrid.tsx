@@ -1,96 +1,47 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+/**
+ * Віртуалізована сітка плиток категорії.
+ *
+ * ⚠️  Геометрія й замір — ТІЛЬКИ в `./candidate-grid/`.
+ *     Перед змінами прочитай `./candidate-grid/README.md`.
+ *     Після змін: `npm --prefix ui run test:grid`
+ */
+
+import { useEffect, useMemo, useRef } from "react";
 
 import type { Candidate } from "@/ipc/types";
 
+import {
+  calculateVirtualGridWindow,
+  shouldRenderTiles,
+  type GridDensity,
+} from "./candidate-grid/geometry";
+import { useGridViewport } from "./candidate-grid/useGridViewport";
 import { CandidateTile, type CandidatePreview } from "./CandidateTile";
 import { EmptyState } from "./EmptyState";
 
-export type GridDensity = "compact" | "standard" | "large";
-
-// Пороги мін. ширини плитки → кількість колонок. Збільшене превью живе в
-// правій зоні Live Preview, тож сітка має бути щільною оглядовою «контакт-
-// таблицею», а не рядом величезних плиток: у вузькій лівій зоні (≈45% ширини)
-// навіть standard давав лише 2–3 колонки. Значення занижено; тонке
-// підлаштування — клавіші `-`/`=` (compact/standard/large).
-const MIN_TILE_WIDTH: Record<GridDensity, number> = {
-  compact: 104,
-  standard: 140,
-  large: 200,
-};
-const GAP = 4;
-const OVERSCAN_ROWS = 3;
-
-export interface VirtualGridWindow {
-  columns: number;
-  rowHeight: number;
-  totalHeight: number;
-  startIndex: number;
-  endIndex: number;
-  offsetY: number;
-}
-
-/** Pure geometry used by the component and perf/invariant checks. */
-export function calculateVirtualGridWindow(
-  itemCount: number,
-  width: number,
-  viewportHeight: number,
-  scrollTop: number,
-  density: GridDensity,
-): VirtualGridWindow {
-  const safeWidth = Math.max(1, width);
-  const columns = Math.max(
-    1,
-    Math.floor((safeWidth + GAP) / (MIN_TILE_WIDTH[density] + GAP)),
-  );
-  const tileWidth = (safeWidth - GAP * (columns - 1)) / columns;
-  const rowHeight = Math.max(1, tileWidth * 0.75 + GAP);
-  const rowCount = Math.ceil(itemCount / columns);
-  const firstVisibleRow = Math.min(
-    Math.max(0, rowCount - 1),
-    Math.max(0, Math.floor(scrollTop / rowHeight)),
-  );
-  const visibleRows = Math.max(1, Math.ceil(viewportHeight / rowHeight));
-  const startRow = Math.max(0, firstVisibleRow - OVERSCAN_ROWS);
-  const endRow = Math.min(
-    rowCount,
-    firstVisibleRow + visibleRows + OVERSCAN_ROWS,
-  );
-
-  return {
-    columns,
-    rowHeight,
-    totalHeight: Math.max(0, rowCount * rowHeight - GAP),
-    startIndex: startRow * columns,
-    endIndex: Math.min(itemCount, endRow * columns),
-    offsetY: startRow * rowHeight,
-  };
-}
+export type { GridDensity } from "./candidate-grid/geometry";
+export { calculateVirtualGridWindow } from "./candidate-grid/geometry";
 
 export interface VirtualCandidateGridProps {
   candidates: Candidate[];
   density?: GridDensity;
   focusedId?: number | null;
+  /**
+   * Екран видимий (не `display:none`). Обовʼязково з CategoryScreen:
+   * `active={pathname === `/category/${id}`}`.
+   * Без цього замір на mount прихованого екрана ламає сітку.
+   */
+  active?: boolean;
   previewFor?: (candidate: Candidate) => CandidatePreview | undefined;
-  /** Локальне оптимістичне позначення (T-116) — переважає candidate.decision. */
   isMarked?: (candidate: Candidate) => boolean;
-  /** Оптимістичний Keep (T-117/T-147) — переважає candidate.decision. */
   isKept?: (candidate: Candidate) => boolean;
-  /** CSS-курсор плиток (T-142): іконка озброєної дії у Live Preview. */
   tileCursor?: string;
-  /** Плитка з коротким пульс-відгуком після дії (T-143) та клас її кільця. */
   flash?: { id: number; ring: string } | null;
   onActivate?: (candidate: Candidate, event: React.MouseEvent) => void;
-  /** ПКМ по плитці (T-143): у Live Preview → протилежна озброєна дія. */
   onSecondaryActivate?: (candidate: Candidate, event: React.MouseEvent) => void;
   onFocusCandidate?: (candidate: Candidate) => void;
-  /** Наведення курсора (T-140): у Live Preview → велике превью праворуч. */
   onHoverCandidate?: (candidate: Candidate) => void;
-  /**
-   * Горизонтальний рух по плитці (T-145): ratio 0..1 для скрабу
-   * великого превью у правій зоні Live Preview.
-   */
   onHoverMove?: (candidate: Candidate, ratio: number) => void;
-  /** Поточна кількість колонок геометрії (T-123: клавіатурна навігація ↑/↓). */
   onColumnsChange?: (columns: number) => void;
   emptyTitle?: string;
 }
@@ -99,6 +50,7 @@ export function VirtualCandidateGrid({
   candidates,
   density = "standard",
   focusedId = null,
+  active = true,
   previewFor,
   isMarked,
   isKept,
@@ -114,57 +66,7 @@ export function VirtualCandidateGrid({
 }: VirtualCandidateGridProps) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const frameRef = useRef<number | null>(null);
-  const [viewport, setViewport] = useState({
-    width: 1,
-    height: 1,
-    scrollTop: 0,
-  });
-
-  // Замір ширини/висоти контейнера для геометрії сітки. Тонкість: усі 9
-  // екранів категорій змонтовані постійно й приховані `display:none` (T-099).
-  // Поки екран прихований, `clientWidth=0` → замір дає 1 колонку (плитка на
-  // всю ширину = «гігант»). ResizeObserver на переході display:none→show
-  // спрацьовує НЕнадійно, тож додатково слухаємо IntersectionObserver — він
-  // гарантовано стріляє, коли елемент стає видимим, і ми переміряємо реальну
-  // ширину. Гейта рендера НЕМА (грід малює завжди): колонки самокоригуються
-  // заміром, а не ховаємо контент (це давало порожній грід на холодному старті).
-  useEffect(() => {
-    const element = viewportRef.current;
-    if (!element) return;
-
-    const measure = () => {
-      setViewport((current) => {
-        const width = Math.max(1, element.clientWidth - GAP * 2);
-        const height = Math.max(1, element.clientHeight);
-        return current.width === width && current.height === height
-          ? current
-          : { width, height, scrollTop: current.scrollTop };
-      });
-    };
-    measure();
-    // Дозаміри для асинхронної розкладки (LP-зона тягне leftRatio з
-    // localStorage у власному ефекті) — первинний measure може бути нульовим.
-    const raf = requestAnimationFrame(measure);
-    const timer = setTimeout(measure, 120);
-
-    const resizeObserver = new ResizeObserver(measure);
-    resizeObserver.observe(element);
-    // Надійний сигнал «екран став видимим» (display:none→block).
-    const visibilityObserver = new IntersectionObserver(
-      (entries) => {
-        if (entries.some((e) => e.isIntersecting)) measure();
-      },
-      { threshold: 0 },
-    );
-    visibilityObserver.observe(element);
-
-    return () => {
-      cancelAnimationFrame(raf);
-      clearTimeout(timer);
-      resizeObserver.disconnect();
-      visibilityObserver.disconnect();
-    };
-  }, []);
+  const [viewport, setScrollTop] = useGridViewport(active, viewportRef);
 
   useEffect(
     () => () => {
@@ -173,7 +75,7 @@ export function VirtualCandidateGrid({
     [],
   );
 
-  const window = useMemo(
+  const gridWindow = useMemo(
     () =>
       calculateVirtualGridWindow(
         candidates.length,
@@ -184,32 +86,32 @@ export function VirtualCandidateGrid({
       ),
     [candidates.length, density, viewport],
   );
-  const visible = candidates.slice(window.startIndex, window.endIndex);
 
-  // T-123: батько (CategoryScreen) рахує ↑/↓ від кількості колонок —
-  // геометрія віртуалізації живе тут, назовні віддаємо лише число.
-  useEffect(() => {
-    onColumnsChange?.(window.columns);
-  }, [window.columns, onColumnsChange]);
+  const renderTiles = shouldRenderTiles(active, candidates.length);
+  const visible = renderTiles
+    ? candidates.slice(gridWindow.startIndex, gridWindow.endIndex)
+    : [];
 
-  // T-123: клавіатурна навігація може перевести фокус за межі відрендереного
-  // вікна — підскролити так, щоб рядок фокусу лишався видимим.
   useEffect(() => {
-    if (focusedId == null) return;
+    if (active) onColumnsChange?.(gridWindow.columns);
+  }, [active, gridWindow.columns, onColumnsChange]);
+
+  useEffect(() => {
+    if (!active || focusedId == null) return;
     const element = viewportRef.current;
     if (!element) return;
     const index = candidates.findIndex((c) => c.id === focusedId);
     if (index === -1) return;
-    const row = Math.floor(index / window.columns);
-    const rowTop = row * window.rowHeight;
-    const rowBottom = rowTop + window.rowHeight;
+    const row = Math.floor(index / gridWindow.columns);
+    const rowTop = row * gridWindow.rowHeight;
+    const rowBottom = rowTop + gridWindow.rowHeight;
     if (rowTop < element.scrollTop) {
       element.scrollTop = rowTop;
     } else if (rowBottom > element.scrollTop + element.clientHeight) {
       element.scrollTop = rowBottom - element.clientHeight;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [focusedId, candidates, window.columns, window.rowHeight]);
+  }, [active, focusedId, candidates, gridWindow.columns, gridWindow.rowHeight]);
 
   if (candidates.length === 0) {
     return <EmptyState title={emptyTitle} taskRef="category.window" />;
@@ -219,26 +121,27 @@ export function VirtualCandidateGrid({
     <div
       ref={viewportRef}
       className="h-full overflow-y-auto overscroll-contain p-1"
+      data-grid-active={active || undefined}
+      data-columns={gridWindow.columns}
       onScroll={(event) => {
         const scrollTop = event.currentTarget.scrollTop;
         if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
         frameRef.current = requestAnimationFrame(() => {
           frameRef.current = null;
-          setViewport((current) => ({ ...current, scrollTop }));
+          setScrollTop(scrollTop);
         });
       }}
     >
-      <div className="relative" style={{ height: window.totalHeight }}>
+      <div className="relative" style={{ height: gridWindow.totalHeight }}>
         <div
           className="absolute inset-x-0 top-0 grid gap-1"
           style={{
-            gridTemplateColumns: `repeat(${window.columns}, minmax(0, 1fr))`,
-            transform: `translateY(${window.offsetY}px)`,
+            gridTemplateColumns: `repeat(${gridWindow.columns}, minmax(0, 1fr))`,
+            transform: `translateY(${gridWindow.offsetY}px)`,
           }}
-          data-visible-start={window.startIndex}
-          data-visible-end={window.endIndex}
+          data-visible-start={gridWindow.startIndex}
+          data-visible-end={gridWindow.endIndex}
           data-total={candidates.length}
-          data-columns={window.columns}
         >
           {visible.map((candidate) => {
             const preview = previewFor?.(candidate);
@@ -251,7 +154,9 @@ export function VirtualCandidateGrid({
                 {...(isMarked ? { marked: isMarked(candidate) } : {})}
                 {...(isKept ? { kept: isKept(candidate) } : {})}
                 {...(tileCursor ? { cursor: tileCursor } : {})}
-                {...(flash?.id === candidate.id ? { flashRing: flash.ring } : {})}
+                {...(flash?.id === candidate.id
+                  ? { flashRing: flash.ring }
+                  : {})}
                 {...(onActivate ? { onActivate } : {})}
                 {...(onSecondaryActivate ? { onSecondaryActivate } : {})}
                 {...(onFocusCandidate ? { onFocusCandidate } : {})}

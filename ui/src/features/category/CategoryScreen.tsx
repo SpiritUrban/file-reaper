@@ -132,9 +132,12 @@ export function CategoryScreen({ categoryId }: CategoryScreenProps) {
 
   // T-099: усі 9 CategoryScreen змонтовані постійно, приховані CSS-ом —
   // хук на глобальний хоткей мусить діяти лише для видимої категорії.
+  // `isActive` також іде в VirtualCandidateGrid: замір геометрії лише коли
+  // екран не display:none (інакше 0×0 → порожня сітка або плитка-гігант).
   const { pathname } = useLocation();
-  const isActiveRef = useRef(pathname === `/category/${categoryId}`);
-  isActiveRef.current = pathname === `/category/${categoryId}`;
+  const isActive = pathname === `/category/${categoryId}`;
+  const isActiveRef = useRef(isActive);
+  isActiveRef.current = isActive;
 
   const [focusedId, setFocusedId] = useState<number | null>(null);
   const focusedIdRef = useRef<number | null>(null);
@@ -379,6 +382,7 @@ export function CategoryScreen({ categoryId }: CategoryScreenProps) {
           candidates={visible}
           density={density}
           focusedId={focusedId}
+          active={isActive}
           isMarked={(candidate) => selectionStore.isMarked(candidate.id)}
           isKept={(candidate) => keptIds.has(candidate.id)}
           {...(tileCursor ? { tileCursor } : {})}

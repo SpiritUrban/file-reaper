@@ -45,8 +45,8 @@ pub use duplicates::{
 };
 pub use mvp_farm::mvp_predicate_registry;
 pub use preview::{
-    PreviewCacheManager, PreviewPrefetchCandidate, PreviewPrefetchMetrics, PreviewPrefetcher,
-    PreviewPriority, PreviewScheduler,
+    PreviewCacheManager, PreviewJobKind, PreviewPrefetchCandidate, PreviewPrefetchMetrics,
+    PreviewPrefetcher, PreviewPriority, PreviewScheduler,
 };
 pub use quarantine::{
     spawn_quarantine_sweep, ManualPurgeResult, ManualPurgeSelection, ManualPurger,

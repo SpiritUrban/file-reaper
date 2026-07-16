@@ -33,8 +33,8 @@ use trashradar_app::ports::{
 };
 use trashradar_app::preview::{
     encode_thumbnail, generate_from_chain, PreviewCacheManager, PreviewDelivery, PreviewDeliveryFn,
-    PreviewPrefetchCandidate, PreviewPrefetcher, PreviewPriority, PreviewQuality, PreviewScheduler,
-    TwoStageOutcome, TwoStagePreviewer,
+    PreviewJobKind, PreviewPrefetchCandidate, PreviewPrefetcher, PreviewPriority, PreviewQuality,
+    PreviewScheduler, TwoStageOutcome, TwoStagePreviewer,
 };
 use trashradar_domain::candidate::{ByteSize, CandidateId, CandidateUnit, FsTimestamp};
 use trashradar_domain::error::CoreError;
@@ -183,8 +183,13 @@ impl PreviewRuntime {
         let cache = Arc::clone(&self.cache);
         let chain = self.chain.clone();
         let encoder = Arc::clone(&self.encoder);
-        self.scheduler
-            .submit(path.clone(), PreviewPriority::P1, move |token| {
+        // PreviewJobKind::Thumbnail — окремий слот від Large (P0): інакше
+        // hover одночасно з preview.large витісняв би мініатюру (або навпаки).
+        self.scheduler.submit_job(
+            path.clone(),
+            PreviewJobKind::Thumbnail,
+            PreviewPriority::P1,
+            move |token| {
                 if token.is_cancelled() {
                     return;
                 }
@@ -230,7 +235,8 @@ impl PreviewRuntime {
                         data_url: to_data_url(&bytes),
                     },
                 );
-            });
+            },
+        );
     }
 }
 
@@ -536,10 +542,19 @@ pub async fn preview_large<R: Runtime>(
 
     // Синхронна доставка (Draft і/або вже готовий Sharp з кешу) повертається
     // прямо у відповідь команди — жодного зайвого проходу через подію для
-    // того, що вже доступно зараз (DoD «<100 мс»). Перша доставка в межах
-    // виклику — сюди; будь-яка наступна (P0-генерація у фоні) — подією.
-    let sync_delivery: Arc<Mutex<Option<(&'static str, String)>>> = Arc::new(Mutex::new(None));
-    let sync_delivery_for_cb = Arc::clone(&sync_delivery);
+    // того, що вже доступно зараз (DoD «<100 мс»).
+    //
+    // Важливо: після того, як команда «запечатує» слот і забирає first,
+    // **усі** подальші доставки (P0-генерація Sharp у фоні) мають іти
+    // подією `preview.ready`. Раніше колбек дивився лише `first.is_none()`:
+    // після `take()` слот знову був порожнім → Sharp записувався в
+    // покинутий mutex замість події → права зона Live Preview / панель
+    // деталей лишались порожніми назавжди (cold large ніколи не доходив).
+    let slot: Arc<Mutex<LargeSyncSlot>> = Arc::new(Mutex::new(LargeSyncSlot {
+        first: None,
+        sealed: false,
+    }));
+    let slot_for_cb = Arc::clone(&slot);
     let app_for_cb = app.clone();
     let on_delivery: PreviewDeliveryFn = Arc::new(move |delivery: PreviewDelivery| {
         let quality = match delivery.quality {
@@ -550,21 +565,22 @@ pub async fn preview_large<R: Runtime>(
             return;
         };
         let data_url = to_data_url(&bytes);
-        let mut guard = sync_delivery_for_cb.lock().expect("sync delivery lock");
-        if guard.is_none() {
-            *guard = Some((quality, data_url));
-        } else {
-            drop(guard);
-            events::emit(
-                &app_for_cb,
-                events::topic::PREVIEW_READY,
-                &events::PreviewReadyEvent {
-                    path: delivery.source_path.clone(),
-                    kind: format!("large_{quality}"),
-                    data_url,
-                },
-            );
+        {
+            let mut guard = slot_for_cb.lock().expect("large sync slot lock");
+            if !guard.sealed && guard.first.is_none() {
+                guard.first = Some((quality, data_url));
+                return;
+            }
         }
+        events::emit(
+            &app_for_cb,
+            events::topic::PREVIEW_READY,
+            &events::PreviewReadyEvent {
+                path: delivery.source_path.clone(),
+                kind: format!("large_{quality}"),
+                data_url,
+            },
+        );
     });
 
     let previewer = preview.two_stage_previewer();
@@ -581,12 +597,27 @@ pub async fn preview_large<R: Runtime>(
     .await
     .map_err(|error| CoreError::internal(format!("Large preview task failed: {error}")))??;
 
-    let sync = sync_delivery.lock().expect("sync delivery lock").take();
+    // Запечатуємо під тим самим локом, що й take: будь-яка concurrent
+    // доставка з воркера або чекає lock і бачить sealed=true → подія,
+    // або вже емітнула, поки first був зайнятий.
+    let sync = {
+        let mut guard = slot.lock().expect("large sync slot lock");
+        guard.sealed = true;
+        guard.first.take()
+    };
     Ok(PreviewLargeAck {
         status: two_stage_outcome_wire(outcome).into(),
         quality: sync.as_ref().map(|(q, _)| (*q).to_string()),
         data_url: sync.map(|(_, d)| d),
     })
+}
+
+/// Слот синхронної доставки `preview.large` (див. `preview_large`).
+struct LargeSyncSlot {
+    /// Перша доставка в межах виклику (draft / sharp-from-cache).
+    first: Option<(&'static str, String)>,
+    /// `true` після того, як команда забрала `first` у відповідь — далі лише події.
+    sealed: bool,
 }
 
 /// Параметри `preview.prefetch` (T-146 / T-075).
