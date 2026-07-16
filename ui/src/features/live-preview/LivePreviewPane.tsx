@@ -7,10 +7,9 @@
  * відео-скраб T-145. Quarantine (T-148): `quarantinePreviewTargetStore` +
  * `quarantine.thumbnail` (сурогатний шлях — файл уже переміщено, T-088).
  *
- * T-141: тонкий рядок-накладка знизу (шлях·розмір·вік/таймер), зникає за 2 с.
+ * T-141: тонкий рядок-накладка знизу (шлях·розмір·вік/таймер) — постійно видима,
+ * щоб шлях до файла завжди був на очах.
  */
-
-import { useEffect, useState } from "react";
 
 import { formatAge, formatBytes } from "@/store/format";
 import {
@@ -21,38 +20,9 @@ import {
 import { usePreviewTarget } from "@/store/previewTarget";
 import { useQuarantinePreviewTarget } from "@/store/quarantinePreviewTarget";
 
-const IDLE_HIDE_MS = 2000;
-
 function fileName(path: string): string {
   const normalized = path.replace(/\\/g, "/");
   return normalized.split("/").filter(Boolean).at(-1) || path;
-}
-
-/**
- * Накладка видима, поки курсор рухається; ховається за 2 с спокою. Рух
- * миші відстежується на window — у Live Preview курсор «водять» по сітці
- * зліва, тож активність саме там і має тримати накладку. Зміна цілі
- * (нове наведення) — теж активність: ефект перезапускає таймер.
- */
-function useIdleOverlayVisible(resetKey: unknown): boolean {
-  const [visible, setVisible] = useState(true);
-
-  useEffect(() => {
-    let timer: ReturnType<typeof setTimeout>;
-    const bump = () => {
-      setVisible(true);
-      clearTimeout(timer);
-      timer = setTimeout(() => setVisible(false), IDLE_HIDE_MS);
-    };
-    bump();
-    window.addEventListener("mousemove", bump);
-    return () => {
-      clearTimeout(timer);
-      window.removeEventListener("mousemove", bump);
-    };
-  }, [resetKey]);
-
-  return visible;
 }
 
 export function LivePreviewPane() {
@@ -72,14 +42,6 @@ export function LivePreviewPane() {
     mode === "quarantine" ? quarantineTarget : null,
     1024,
   );
-
-  const overlayKey =
-    mode === "quarantine"
-      ? `q-${quarantineTarget!.id}`
-      : mode === "candidate"
-        ? `c-${candidateTarget!.id}`
-        : "empty";
-  const infoVisible = useIdleOverlayVisible(overlayKey);
 
   const imgSrc =
     mode === "quarantine" ? quarantineSrc : mode === "candidate" ? displaySrc : null;
@@ -115,11 +77,7 @@ export function LivePreviewPane() {
       )}
 
       {mode === "candidate" && candidateTarget ? (
-        <div
-          className={`pointer-events-none absolute inset-x-0 bottom-0 flex items-center gap-2 bg-bg/85 px-3 py-1.5 font-mono text-xs text-ink-dim backdrop-blur-sm transition-opacity duration-500 ${
-            infoVisible ? "opacity-100" : "opacity-0"
-          }`}
-        >
+        <div className="pointer-events-none absolute inset-x-0 bottom-0 flex items-center gap-2 bg-bg/85 px-3 py-1.5 font-mono text-xs text-ink-dim backdrop-blur-sm">
           <span className="min-w-0 flex-1 truncate text-ink">
             {candidateTarget.path}
           </span>
@@ -129,11 +87,7 @@ export function LivePreviewPane() {
       ) : null}
 
       {mode === "quarantine" && quarantineTarget ? (
-        <div
-          className={`pointer-events-none absolute inset-x-0 bottom-0 flex items-center gap-2 bg-bg/85 px-3 py-1.5 font-mono text-xs text-ink-dim backdrop-blur-sm transition-opacity duration-500 ${
-            infoVisible ? "opacity-100" : "opacity-0"
-          }`}
-        >
+        <div className="pointer-events-none absolute inset-x-0 bottom-0 flex items-center gap-2 bg-bg/85 px-3 py-1.5 font-mono text-xs text-ink-dim backdrop-blur-sm">
           <span className="min-w-0 flex-1 truncate text-ink">
             {quarantineTarget.originalPath}
           </span>
