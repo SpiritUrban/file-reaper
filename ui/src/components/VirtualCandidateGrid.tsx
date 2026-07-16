@@ -7,10 +7,15 @@ import { EmptyState } from "./EmptyState";
 
 export type GridDensity = "compact" | "standard" | "large";
 
+// Пороги мін. ширини плитки → кількість колонок. Збільшене превью живе в
+// правій зоні Live Preview, тож сітка має бути щільною оглядовою «контакт-
+// таблицею», а не рядом величезних плиток: у вузькій лівій зоні (≈45% ширини)
+// навіть standard давав лише 2–3 колонки. Значення занижено; тонке
+// підлаштування — клавіші `-`/`=` (compact/standard/large).
 const MIN_TILE_WIDTH: Record<GridDensity, number> = {
-  compact: 140,
-  standard: 190,
-  large: 260,
+  compact: 104,
+  standard: 140,
+  large: 200,
 };
 const GAP = 4;
 const OVERSCAN_ROWS = 3;
