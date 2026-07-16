@@ -396,6 +396,7 @@ mod tests {
                 path: path.into(),
                 size: ByteSize(size),
                 modified_at: Some(trashradar_domain::candidate::FsTimestamp(1)),
+                is_cloud: false,
             },
         )
     }

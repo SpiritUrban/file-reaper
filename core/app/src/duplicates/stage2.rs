@@ -37,6 +37,12 @@ pub struct HashTarget {
     pub size: ByteSize,
     /// Для валідності кешу (T-062).
     pub modified_at: Option<FsTimestamp>,
+    /// Дегідратований хмарний плейсхолдер (OneDrive / DriveFS): читання
+    /// «гідратує» його — синхронно тягне вміст з хмари (а офлайн — блокує).
+    /// Каскад ПРОПУСКАЄ такі файли (`FileAttributes::is_cloud_dehydrated`),
+    /// інакше stage 2 завантажив би гігабайти й міг зависнути назавжди на
+    /// першому ж офлайн-плейсхолдері.
+    pub is_cloud: bool,
 }
 
 /// Прогін щабля 2 без кешу.
@@ -93,6 +99,14 @@ pub fn run_partial_hash_stage_gated(
                 files_failed += 1;
                 continue;
             };
+
+            // Хмарний плейсхолдер: НЕ читаємо (читання гідратувало б файл із
+            // хмари — гігабайти трафіку й зависання на офлайн-файлі). Рахуємо
+            // як «не вдалося схешувати» — файл просто випадає з дедуплікації.
+            if target.is_cloud {
+                files_failed += 1;
+                continue;
+            }
 
             // T-062: спроба з кешу.
             if let Some(cache) = cache {
@@ -183,6 +197,7 @@ pub fn hash_targets_from_records<'a>(
                     path: r.path.clone(),
                     size: r.size,
                     modified_at: r.modified_at,
+                    is_cloud: r.attributes.is_cloud_dehydrated(),
                 },
             )
         })
@@ -268,8 +283,15 @@ mod tests {
                 path: path.into(),
                 size: ByteSize(size),
                 modified_at: Some(FsTimestamp(1)),
+                is_cloud: false,
             },
         )
+    }
+
+    fn cloud_target(id: u64, path: &str, size: u64) -> (CandidateId, HashTarget) {
+        let (cid, mut t) = target(id, path, size);
+        t.is_cloud = true;
+        (cid, t)
     }
 
     fn ph(b: u8) -> PartialHash {
@@ -407,6 +429,38 @@ mod tests {
             run_partial_hash_stage(&size_groups, &targets, &hasher, &CancellationToken::new());
         assert_eq!(out.stats.files_failed, 1);
         assert_eq!(out.groups.len(), 1);
+    }
+
+    /// Хмарний плейсхолдер НЕ читається (не гідратується) і випадає з груп.
+    #[test]
+    fn cloud_dehydrated_target_is_skipped_without_read() {
+        let size_groups = vec![ExactSizeGroup {
+            size: ByteSize(10),
+            members: vec![CandidateId(1), CandidateId(2), CandidateId(3)],
+        }];
+        let targets: HashMap<_, _> = [
+            target(1, "a", 10),
+            target(2, "b", 10),
+            cloud_target(3, "c", 10), // офлайн-плейсхолдер: читати не можна
+        ]
+        .into_iter()
+        .collect();
+        // Map навмисно НЕ містить "c": будь-яка спроба схешувати впала б —
+        // тест доводить, що хмарний файл до hasher взагалі не доходить.
+        let hasher = MapHasher {
+            map: [("a".into(), ph(1)), ("b".into(), ph(1))]
+                .into_iter()
+                .collect(),
+            full: HashMap::new(),
+            fail: HashMap::new(),
+            fail_full: HashMap::new(),
+        };
+        let out =
+            run_partial_hash_stage(&size_groups, &targets, &hasher, &CancellationToken::new());
+        assert_eq!(out.disk_reads, 2, "лише 2 локальні файли читаються з диска");
+        assert_eq!(out.stats.files_failed, 1, "хмарний файл рахується як skip");
+        assert_eq!(out.groups.len(), 1);
+        assert_eq!(out.groups[0].members.len(), 2, "у групі лише локальні дублі");
     }
 
     #[test]
