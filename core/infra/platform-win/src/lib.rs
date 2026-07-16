@@ -202,6 +202,29 @@ pub fn is_ntfs_volume(volume: char) -> Result<bool, CoreError> {
     WinScanEnvironment.is_ntfs(volume)
 }
 
+/// Знімок пам'яті процесу (T-157): поточний і піковий working set (RSS).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ProcessMemory {
+    /// Поточний резидентний обсяг (working set) процесу, байти.
+    pub working_set_bytes: u64,
+    /// Піковий working set за час життя процесу, байти.
+    pub peak_working_set_bytes: u64,
+}
+
+/// Виміряти пам'ять поточного процесу (working set = RSS) — джерело правди
+/// для профілювання §15 «RAM Core < 300 МБ» (T-157). На не-Windows повертає
+/// нулі: продукт MVP Windows-only, а точний RSS — платформозалежний.
+pub fn process_memory() -> ProcessMemory {
+    #[cfg(windows)]
+    {
+        windows::process_memory()
+    }
+    #[cfg(not(windows))]
+    {
+        ProcessMemory::default()
+    }
+}
+
 /// Живе заповнення тому (capacity/free) для прогнозу T-056 і Sidebar T-106.
 ///
 /// `Ok(None)` — том не готовий (порожній привід, немає носія): не помилка,
@@ -331,6 +354,48 @@ mod windows {
     #[link(name = "shell32")]
     extern "system" {
         fn ShellExecuteExW(info: *mut ShellExecuteInfoW) -> i32;
+    }
+
+    #[link(name = "psapi")]
+    extern "system" {
+        fn GetProcessMemoryInfo(
+            process: *mut c_void,
+            counters: *mut ProcessMemoryCountersEx,
+            cb: u32,
+        ) -> i32;
+    }
+
+    /// `PROCESS_MEMORY_COUNTERS_EX` — беремо working set (RSS) поля (T-157).
+    #[repr(C)]
+    #[derive(Default)]
+    struct ProcessMemoryCountersEx {
+        cb: u32,
+        page_fault_count: u32,
+        peak_working_set_size: usize,
+        working_set_size: usize,
+        quota_peak_paged_pool_usage: usize,
+        quota_paged_pool_usage: usize,
+        quota_peak_non_paged_pool_usage: usize,
+        quota_non_paged_pool_usage: usize,
+        pagefile_usage: usize,
+        peak_pagefile_usage: usize,
+        private_usage: usize,
+    }
+
+    pub fn process_memory() -> super::ProcessMemory {
+        let mut counters = ProcessMemoryCountersEx {
+            cb: std::mem::size_of::<ProcessMemoryCountersEx>() as u32,
+            ..Default::default()
+        };
+        // Псевдо-хендл GetCurrentProcess не потребує CloseHandle.
+        let ok = unsafe { GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, counters.cb) };
+        if ok == 0 {
+            return super::ProcessMemory::default();
+        }
+        super::ProcessMemory {
+            working_set_bytes: counters.working_set_size as u64,
+            peak_working_set_bytes: counters.peak_working_set_size as u64,
+        }
     }
 
     const FILE_ATTRIBUTE_HIDDEN: u32 = 0x0000_0002;
@@ -668,6 +733,19 @@ mod windows {
         #[test]
         fn elevation_probe_does_not_panic() {
             let _ = is_process_elevated();
+        }
+
+        /// T-157: RSS процесу — ненульовий, пік не менший за поточний.
+        #[test]
+        fn process_memory_reports_nonzero_working_set() {
+            let mem = super::super::process_memory();
+            assert!(mem.working_set_bytes > 0, "working set має бути ненульовим");
+            assert!(
+                mem.peak_working_set_bytes >= mem.working_set_bytes,
+                "пік ({}) не може бути меншим за поточний ({})",
+                mem.peak_working_set_bytes,
+                mem.working_set_bytes
+            );
         }
 
         /// T-106: заповнення тому — реальні ненульові цифри, free ≤ capacity.

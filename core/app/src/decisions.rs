@@ -89,7 +89,10 @@ pub fn apply_decision_to_records(
     updated
 }
 
-/// Застосувати рішення в hot-індексі (get_all → mutate → upsert).
+/// Застосувати рішення в hot-індексі, **не матеріалізуючи** весь індекс
+/// (T-157): `for_each_mut` стрімить записи по одному, `updated` збирає лише
+/// matching-записи (обмежений вибіркою, не розміром індексу). «Позначити все»
+/// на категорії в мільйони файлів більше не дає спайку get_all (418 МБ, §15).
 pub fn apply_decision_hot(
     index: &dyn HotIndex,
     selector: &DecisionSelector,
@@ -100,11 +103,16 @@ pub fn apply_decision_hot(
             "Потрібен candidateId або path для keep/mark.",
         ));
     }
-    let mut all = index.get_all()?;
-    let updated = apply_decision_to_records(&mut all, selector, decision);
-    if !updated.is_empty() {
-        index.upsert_batch(updated.clone())?;
-    }
+    let mut updated = Vec::new();
+    index.for_each_mut(&mut |record| {
+        if selector.matches(record) {
+            record.decision = decision;
+            // Клон навіть при незмінному рішенні — ідемпотентність для upsert/UI
+            // (як і стара apply_decision_to_records).
+            updated.push(record.clone());
+        }
+        true
+    })?;
     Ok(ApplyDecisionResult { updated, decision })
 }
 

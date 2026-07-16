@@ -95,6 +95,7 @@ jobs:
             benches/dup-bench
             benches/rerun-bench
             benches/reap-bench
+            benches/mem-bench
 
       # T-019: in-memory index — memory hard-gate >15%; timings WARN + ceiling
       - name: index-bench (T-019)
@@ -131,6 +132,14 @@ jobs:
       # T-154: transactional reap of 1000 files on real FS — §15 ceiling 2s
       - name: reap-bench (T-154)
         working-directory: benches/reap-bench
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
+          cargo run --release
+
+      # T-157: real process RSS after scan — §15 ceiling 300MB + streaming guard
+      - name: mem-bench (T-157)
+        working-directory: benches/mem-bench
         run: |
           cargo fmt --check
           cargo clippy --all-targets -- -D warnings

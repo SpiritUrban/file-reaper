@@ -1,0 +1,20 @@
+[package]
+name = "trashradar-bench-mem"
+description = "Бенчмарк-гейт пам'яті Core: справжній RSS у простої після скану < 300 МБ (T-157, §15)."
+version = "0.1.0"
+edition = "2021"
+license = "UNLICENSED"
+publish = false
+
+[[bin]]
+name = "mem-bench"
+path = "src/main.rs"
+
+[dependencies]
+trashradar-domain = { path = "../../core/domain" }
+trashradar-app = { path = "../../core/app" }
+trashradar-index-memory = { path = "../../core/infra/index-memory" }
+trashradar-platform-win = { path = "../../core/infra/platform-win" }
+
+[profile.release]
+opt-level = 3

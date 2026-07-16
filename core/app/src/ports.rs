@@ -179,7 +179,34 @@ pub trait HotIndex {
     fn clear(&self) -> Result<(), CoreError>;
 
     /// Отримати всі записи з індексу.
+    ///
+    /// Матеріалізує **всі** `FileRecord` одразу (кожен з власним `String`
+    /// шляхом) — на індексі в мільйони записів це пік пам'яті понад бюджет
+    /// §15. Для повного проходу з мутацією використовуй [`Self::for_each_mut`],
+    /// що тримає в пам'яті лише поточний запис (T-157).
     fn get_all(&self) -> Result<Vec<FileRecord>, CoreError>;
+
+    /// Пройти всі записи по черзі з мутацією in-place, **не матеріалізуючи**
+    /// весь індекс (T-157: RAM Core < 300 МБ, §15).
+    ///
+    /// `f` отримує кожен запис розпакованим; зміни полів (category, safety,
+    /// decision — усе, що зберігає гарячий запис; шлях лишається незмінним)
+    /// пишуться назад. `f` повертає `false`, щоб зупинити обхід (кооперативна
+    /// відміна). Дефолт коректний, але через `get_all`+`upsert_batch` (O(n)
+    /// пам'яті) — гарячі реалізації повинні перекрити вікнами.
+    fn for_each_mut(&self, f: &mut dyn FnMut(&mut FileRecord) -> bool) -> Result<(), CoreError> {
+        let mut all = self.get_all()?;
+        let mut changed = Vec::new();
+        for record in &mut all {
+            let keep_going = f(record);
+            changed.push(record.clone());
+            if !keep_going {
+                break;
+            }
+        }
+        self.upsert_batch(changed)?;
+        Ok(())
+    }
 
     /// Підрядковий пошук за іменем файла та шляхом серед кандидатів (T-018).
     /// Регістронезалежний; записи з рішенням Keep не повертаються

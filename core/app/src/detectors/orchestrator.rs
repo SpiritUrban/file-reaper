@@ -55,8 +55,6 @@ pub struct CategorizationStats {
     pub records_cleared: u64,
     /// Скільки увімкнених детекторів брали участь у прогоні.
     pub detectors_enabled: u64,
-    /// Скільки батчів оброблено (повний прогін індексу).
-    pub batches: u64,
     /// Прогін скасовано кооперативно.
     pub cancelled: bool,
 }
@@ -243,35 +241,46 @@ impl<'a> DetectorOrchestrator<'a> {
             });
         }
 
-        let snapshot = index.get_all()?;
         let mut stats = CategorizationStats {
             detectors_enabled: self.registry.enabled().count() as u64,
             ..CategorizationStats::default()
         };
 
-        // Оновлення накопичуються і застосовуються одним upsert наприкінці:
-        // upsert_batch платить O(індекс) за виклик (мапа позицій), тож
-        // per-чанковий flush на індексі в мільйони записів квадратичний
-        // (T-154). При cancel нічого не застосовано — валідний стан (жодних
-        // часткових перерахунків).
-        let mut updated: Vec<FileRecord> = Vec::new();
-        for chunk in snapshot.chunks(self.batch_size) {
+        // Мутація in-place по одному запису (T-157): `for_each_mut` не
+        // матеріалізує весь індекс і не накопичує `updated`-вектор — пік
+        // пам'яті лишається O(1) на записі замість O(індекс) (get_all давав
+        // спайк 418 МБ на 1.5 млн, понад бюджет §15). Гаряча реалізація
+        // (`InMemoryIndex`) пише зміни одразу в компактний запис, тож немає
+        // й квадратичного per-batch upsert, якого уникав старий accumulate
+        // (T-154). При cancel обхід зупиняється — уже застосовані записи
+        // лишаються у валідному стані (як і будь-який частковий скан).
+        index.for_each_mut(&mut |record| {
             if cancel.is_cancelled() {
                 stats.cancelled = true;
-                break;
+                return false;
             }
-            let mut batch = self.run_batch(chunk, clear_unmatched);
-            stats.records_seen += batch.stats.records_seen;
-            stats.records_skipped_keep += batch.stats.records_skipped_keep;
-            stats.hits += batch.stats.hits;
-            stats.records_updated += batch.stats.records_updated;
-            stats.records_cleared += batch.stats.records_cleared;
-            stats.batches += 1;
-            updated.append(&mut batch.updated);
-        }
-        if !stats.cancelled && !updated.is_empty() {
-            index.upsert_batch(updated)?;
-        }
+            if record.decision == Decision::Keep {
+                stats.records_skipped_keep += 1;
+                return true;
+            }
+            stats.records_seen += 1;
+            let hits = self.registry.evaluate_record(record);
+            stats.hits += hits.len() as u64;
+            if let Some(primary) = hits.first() {
+                apply_primary_hit_mut(record, primary);
+                stats.records_updated += 1;
+            } else if clear_unmatched
+                && record.category != CategoryId::Uncategorized
+                && !is_duplicates_cascade_primary(record)
+            {
+                // T-126/T-152: каскад дублікатів не в фермі — не clear.
+                clear_category_mut(record);
+                stats.records_cleared += 1;
+            }
+            true
+        })?;
+        // `batches` втратив сенс поза chunk-моделлю; лишаємо 0 (поле
+        // діагностичне, не входить у DoD).
         Ok(stats)
     }
 
@@ -582,7 +591,6 @@ mod tests {
 
         assert_eq!(stats.records_seen, 3);
         assert_eq!(stats.records_updated, 2);
-        assert_eq!(stats.batches, 2); // batch_size=2 → ceil(3/2)=2
         assert!(!stats.cancelled);
 
         let all = index.get_all().unwrap();

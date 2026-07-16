@@ -584,6 +584,28 @@ impl trashradar_app::ports::HotIndex for InMemoryIndex {
         Ok(self.get_all())
     }
 
+    fn for_each_mut(&self, f: &mut dyn FnMut(&mut FileRecord) -> bool) -> Result<(), CoreError> {
+        // Тримаємо в пам'яті лише поточний запис (T-157): розпаковуємо один
+        // компакт → викликаємо `f` → пакуємо назад ті самі dir/filename_id
+        // (шлях не змінюється). Жодного get_all-піка на мільйони FileRecord.
+        let mut inner = self.inner.write().unwrap();
+        let len = inner.records.len();
+        for i in 0..len {
+            // CompactFileRecord — Copy (48 байт): копіюємо з-під immutable
+            // резолву шляху, далі мутуємо records[i] без конфлікту borrow.
+            let compact = inner.records[i];
+            let path = inner.resolve_path(&compact);
+            let mut record = compact.unpack(path);
+            let keep_going = f(&mut record);
+            inner.records[i] =
+                CompactFileRecord::pack(&record, compact.dir_id, compact.filename_id);
+            if !keep_going {
+                break;
+            }
+        }
+        Ok(())
+    }
+
     fn search_file_records(&self, query: &str, limit: usize) -> Result<Vec<FileRecord>, CoreError> {
         Ok(self.search(query, limit))
     }
@@ -1119,5 +1141,65 @@ mod tests {
 
         // Clean up
         std::fs::remove_dir_all(temp_dir).unwrap_or(());
+    }
+
+    /// T-157: `for_each_mut` пише зміни назад у компактний запис (шлях і id
+    /// незмінні), зберігаючи інші поля через pack/unpack roundtrip.
+    #[test]
+    fn for_each_mut_writes_changes_back_preserving_path_and_id() {
+        use trashradar_app::ports::HotIndex;
+        let index = InMemoryIndex::new();
+        index
+            .insert_batch(vec![
+                sample_record(1, "C:\\a\\one.mp4"),
+                sample_record(2, "C:\\a\\two.mp4"),
+                sample_record(3, "C:\\b\\three.mp4"),
+            ])
+            .unwrap();
+        index.finish_indexing();
+
+        // Мутуємо лише запис #2: категорія + рішення.
+        let mut seen = 0u64;
+        index
+            .for_each_mut(&mut |record| {
+                seen += 1;
+                if record.candidate_id.0 == 2 {
+                    record.category = CategoryId::LargeFiles;
+                    record.decision = Decision::Keep;
+                }
+                true
+            })
+            .unwrap();
+        assert_eq!(seen, 3, "прохід має побачити кожен запис");
+
+        let all = index.get_all();
+        let r2 = all.iter().find(|r| r.candidate_id.0 == 2).unwrap();
+        assert_eq!(r2.category, CategoryId::LargeFiles);
+        assert_eq!(r2.decision, Decision::Keep);
+        assert_eq!(r2.path, "C:\\a\\two.mp4", "шлях лишається незмінним");
+        // Незачеплені записи зберегли свої значення (repack — no-op за вмістом).
+        let r1 = all.iter().find(|r| r.candidate_id.0 == 1).unwrap();
+        assert_eq!(r1.category, CategoryId::ForgottenVideos);
+        assert_eq!(r1.decision, Decision::Undecided);
+        assert_eq!(r1.path, "C:\\a\\one.mp4");
+    }
+
+    /// T-157: `f` повертає `false` → обхід зупиняється (кооперативна відміна).
+    #[test]
+    fn for_each_mut_stops_when_callback_returns_false() {
+        use trashradar_app::ports::HotIndex;
+        let index = InMemoryIndex::new();
+        index
+            .insert_batch((0..10).map(|i| sample_record(i, "C:\\x\\f.mp4")).collect())
+            .unwrap();
+
+        let mut visited = 0u64;
+        index
+            .for_each_mut(&mut |_record| {
+                visited += 1;
+                visited < 3 // зупинитись після третього
+            })
+            .unwrap();
+        assert_eq!(visited, 3, "обхід має зупинитись рівно на третьому записі");
     }
 }
