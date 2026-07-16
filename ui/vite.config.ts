@@ -19,4 +19,11 @@ export default defineConfig({
   // Tauri: відносні шляхи для вбудованої роздачі з frontendDist.
   base: "./",
   clearScreen: false,
+  build: {
+    // Мінімально підтримувана версія WebView2 = Chromium 111 (T-158,
+    // docs/webview2-baseline.md). Флор диктує Tailwind v4 (color-mix()).
+    // Явна ціль не дає esbuild/Vite тихо емітити синтаксис, новіший за 111:
+    // якщо хтось внесе таку фічу, збірка впаде — це і є смоук-гейт JS.
+    target: "chrome111",
+  },
 });
