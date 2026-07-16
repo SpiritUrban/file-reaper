@@ -33,6 +33,7 @@ fn recover_quarantine_at_startup() {
         Ok(result) => tracing::info!(
             completed = result.completed.len(),
             rolled_back = result.rolled_back.len(),
+            purge_completed = result.purge_completed.len(),
             "Crash recovery завершено"
         ),
         Err(error) => tracing::error!(%error, "Crash recovery потребує ручного втручання"),

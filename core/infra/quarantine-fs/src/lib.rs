@@ -1,4 +1,4 @@
-﻿//! Адаптер `QuarantineFs` — єдиний шлюз деструктивних операцій.
+//! Адаптер `QuarantineFs` — єдиний шлюз деструктивних операцій.
 //!
 //! ІНВАРІАНТ D4 (docs/architecture.md §8): лише цей крейт має право
 //! змінювати файлову систему. T-077 створює службовий каталог на тому;
@@ -9,7 +9,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use trashradar_app::ports::{QuarantineFs, RecoveryLocation, RestoreMove};
+use trashradar_app::ports::{QuarantineFs, RecoveryLocation, RestoreMove, SurrogateState};
 use trashradar_domain::{
     error::CoreError,
     quarantine::{is_under_service_directory, FileIdentity, QuarantineGuard},
@@ -171,6 +171,32 @@ impl QuarantineFs for NativeQuarantineFs {
             (false, true) => RecoveryLocation::QuarantineOnly,
             (true, true) => RecoveryLocation::Both,
             (false, false) => RecoveryLocation::Missing,
+        })
+    }
+
+    fn surrogate_state(&self, surrogate_path: &str) -> Result<SurrogateState, CoreError> {
+        let surrogate = Path::new(surrogate_path);
+        validate_quarantine_destination(surrogate).map_err(|_| {
+            CoreError::invalid_argument("Surrogate має бути всередині .trashradar\\quarantine.")
+        })?;
+        if surrogate.try_exists().map_err(|error| {
+            CoreError::io(format!(
+                "Не вдалося перевірити quarantine surrogate: {error}"
+            ))
+        })? {
+            return Ok(SurrogateState::Present);
+        }
+        // Файла немає — але це висновок лише тоді, коли є де його шукати:
+        // недоступний каталог карантину (від'єднаний том) не свідчить ні про
+        // що (T-156).
+        let root_available = surrogate
+            .parent()
+            .map(|root| root.is_dir())
+            .unwrap_or(false);
+        Ok(if root_available {
+            SurrogateState::Missing
+        } else {
+            SurrogateState::RootUnavailable
         })
     }
 }
@@ -700,6 +726,44 @@ mod tests {
                 .recovery_location(&source.to_string_lossy(), &surrogate.to_string_lossy())
                 .unwrap(),
             RecoveryLocation::Missing
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// T-156: стан сурогата при старті. Файл на місці → Present; каталог
+    /// карантину доступний, файла немає → Missing (перерваний purge знищив
+    /// його); недоступний каталог → RootUnavailable (том від'єднано — про
+    /// запис не відомо нічого, чіпати не можна).
+    #[test]
+    fn surrogate_state_distinguishes_present_missing_and_unavailable_root() {
+        let root = temp_volume("surrogate-state");
+        let directory = NativeQuarantineFs.ensure_at_root(&root).unwrap();
+        let surrogate = directory.quarantine_root.join("entry.bin");
+
+        fs::write(&surrogate, b"payload").unwrap();
+        assert_eq!(
+            NativeQuarantineFs
+                .surrogate_state(&surrogate.to_string_lossy())
+                .unwrap(),
+            SurrogateState::Present
+        );
+
+        fs::remove_file(&surrogate).unwrap();
+        assert_eq!(
+            NativeQuarantineFs
+                .surrogate_state(&surrogate.to_string_lossy())
+                .unwrap(),
+            SurrogateState::Missing,
+            "каталог карантину на місці, файла немає → знищений"
+        );
+
+        // Каталог карантину зник (том від'єднано) — висновку про файл немає.
+        fs::remove_dir_all(&directory.quarantine_root).unwrap();
+        assert_eq!(
+            NativeQuarantineFs
+                .surrogate_state(&surrogate.to_string_lossy())
+                .unwrap(),
+            SurrogateState::RootUnavailable
         );
         fs::remove_dir_all(root).unwrap();
     }

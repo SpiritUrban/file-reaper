@@ -60,6 +60,25 @@ jobs:
       - run: cargo check -p trashradar-shell
       - run: cargo clippy -p trashradar-shell -- -D warnings
 
+  e2e:
+    name: E2E (crash recovery matrix)
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: tests/e2e
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tests/e2e
+      # T-156: reap/purge crash-recovery matrix on real FS + SQLite.
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+
   bench:
     name: Bench (§15 regression gates)
     runs-on: windows-latest

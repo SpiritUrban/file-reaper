@@ -15,7 +15,9 @@ use trashradar_domain::{
     },
 };
 
-use crate::ports::{QuarantineFs, QuarantineManifest, RecoveryLocation, RestoreMove};
+use crate::ports::{
+    QuarantineFs, QuarantineManifest, RecoveryLocation, RestoreMove, SurrogateState,
+};
 use crate::workers::{JobHandle, JobPriority, WorkerPool};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -308,6 +310,9 @@ pub struct ManualPurgeResult {
 pub struct RecoveryResult {
     pub completed: Vec<QuarantineEntryId>,
     pub rolled_back: Vec<QuarantineEntryId>,
+    /// Записи, чий файл уже знищив перерваний purge: звірка з реальністю
+    /// докотила їх у `Purged` (T-156).
+    pub purge_completed: Vec<QuarantineEntryId>,
 }
 
 pub struct QuarantineRecovery<'a, F: QuarantineFs, M: QuarantineManifest> {
@@ -323,18 +328,33 @@ impl<'a, F: QuarantineFs, M: QuarantineManifest> QuarantineRecovery<'a, F, M> {
         }
     }
 
+    /// Звірка журналу з реальністю при старті: незавершений reap докочується
+    /// або відкочується (T-084), а запис, чий файл уже знищив перерваний
+    /// purge, доводиться до `Purged` (T-156).
     pub fn reconcile(
         &self,
         mut surrogate_path: impl FnMut(&QuarantineEntry) -> Result<String, CoreError>,
     ) -> Result<RecoveryResult, CoreError> {
-        let mut in_flight: Vec<_> = self
-            .manifest
-            .list_entries()?
-            .into_iter()
+        let entries = self.manifest.list_entries()?;
+        let mut result = RecoveryResult::default();
+        self.reconcile_in_flight(&entries, &mut surrogate_path, &mut result)?;
+        self.reconcile_interrupted_purge(&entries, &mut surrogate_path, &mut result)?;
+        Ok(result)
+    }
+
+    /// T-084: незавершений reap — файл або ще на місці, або вже в карантині.
+    fn reconcile_in_flight(
+        &self,
+        entries: &[QuarantineEntry],
+        surrogate_path: &mut impl FnMut(&QuarantineEntry) -> Result<String, CoreError>,
+        result: &mut RecoveryResult,
+    ) -> Result<(), CoreError> {
+        let mut in_flight: Vec<_> = entries
+            .iter()
             .filter(|entry| entry.status == QuarantineStatus::InFlight)
+            .cloned()
             .collect();
         in_flight.sort_by_key(|entry| entry.id.0);
-        let mut result = RecoveryResult::default();
         for entry in in_flight {
             let surrogate = surrogate_path(&entry)?;
             match self
@@ -369,7 +389,55 @@ impl<'a, F: QuarantineFs, M: QuarantineManifest> QuarantineRecovery<'a, F, M> {
                 }
             }
         }
-        Ok(result)
+        Ok(())
+    }
+
+    /// T-156: purge знищує файл і лише потім позначає запис `Purged` — аварія
+    /// між цими кроками лишає запис, який обіцяє відновлення неіснуючого
+    /// файла. Такий запис не просто фантом в UI: наступний «Спорожнити все»
+    /// і кожен прохід TTL-sweeper-а спотикаються об нього назавжди, тож
+    /// автоочищення карантину більше не працює. Звірка з реальністю доводить
+    /// перерваний purge до кінця.
+    ///
+    /// Fail-safe: рішення приймається лише коли каталог карантину тому
+    /// доступний і файла в ньому справді немає. Недоступний том (від'єднаний
+    /// зовнішній диск) НЕ дає підстав ховати запис — файл повернеться разом
+    /// з томом і лишиться відновлюваним.
+    fn reconcile_interrupted_purge(
+        &self,
+        entries: &[QuarantineEntry],
+        surrogate_path: &mut impl FnMut(&QuarantineEntry) -> Result<String, CoreError>,
+        result: &mut RecoveryResult,
+    ) -> Result<(), CoreError> {
+        let mut quarantined: Vec<_> = entries
+            .iter()
+            .filter(|entry| entry.status == QuarantineStatus::Quarantined)
+            .cloned()
+            .collect();
+        quarantined.sort_by_key(|entry| entry.id.0);
+        for entry in quarantined {
+            let surrogate = surrogate_path(&entry)?;
+            match self.filesystem.surrogate_state(&surrogate)? {
+                SurrogateState::Present | SurrogateState::RootUnavailable => {}
+                SurrogateState::Missing => {
+                    // Аудит пише саме звірка: перервана операція не встигла
+                    // лишити запис про фактичне знищення (статус і аудит —
+                    // одна транзакція, T-087). `actor = Recovery` каже, що це
+                    // докат; яка саме операція його почала — ручний purge чи
+                    // TTL — з реальності не відновлюється, тож фіксуємо як
+                    // ручний (єдина операція purge, доступна користувачу).
+                    confirm_with_audit(
+                        self.manifest,
+                        &entry,
+                        QuarantineStatus::Purged,
+                        AuditOperation::PurgeManual,
+                        AuditActor::Recovery,
+                    )?;
+                    result.purge_completed.push(entry.id);
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -726,6 +794,14 @@ mod tests {
                     (false, false) => RecoveryLocation::Missing,
                 },
             )
+        }
+
+        fn surrogate_state(&self, surrogate_path: &str) -> Result<SurrogateState, CoreError> {
+            Ok(if self.files.lock().unwrap().contains(surrogate_path) {
+                SurrogateState::Present
+            } else {
+                SurrogateState::Missing
+            })
         }
     }
 
@@ -1097,6 +1173,71 @@ mod tests {
         assert_eq!(stored[&2].status, QuarantineStatus::Quarantined);
     }
 
+    /// T-156: аварія purge між знищенням файла і оновленням статусу лишає
+    /// `Quarantined`-запис без файла. Звірка з реальністю докочує його у
+    /// `Purged` (файла в доступному карантині немає), а запис із наявним
+    /// файлом не чіпає. Без цього фантомний запис вічно валив би наступний
+    /// «Спорожнити все» і TTL-sweeper.
+    #[test]
+    fn crash_recovery_completes_interrupted_purge_of_deleted_file() {
+        let deleted = request(1).entry; // файла в карантині вже немає
+        let intact = request(2).entry; // файл на місці — не чіпати
+        let entries = [
+            {
+                let mut e = deleted.clone();
+                e.status = QuarantineStatus::Quarantined;
+                e
+            },
+            {
+                let mut e = intact.clone();
+                e.status = QuarantineStatus::Quarantined;
+                e
+            },
+        ];
+        let crash = Arc::new(CrashControl {
+            phase: CrashPhase::AfterMove,
+            crash_call: usize::MAX,
+            inserts: Mutex::new(0),
+            moves: Mutex::new(0),
+            updates: Mutex::new(0),
+            audits: Mutex::new(Vec::new()),
+        });
+        // Лише файл `intact` присутній у карантині.
+        let fs = FakeFs {
+            files: Arc::new(Mutex::new(HashSet::from([format!(
+                r"C:\.trashradar\quarantine\{}",
+                intact.surrogate_name
+            )]))),
+            crash: Arc::clone(&crash),
+        };
+        let manifest = FakeManifest {
+            entries: Arc::new(Mutex::new(
+                entries.iter().map(|e| (e.id.0, e.clone())).collect(),
+            )),
+            crash,
+        };
+        let result = QuarantineRecovery::new(&fs, &manifest)
+            .reconcile(|entry| {
+                Ok(format!(
+                    r"C:\.trashradar\quarantine\{}",
+                    entry.surrogate_name
+                ))
+            })
+            .unwrap();
+
+        assert_eq!(result.purge_completed, vec![QuarantineEntryId(1)]);
+        let stored = manifest.entries.lock().unwrap();
+        assert_eq!(stored[&1].status, QuarantineStatus::Purged);
+        assert_eq!(stored[&2].status, QuarantineStatus::Quarantined);
+        // Докат покритий append-only аудитом (T-087) як дія відновлення.
+        let audit = manifest.list_audit().unwrap();
+        assert!(audit
+            .iter()
+            .any(|record| record.event.entry_id == QuarantineEntryId(1)
+                && record.event.operation == AuditOperation::PurgeManual
+                && record.event.actor == AuditActor::Recovery));
+    }
+
     #[test]
     fn crash_recovery_fails_closed_for_duplicate_or_missing_file() {
         use trashradar_domain::error::ErrorCode;
@@ -1225,6 +1366,9 @@ mod tests {
             surrogate_path: &str,
         ) -> Result<RecoveryLocation, CoreError> {
             self.inner.recovery_location(source_path, surrogate_path)
+        }
+        fn surrogate_state(&self, surrogate_path: &str) -> Result<SurrogateState, CoreError> {
+            self.inner.surrogate_state(surrogate_path)
         }
     }
 

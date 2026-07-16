@@ -79,7 +79,9 @@ mod probes {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Instant;
 
-    use trashradar_app::ports::{QuarantineFs, QuarantineManifest, RecoveryLocation, RestoreMove};
+    use trashradar_app::ports::{
+        QuarantineFs, QuarantineManifest, RecoveryLocation, RestoreMove, SurrogateState,
+    };
     use trashradar_domain::error::CoreError;
     use trashradar_domain::quarantine::{
         DestructiveAuditEvent, DestructiveAuditRecord, FileIdentity, QuarantineEntry,
@@ -140,6 +142,10 @@ mod probes {
             surrogate_path: &str,
         ) -> Result<RecoveryLocation, CoreError> {
             self.inner.recovery_location(source_path, surrogate_path)
+        }
+
+        fn surrogate_state(&self, surrogate_path: &str) -> Result<SurrogateState, CoreError> {
+            self.inner.surrogate_state(surrogate_path)
         }
     }
 

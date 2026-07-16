@@ -1,0 +1,20 @@
+[package]
+name = "trashradar-e2e"
+description = "Наскрізні тести: аварійне відновлення Quarantine на реальній FS і SQLite (T-156)."
+version = "0.1.0"
+edition = "2021"
+license = "UNLICENSED"
+publish = false
+
+# Дочірній процес-«жертва»: виконує reap/purge і гине у заданій фазі.
+# Шлях до бінарника тести отримують через CARGO_BIN_EXE_crash-victim.
+[[bin]]
+name = "crash-victim"
+path = "src/bin/crash_victim.rs"
+
+[dependencies]
+trashradar-domain = { path = "../../core/domain" }
+trashradar-app = { path = "../../core/app" }
+trashradar-index-sqlite = { path = "../../core/infra/index-sqlite" }
+trashradar-quarantine-fs = { path = "../../core/infra/quarantine-fs" }
+trashradar-platform-win = { path = "../../core/infra/platform-win" }
