@@ -23,7 +23,7 @@ use trashradar_app::scan_control::{
 use trashradar_app::scan_strategy::{choose_scan_strategy, VolumeCapabilities};
 use trashradar_app::workers::CancellationToken;
 use trashradar_app::{
-    mark_confirmed_groups, mvp_predicate_registry, run_duplicate_cascade_with_cache,
+    mark_confirmed_groups, mvp_predicate_registry, run_duplicate_cascade_with_cache, Aggregator,
     DecisionSelector, KeepPolicy, LiveTotals, MarkedDuplicateGroup, MemoryHashCache,
 };
 use trashradar_domain::candidate::{
@@ -894,16 +894,35 @@ pub async fn scan_start<R: Runtime>(
             if let Ok(live) = last_totals.lock() {
                 let summary = live.summary();
                 events::emit_cleanup_totals(&app2, &summary);
+                // T-055 діагностика: live-лічильники (мульти-hit, інкрементні)
+                // звіряються з перерахунком primary-індексу. Розбіжність — це
+                // сигнал телеметрії, а НЕ причина рвати scan-потік: колишній
+                // debug_assert! панікував тут і UI ніколи не отримував
+                // SessionComplete нижче (лишався «зайнятим» назавжди). У release
+                // debug_assert і так компілювався геть — тобто в проді розбіжність
+                // уже була нефатальною; тут робимо dev таким же стійким, лишаючи
+                // гучний ERROR із дельтою для діагностики за реальними даними.
                 // InMemoryIndex::get_all — inherent Vec; trait HotIndex returns Result.
-                let all = index.get_all();
-                let matches = live.unique_matches_index(&all);
-                tracing::info!(
-                    reclaimable = summary.unique_bytes.0,
-                    unique_files = summary.unique_files,
-                    matches_index = matches,
-                    "live totals після скану"
-                );
-                debug_assert!(matches, "T-055: live unique має збігатися з індексом");
+                let index_summary = Aggregator::from_primary_records(&index.get_all());
+                if summary.unique_bytes != index_summary.unique_bytes
+                    || summary.unique_files != index_summary.unique_files
+                {
+                    tracing::error!(
+                        live_unique_files = summary.unique_files,
+                        index_unique_files = index_summary.unique_files,
+                        live_unique_bytes = summary.unique_bytes.0,
+                        index_unique_bytes = index_summary.unique_bytes.0,
+                        delta_files = summary.unique_files as i64 - index_summary.unique_files as i64,
+                        delta_bytes = summary.unique_bytes.0 as i64 - index_summary.unique_bytes.0 as i64,
+                        "T-055: live-тотали розійшлися з індексом (не фатально; індекс — джерело істини)"
+                    );
+                } else {
+                    tracing::info!(
+                        reclaimable = summary.unique_bytes.0,
+                        unique_files = summary.unique_files,
+                        "live totals після скану збігаються з індексом"
+                    );
+                }
             }
             // Закриття busy-стану UI (після томів + каскаду).
             emit_progress(

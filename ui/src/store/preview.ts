@@ -46,6 +46,50 @@ const thumbnailCache = new Map<number, string>();
 const scrubCache = new Map<number, string[]>();
 
 /**
+ * Спільна шина `preview.ready`: рівно ОДНА підписка на застосунок, і вона
+ * реєструється **до** видачі будь-якої `preview.*` команди. Раніше кожен хук
+ * підписувався вже **після** `command(...)` (`command().then(async ack =>
+ * await subscribe(...))`) — але P1-задача декодування стартує синхронно при
+ * виклику команди й на швидкому WIC-декоді встигає емітнути подію ДО того, як
+ * хук зареєструє слухача. Tauri події не буферизуються → подія губилась, і
+ * плитка лишалась порожньою («пусті площини»). Шина + `ensurePreviewReadyBus`
+ * до команди усувають цю гонку й тримають лише одного слухача замість N.
+ */
+const previewReadyWaiters = new Map<string, Set<(e: PreviewReadyEvent) => void>>();
+let previewReadyBus: Promise<() => void> | null = null;
+
+function ensurePreviewReadyBus(): Promise<() => void> {
+  if (!previewReadyBus) {
+    previewReadyBus = subscribe<PreviewReadyEvent>("preview.ready", (event) => {
+      const waiters = previewReadyWaiters.get(event.path);
+      if (!waiters) return;
+      // Копія: колбек може зняти себе під час ітерації.
+      for (const cb of [...waiters]) cb(event);
+    });
+  }
+  return previewReadyBus;
+}
+
+/** Зареєструвати очікувача `preview.ready` для конкретного шляху. */
+function onPreviewReady(
+  path: string,
+  cb: (e: PreviewReadyEvent) => void,
+): () => void {
+  let set = previewReadyWaiters.get(path);
+  if (!set) {
+    set = new Set();
+    previewReadyWaiters.set(path, set);
+  }
+  set.add(cb);
+  return () => {
+    const s = previewReadyWaiters.get(path);
+    if (!s) return;
+    s.delete(cb);
+    if (s.size === 0) previewReadyWaiters.delete(path);
+  };
+}
+
+/**
  * Статична мініатюра кандидата-файла. Папки-одиниці (T-053) не мають
  * єдиного файла для превью — хук для них одразу повертає `null`.
  */
@@ -65,41 +109,48 @@ export function useThumbnail(
     }
 
     let cancelled = false;
-    let unlisten: (() => void) | undefined;
+    let off: (() => void) | undefined;
 
-    command<PreviewThumbnailAck>("preview.thumbnail", {
-      payload: { candidateId: candidate.id },
-    })
-      .then(async (ack) => {
+    void (async () => {
+      // Слухача реєструємо ДО команди — інакше швидка P1-задача емітне
+      // preview.ready раніше, ніж ми підпишемось, і подія загубиться.
+      await ensurePreviewReadyBus();
+      if (cancelled) return;
+      off = onPreviewReady(candidate.path, (event) => {
+        if (cancelled) return;
+        thumbnailCache.set(candidate.id, event.dataUrl);
+        setSrc(event.dataUrl);
+        off?.();
+        off = undefined;
+      });
+      try {
+        const ack = await command<PreviewThumbnailAck>("preview.thumbnail", {
+          payload: { candidateId: candidate.id },
+        });
         if (cancelled) return;
         if (ack.status === "cached" && ack.dataUrl) {
           thumbnailCache.set(candidate.id, ack.dataUrl);
           setSrc(ack.dataUrl);
-          return;
+          off?.();
+          off = undefined;
+        } else if (ack.status !== "scheduled") {
+          // "unavailable" (папка-одиниця) — події не буде, знімаємо слухача.
+          off?.();
+          off = undefined;
         }
-        if (ack.status === "scheduled") {
-          unlisten = await subscribe<PreviewReadyEvent>(
-            "preview.ready",
-            (event) => {
-              if (cancelled || event.path !== candidate.path) return;
-              thumbnailCache.set(candidate.id, event.dataUrl);
-              setSrc(event.dataUrl);
-              unlisten?.();
-              unlisten = undefined;
-            },
-          );
-        }
-      })
-      .catch((error) => {
+      } catch (error) {
+        off?.();
+        off = undefined;
         console.warn(
           `Failed to request thumbnail for candidate ${candidate.id}:`,
           error,
         );
-      });
+      }
+    })();
 
     return () => {
       cancelled = true;
-      unlisten?.();
+      off?.();
     };
   }, [candidate.id, candidate.path, candidate.unit]);
 
@@ -264,34 +315,46 @@ export function useLargePreview(
     setSrc(null);
     if (!candidate || candidate.unit !== "file") return;
 
+    const id = candidate.id;
+    const path = candidate.path;
     let cancelled = false;
-    let unlisten: (() => void) | undefined;
+    let off: (() => void) | undefined;
 
-    command<PreviewLargeAck>("preview.large", {
-      payload: { candidateId: candidate.id },
-    })
-      .then(async (ack) => {
+    void (async () => {
+      // Та сама гонка, що й у useThumbnail: слухача Sharp-доставки реєструємо
+      // ДО команди, інакше P0-подія large_sharp може випередити підписку.
+      await ensurePreviewReadyBus();
+      if (cancelled) return;
+      off = onPreviewReady(path, (event) => {
+        if (cancelled || event.kind !== "large_sharp") return;
+        setSrc(event.dataUrl);
+        // Sharp — фінальна доставка; слухача можна зняти.
+        off?.();
+        off = undefined;
+      });
+      try {
+        const ack = await command<PreviewLargeAck>("preview.large", {
+          payload: { candidateId: id },
+        });
         if (cancelled) return;
         if (ack.dataUrl) setSrc(ack.dataUrl);
-        if (ack.status === "sharp_from_cache") return;
-        unlisten = await subscribe<PreviewReadyEvent>(
-          "preview.ready",
-          (event) => {
-            if (cancelled || event.path !== candidate.path) return;
-            if (event.kind === "large_sharp") setSrc(event.dataUrl);
-          },
-        );
-      })
-      .catch((error) => {
+        if (ack.status === "sharp_from_cache") {
+          off?.();
+          off = undefined;
+        }
+      } catch (error) {
+        off?.();
+        off = undefined;
         console.warn(
-          `Failed to request large preview for candidate ${candidate.id}:`,
+          `Failed to request large preview for candidate ${id}:`,
           error,
         );
-      });
+      }
+    })();
 
     return () => {
       cancelled = true;
-      unlisten?.();
+      off?.();
     };
   }, [candidate?.id, candidate?.path, candidate?.unit]);
 

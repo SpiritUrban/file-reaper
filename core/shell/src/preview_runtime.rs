@@ -173,29 +173,48 @@ impl PreviewRuntime {
                 if token.is_cancelled() {
                     return;
                 }
+                // T-120 діагностика: ланцюжок джерел мовчки повертав None при
+                // будь-якому збої (не-зображення, битий файл, недоступний шлях),
+                // і плитка залишалась порожньою без жодного сліду. Логуємо
+                // конкретну причину, щоб «пусті площини» стали діагностованими.
                 let Some(raw) = generate_from_chain(&chain, &path, max_edge) else {
+                    tracing::warn!(
+                        target: "preview",
+                        %path,
+                        "мініатюру не згенеровано: жодне джерело ланцюжка не покрило файл (не-зображення/битий/недоступний)"
+                    );
                     return;
                 };
                 if token.is_cancelled() {
                     return;
                 }
                 let Some(bytes) = encode_thumbnail(encoder.as_ref(), &raw) else {
+                    tracing::warn!(target: "preview", %path, "кодування PNG-мініатюри провалилось");
                     return;
                 };
-                if cache
-                    .save_preview(&path, PreviewKind::Thumbnail, size, modified_at, &bytes)
-                    .is_ok()
+                // Доставка НЕ залежить від успіху кешування: раніше подію
+                // емітили лише при `save_preview().is_ok()`, тож недоступний
+                // профіль/диск лишав плитку порожньою попри вдалу генерацію.
+                // Кеш — оптимізація наступного запиту, не умова показу.
+                if let Err(error) =
+                    cache.save_preview(&path, PreviewKind::Thumbnail, size, modified_at, &bytes)
                 {
-                    events::emit(
-                        &app,
-                        events::topic::PREVIEW_READY,
-                        &events::PreviewReadyEvent {
-                            path: path.clone(),
-                            kind: "thumbnail".into(),
-                            data_url: to_data_url(&bytes),
-                        },
+                    tracing::debug!(
+                        target: "preview",
+                        %path,
+                        %error,
+                        "запис мініатюри в кеш провалився (best-effort; показ не блокується)"
                     );
                 }
+                events::emit(
+                    &app,
+                    events::topic::PREVIEW_READY,
+                    &events::PreviewReadyEvent {
+                        path: path.clone(),
+                        kind: "thumbnail".into(),
+                        data_url: to_data_url(&bytes),
+                    },
+                );
             });
     }
 }
