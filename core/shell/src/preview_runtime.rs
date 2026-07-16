@@ -103,6 +103,17 @@ impl PreviewRuntime {
             None => Arc::new(NullPreviewCache),
         };
         let video = Arc::new(FfmpegVideoFrameSource::new());
+        // Стартова діагностика: одразу видно у логах, чи бекенд знайшов ffmpeg
+        // (без нього постер-кадр і скраб-смуга відео недоступні — T-071).
+        if video.is_available() {
+            tracing::info!(target: "preview", "ffmpeg знайдено — відео-превʼю (постер + скраб) активні");
+        } else {
+            tracing::warn!(
+                target: "preview",
+                env_var = trashradar_preview::FFMPEG_ENV_VAR,
+                "ffmpeg НЕ знайдено (порядок пошуку: TRASHRADAR_FFMPEG → поруч з exe → PATH) — відео показуватимуть лише іконку, без кадрів"
+            );
+        }
         // Ланцюжок за спаданням швидкості (architecture.md §5.2): системний
         // кеш мініатюр Windows → власне декодування зображень → ключовий
         // кадр відео (VideoKeyFrameSource — той самий міст, що й T-073).

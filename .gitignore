@@ -25,3 +25,8 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Локальний ffmpeg для відео-превʼю (T-071) — не комітимо ~100МБ бінарник
+ffmpeg*/
+ffmpeg.exe
+vendor/ffmpeg/

@@ -39,11 +39,48 @@ if (args.length === 0) {
   process.exit(1);
 }
 
+/**
+ * Знайти ffmpeg, покладений у репо (напр. розпакований gyan.dev build), щоб
+ * відео-превʼю (T-071) працювали без ручного налаштування середовища. Порядок
+ * дублює Rust `discover_ffmpeg`, але дає значення ще до старту процесу.
+ */
+function findRepoFfmpeg() {
+  const exe = process.platform === "win32" ? "ffmpeg.exe" : "ffmpeg";
+  const direct = [
+    path.join(root, exe),
+    path.join(root, "vendor", "ffmpeg", exe),
+    path.join(root, "vendor", "ffmpeg", "bin", exe),
+  ];
+  for (const candidate of direct) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  // Розпаковані збірки: теки виду `ffmpeg-*` у корені → `<dir>/bin/<exe>`.
+  for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !entry.name.toLowerCase().startsWith("ffmpeg")) {
+      continue;
+    }
+    for (const sub of [path.join("bin", exe), exe]) {
+      const candidate = path.join(root, entry.name, sub);
+      if (fs.existsSync(candidate)) return candidate;
+    }
+  }
+  return null;
+}
+
+const env = { ...process.env };
+if (!env.TRASHRADAR_FFMPEG) {
+  const ffmpeg = findRepoFfmpeg();
+  if (ffmpeg) {
+    env.TRASHRADAR_FFMPEG = ffmpeg;
+    console.log(`[tauri.mjs] TRASHRADAR_FFMPEG → ${ffmpeg}`);
+  }
+}
+
 const child = spawn(tauriCmd, args, {
   cwd: coreDir,
   stdio: "inherit",
   shell: process.platform === "win32",
-  env: process.env,
+  env,
 });
 
 child.on("exit", (code, signal) => {

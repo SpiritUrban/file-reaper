@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { Candidate } from "@/ipc/types";
 
@@ -114,52 +114,55 @@ export function VirtualCandidateGrid({
 }: VirtualCandidateGridProps) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const frameRef = useRef<number | null>(null);
-  // width/height 0 = «ще не виміряно». НЕ стартуємо з 1: width=1 давало
-  // columns=1, а CSS `repeat(1, minmax(0,1fr))` розтягував єдину плитку на
-  // всю реальну ширину контейнера — та сама «плитка-гігант». Рендер тіла
-  // сітки чекає на справжній замір (measured нижче).
   const [viewport, setViewport] = useState({
-    width: 0,
-    height: 0,
+    width: 1,
+    height: 1,
     scrollTop: 0,
   });
 
-  // useLayoutEffect (до paint) + rAF-повтор доки контейнер отримає розкладку:
-  // ResizeObserver іноді викликається з розміром 0 ще до того, як flex-батько
-  // (напр. ліва зона Live Preview) отримав ширину; фіксувати з того 0 не можна.
-  useLayoutEffect(() => {
+  // Замір ширини/висоти контейнера для геометрії сітки. Тонкість: усі 9
+  // екранів категорій змонтовані постійно й приховані `display:none` (T-099).
+  // Поки екран прихований, `clientWidth=0` → замір дає 1 колонку (плитка на
+  // всю ширину = «гігант»). ResizeObserver на переході display:none→show
+  // спрацьовує НЕнадійно, тож додатково слухаємо IntersectionObserver — він
+  // гарантовано стріляє, коли елемент стає видимим, і ми переміряємо реальну
+  // ширину. Гейта рендера НЕМА (грід малює завжди): колонки самокоригуються
+  // заміром, а не ховаємо контент (це давало порожній грід на холодному старті).
+  useEffect(() => {
     const element = viewportRef.current;
     if (!element) return;
-    let raf = 0;
-    const apply = (width: number, height: number) => {
-      setViewport((current) =>
-        current.width === width && current.height === height
+
+    const measure = () => {
+      setViewport((current) => {
+        const width = Math.max(1, element.clientWidth - GAP * 2);
+        const height = Math.max(1, element.clientHeight);
+        return current.width === width && current.height === height
           ? current
-          : { width, height, scrollTop: current.scrollTop },
-      );
+          : { width, height, scrollTop: current.scrollTop };
+      });
     };
-    const settle = () => {
-      const width = element.clientWidth - GAP * 2;
-      const height = element.clientHeight;
-      if (width <= 0 || height <= 0) {
-        // Контейнер ще без розкладки — пробуємо на наступному кадрі, а не
-        // колапсуємо у 1 колонку.
-        raf = requestAnimationFrame(settle);
-        return;
-      }
-      apply(width, height);
-    };
-    settle();
-    const observer = new ResizeObserver(() => {
-      const width = element.clientWidth - GAP * 2;
-      const height = element.clientHeight;
-      // 0 ігноруємо (прихований/згорнутий контейнер) — не затираємо валідний.
-      if (width > 0 && height > 0) apply(width, height);
-    });
-    observer.observe(element);
+    measure();
+    // Дозаміри для асинхронної розкладки (LP-зона тягне leftRatio з
+    // localStorage у власному ефекті) — первинний measure може бути нульовим.
+    const raf = requestAnimationFrame(measure);
+    const timer = setTimeout(measure, 120);
+
+    const resizeObserver = new ResizeObserver(measure);
+    resizeObserver.observe(element);
+    // Надійний сигнал «екран став видимим» (display:none→block).
+    const visibilityObserver = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) measure();
+      },
+      { threshold: 0 },
+    );
+    visibilityObserver.observe(element);
+
     return () => {
-      if (raf) cancelAnimationFrame(raf);
-      observer.disconnect();
+      cancelAnimationFrame(raf);
+      clearTimeout(timer);
+      resizeObserver.disconnect();
+      visibilityObserver.disconnect();
     };
   }, []);
 
@@ -212,11 +215,6 @@ export function VirtualCandidateGrid({
     return <EmptyState title={emptyTitle} taskRef="category.window" />;
   }
 
-  // Тіло сітки рендеримо лише після реального заміру ширини: до нього
-  // columns=1 дало б плитку-гігант на всю ширину. Контейнер із ref присутній
-  // завжди — інакше ResizeObserver не мав би що міряти.
-  const measured = viewport.width > 0 && viewport.height > 0;
-
   return (
     <div
       ref={viewportRef}
@@ -230,7 +228,7 @@ export function VirtualCandidateGrid({
         });
       }}
     >
-      <div className="relative" style={{ height: measured ? window.totalHeight : 0 }}>
+      <div className="relative" style={{ height: window.totalHeight }}>
         <div
           className="absolute inset-x-0 top-0 grid gap-1"
           style={{
@@ -242,8 +240,7 @@ export function VirtualCandidateGrid({
           data-total={candidates.length}
           data-columns={window.columns}
         >
-          {measured &&
-            visible.map((candidate) => {
+          {visible.map((candidate) => {
             const preview = previewFor?.(candidate);
             return (
               <CandidateTile
