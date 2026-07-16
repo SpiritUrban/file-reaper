@@ -28,6 +28,19 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
-    "icon": ["icons/icon.ico"]
+    "icon": ["icons/icon.ico"],
+    "publisher": "TrashRadar",
+    "copyright": "© 2026 TrashRadar",
+    "category": "Utility",
+    "shortDescription": "Радар для сміття на диску",
+    "longDescription": "TrashRadar знаходить потенційне сміття на дисках, групує його за категоріями і безпечно видаляє через Quarantine.",
+    "windows": {
+      "minimumWebview2Version": "111.0.0.0",
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["Ukrainian", "English"],
+        "displayLanguageSelector": false
+      }
+    }
   }
 }
