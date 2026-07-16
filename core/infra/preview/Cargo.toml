@@ -7,3 +7,8 @@ edition.workspace = true
 [dependencies]
 trashradar-domain = { path = "../../domain" }
 trashradar-app = { path = "../../app" }
+
+[dev-dependencies]
+# T-155: корпус битих/екзотичних медіафайлів для стрес-тесту декодерів
+# (testkit — лише в тестах, docs/repository.md §10).
+trashradar-testkit = { path = "../../testkit" }

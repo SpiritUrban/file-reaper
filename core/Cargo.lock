@@ -3748,6 +3748,7 @@ version = "0.1.0"
 dependencies = [
  "trashradar-app",
  "trashradar-domain",
+ "trashradar-testkit",
 ]
 
 [[package]]

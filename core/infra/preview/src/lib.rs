@@ -16,11 +16,16 @@
 //!
 //! T-073: кодувальник превью для дискового кешу — нестиснений PNG
 //! ([`PngThumbnailEncoder`], модуль `encode`; мультиплатформно).
+//!
+//! T-155: стрес-тест реального ланцюжка на корпусі битих/екзотичних
+//! медіафайлів (модуль `stress`, лише в тестах; корпус — `testkit`).
 
 #[cfg(windows)]
 mod com;
 mod encode;
 mod image;
+#[cfg(test)]
+mod stress;
 #[cfg(all(test, windows))]
 pub(crate) mod test_media;
 mod video;
