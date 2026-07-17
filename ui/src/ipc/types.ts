@@ -18,7 +18,8 @@ export type CategoryId =
   | "app_caches"
   | "dev_artifacts"
   | "empty_folders"
-  | "sparse_folders";
+  | "sparse_folders"
+  | "deep_paths";
 
 export type FileKind =
   | "video"
@@ -462,6 +463,8 @@ export interface AppSettings {
     minimumSizeBytes: number;
     /** Поріг розділу «Майже порожні»: рекурсивно 1..=N файлів (дефолт 3). */
     sparseMaxFiles: number;
+    /** Поріг розділу «Глибокі шляхи»: глибина папки понад це значення (дефолт 10). */
+    deepPathMaxDepth: number;
   };
   detectors: Record<
     string,

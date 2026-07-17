@@ -403,6 +403,47 @@ export function SettingsScreen() {
             <span className="text-ink-faint">—</span>
           )}
         </Row>
+        <Row label="«Майже порожні»: макс. файлів у папці">
+          {settings ? (
+            <NumberField
+              key={settings.scan.sparseMaxFiles}
+              value={settings.scan.sparseMaxFiles}
+              suffix="файлів (1–1000)"
+              min={1}
+              max={1000}
+              onCommit={(n) =>
+                saveSettings({
+                  ...settings,
+                  scan: { ...settings.scan, sparseMaxFiles: n },
+                })
+              }
+            />
+          ) : (
+            <span className="text-ink-faint">—</span>
+          )}
+        </Row>
+        <Row label="«Глибокі шляхи»: макс. глибина вкладення">
+          {settings ? (
+            <NumberField
+              key={settings.scan.deepPathMaxDepth}
+              value={settings.scan.deepPathMaxDepth}
+              suffix="рівнів (2–64)"
+              min={2}
+              max={64}
+              onCommit={(n) =>
+                saveSettings({
+                  ...settings,
+                  scan: { ...settings.scan, deepPathMaxDepth: n },
+                })
+              }
+            />
+          ) : (
+            <span className="text-ink-faint">—</span>
+          )}
+        </Row>
+        <div className="pt-1 text-ink-faint">
+          Пороги папок діють з наступного скану.
+        </div>
         <div className="flex flex-wrap gap-2 py-1.5">
           <span className="w-64 shrink-0 text-ink-dim">Виключені шляхи</span>
           <div className="flex min-w-0 flex-1 flex-col gap-2">

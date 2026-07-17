@@ -308,6 +308,7 @@ fn run_folder_units_pass<R: Runtime>(
     last_totals: &Mutex<LiveTotals>,
     dir_sink: &Mutex<Vec<String>>,
     sparse_max_files: u32,
+    deep_path_max_depth: u32,
     cancel: &CancellationToken,
 ) {
     if cancel.is_cancelled() {
@@ -329,7 +330,10 @@ fn run_folder_units_pass<R: Runtime>(
     let units = trashradar_app::detectors::detect_folder_units(
         &dir_paths,
         &files,
-        trashradar_app::detectors::FolderScanConfig { sparse_max_files },
+        trashradar_app::detectors::FolderScanConfig {
+            sparse_max_files,
+            deep_path_max_depth,
+        },
     );
     let unit_count = units.len();
     if units.is_empty() {
@@ -364,11 +368,11 @@ fn configured_registry(settings: &AppSettings) -> Result<DetectorRegistry, CoreE
             "forgotten_videos" => DetectorId::new("forgotten_videos"),
             "archives" => DetectorId::new("archives"),
             "installers" => DetectorId::new("installers"),
-            _ => {
-                return Err(CoreError::invalid_argument(format!(
-                    "Unknown detector: {id}"
-                )))
-            }
+            // Не-farm перемикачі (каскад дублікатів, обчислювані folder-категорії
+            // empty/sparse/deep) не мають детектора у фермі — їхній enabled
+            // читається окремо (напр. `duplicates_enabled`), тут просто
+            // пропускаємо, а не валимо весь settings.set помилкою.
+            _ => continue,
         };
         for (key, value) in &detector.thresholds {
             registry.set_threshold(detector_id, key, ThresholdValue::U64(*value))?;
@@ -888,6 +892,15 @@ pub async fn scan_start<R: Runtime>(
             // Сток директорій усіх томів (incl. порожніх) для folder-units пасу.
             let dir_paths: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
             let sparse_max_files = settings.scan.sparse_max_files;
+            let deep_path_max_depth = settings.scan.deep_path_max_depth;
+            // T-152-стиль перемикач каскаду дублікатів: галочка «Дублікати» в
+            // Налаштуваннях. `enabled == false` → важкий каскад не запускаємо
+            // (проблемний розділ, над яким працюємо окремо).
+            let duplicates_enabled = settings
+                .detectors
+                .get("duplicates")
+                .map(|d| d.enabled)
+                .unwrap_or(true);
             let scanner = AutoVolumeScanner {
                 user_excluded: settings.scan.excluded_paths.clone(),
                 dir_sink: Arc::clone(&dir_paths),
@@ -955,36 +968,40 @@ pub async fn scan_start<R: Runtime>(
                 Err(_) => (0, token.is_cancelled()),
             };
             if !session_cancelled {
-                emit_progress(
-                    &app2,
-                    &ScanProgress {
-                        volume: volumes.first().copied().unwrap_or('?'),
-                        strategy: strategies
-                            .first()
-                            .copied()
-                            .unwrap_or(ScanStrategy::DirectoryWalk),
-                        phase: ScanProgressPhase::DuplicatesCascade,
-                        files_indexed,
-                        volume_files_indexed: files_indexed,
-                        volume_files_total: Some(files_indexed),
-                        stage_units_done: 0,
-                        stage_units_total: None,
-                        stage: "cascade",
-                        volume_index: volume_count.saturating_sub(1),
-                        volume_count,
-                        done: false,
-                        cancelled: false,
-                    },
-                );
-                run_duplicates_cascade(
-                    &app2,
-                    index.as_ref(),
-                    &last_totals,
-                    &also_in,
-                    &duplicates,
-                    &hash_cache,
-                    &token,
-                );
+                if duplicates_enabled {
+                    emit_progress(
+                        &app2,
+                        &ScanProgress {
+                            volume: volumes.first().copied().unwrap_or('?'),
+                            strategy: strategies
+                                .first()
+                                .copied()
+                                .unwrap_or(ScanStrategy::DirectoryWalk),
+                            phase: ScanProgressPhase::DuplicatesCascade,
+                            files_indexed,
+                            volume_files_indexed: files_indexed,
+                            volume_files_total: Some(files_indexed),
+                            stage_units_done: 0,
+                            stage_units_total: None,
+                            stage: "cascade",
+                            volume_index: volume_count.saturating_sub(1),
+                            volume_count,
+                            done: false,
+                            cancelled: false,
+                        },
+                    );
+                    run_duplicates_cascade(
+                        &app2,
+                        index.as_ref(),
+                        &last_totals,
+                        &also_in,
+                        &duplicates,
+                        &hash_cache,
+                        &token,
+                    );
+                } else {
+                    tracing::info!(session_id, "каскад дублікатів вимкнено в Налаштуваннях — пропущено");
+                }
                 // Порожні/майже порожні папки — після каскаду (спільний індекс,
                 // окремий namespace id, без колізій з файлами/дублікатами).
                 run_folder_units_pass(
@@ -993,6 +1010,7 @@ pub async fn scan_start<R: Runtime>(
                     &last_totals,
                     &dir_paths,
                     sparse_max_files,
+                    deep_path_max_depth,
                     &token,
                 );
             }

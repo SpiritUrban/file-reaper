@@ -26,6 +26,7 @@ export const CATEGORIES: readonly CategoryDescriptor[] = [
   { id: "old_files", title: "Старі файли", glyph: "◻" },
   { id: "empty_folders", title: "Порожні папки", glyph: "▱" },
   { id: "sparse_folders", title: "Майже порожні", glyph: "▨" },
+  { id: "deep_paths", title: "Глибокі шляхи", glyph: "⋮" },
 ] as const;
 
 export function categoryTitle(id: CategoryId): string {
@@ -45,6 +46,7 @@ const CATEGORY_RULES: Record<CategoryId, string> = {
   duplicates: "Групи файлів з ідентичним вмістом (каскад хешування)",
   empty_folders: "Рекурсивно порожні папки (жодного файла в піддереві) — показано найвищу",
   sparse_folders: "Папки з дуже малою кількістю файлів (поріг у Налаштуваннях)",
+  deep_paths: "Папки із задовгим ланцюжком вкладення (поріг глибини у Налаштуваннях)",
 };
 
 export function categoryRule(id: CategoryId): string {
@@ -52,10 +54,11 @@ export function categoryRule(id: CategoryId): string {
 }
 
 /**
- * Категорії з перемикачем детектора (T-152) — живі детектори ферми скану
- * (`configured_registry` у core/shell): 5 предикатних. Решта — каскад
- * дублікатів або детектори, ще не підключені до скану (temp/caches/dev):
- * перемикач з'явиться разом з їхнім wiring.
+ * Категорії з перемикачем детектора (T-152) — 5 предикатних детекторів ферми
+ * скану (`configured_registry` у core/shell) + `duplicates`: каскад не в фермі,
+ * але його enabled читається окремо в `scan_runtime` і вимикає важке хешування
+ * (проблемний розділ). Решта (temp/caches/dev) — детектори, ще не підключені до
+ * скану: перемикач з'явиться разом з їхнім wiring.
  */
 export const TOGGLEABLE_CATEGORIES: readonly CategoryId[] = [
   "large_files",
@@ -63,6 +66,7 @@ export const TOGGLEABLE_CATEGORIES: readonly CategoryId[] = [
   "forgotten_videos",
   "archives",
   "installers",
+  "duplicates",
 ];
 
 /** Детектор категорії увімкнено (відсутність запису/поля = увімкнено). */

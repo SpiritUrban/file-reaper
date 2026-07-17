@@ -346,6 +346,7 @@ fn category_id_wire(c: trashradar_domain::category::CategoryId) -> &'static str 
         DevArtifacts => "dev_artifacts",
         EmptyFolders => "empty_folders",
         SparseFolders => "sparse_folders",
+        DeepPaths => "deep_paths",
         Uncategorized => "uncategorized",
     }
 }

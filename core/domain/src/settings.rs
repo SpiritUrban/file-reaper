@@ -14,6 +14,13 @@ pub const DEFAULT_SPARSE_MAX_FILES: u32 = 3;
 /// Стеля порога sparse: захист від абсурдних значень (папка з тисячами файлів
 /// уже не «майже порожня»).
 pub const MAX_SPARSE_MAX_FILES: u32 = 1000;
+/// Дефолтний поріг «занадто глибокої» вкладеності: глибина папки (кількість
+/// сегментів під коренем тому) понад це значення → розділ «Глибокі шляхи».
+pub const DEFAULT_DEEP_PATH_MAX_DEPTH: u32 = 10;
+/// Межі порога глибини: мін. 2 (сенс), макс. 64 (реальна вкладеність NTFS
+/// значно менша; захист від абсурду).
+pub const MIN_DEEP_PATH_MAX_DEPTH: u32 = 2;
+pub const MAX_DEEP_PATH_MAX_DEPTH: u32 = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettingsFieldError {
@@ -84,6 +91,9 @@ pub struct ScanSettings {
     /// поле у старому конфігу → [`DEFAULT_SPARSE_MAX_FILES`] (не 0 від derive).
     #[serde(default = "default_sparse_max_files")]
     pub sparse_max_files: u32,
+    /// Поріг розділу «Глибокі шляхи»: глибина папки понад це значення.
+    #[serde(default = "default_deep_path_max_depth")]
+    pub deep_path_max_depth: u32,
 }
 
 impl Default for ScanSettings {
@@ -92,12 +102,17 @@ impl Default for ScanSettings {
             excluded_paths: Vec::new(),
             minimum_size_bytes: 0,
             sparse_max_files: DEFAULT_SPARSE_MAX_FILES,
+            deep_path_max_depth: DEFAULT_DEEP_PATH_MAX_DEPTH,
         }
     }
 }
 
 fn default_sparse_max_files() -> u32 {
     DEFAULT_SPARSE_MAX_FILES
+}
+
+fn default_deep_path_max_depth() -> u32 {
+    DEFAULT_DEEP_PATH_MAX_DEPTH
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -128,6 +143,9 @@ impl SettingsOverrides {
         if let Some(value) = self.scan.sparse_max_files {
             settings.scan.sparse_max_files = value;
         }
+        if let Some(value) = self.scan.deep_path_max_depth {
+            settings.scan.deep_path_max_depth = value;
+        }
         settings.detectors = self.detectors.clone();
         settings
     }
@@ -150,6 +168,9 @@ impl SettingsOverrides {
                 sparse_max_files: (settings.scan.sparse_max_files
                     != defaults.scan.sparse_max_files)
                     .then_some(settings.scan.sparse_max_files),
+                deep_path_max_depth: (settings.scan.deep_path_max_depth
+                    != defaults.scan.deep_path_max_depth)
+                    .then_some(settings.scan.deep_path_max_depth),
             },
             detectors: settings.detectors.clone(),
         }
@@ -196,6 +217,16 @@ pub fn validate_settings(settings: &AppSettings) -> Result<(), SettingsFieldErro
             message: format!("має бути від 1 до {MAX_SPARSE_MAX_FILES}"),
         });
     }
+    if !(MIN_DEEP_PATH_MAX_DEPTH..=MAX_DEEP_PATH_MAX_DEPTH)
+        .contains(&settings.scan.deep_path_max_depth)
+    {
+        return Err(SettingsFieldError {
+            field: "scan.deepPathMaxDepth",
+            message: format!(
+                "має бути від {MIN_DEEP_PATH_MAX_DEPTH} до {MAX_DEEP_PATH_MAX_DEPTH}"
+            ),
+        });
+    }
     Ok(())
 }
 
@@ -223,6 +254,8 @@ pub struct ScanOverrides {
     pub minimum_size_bytes: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sparse_max_files: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deep_path_max_depth: Option<u32>,
 }
 
 impl ScanOverrides {
@@ -230,6 +263,7 @@ impl ScanOverrides {
         self.excluded_paths.is_none()
             && self.minimum_size_bytes.is_none()
             && self.sparse_max_files.is_none()
+            && self.deep_path_max_depth.is_none()
     }
 }
 

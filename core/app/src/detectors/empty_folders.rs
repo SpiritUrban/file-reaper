@@ -26,19 +26,34 @@ use trashradar_domain::candidate::{
 };
 use trashradar_domain::category::CategoryId;
 
-/// Конфіг детекції папок: поріг «майже порожньої».
+/// Конфіг детекції папок: пороги «майже порожньої» та «занадто глибокої».
 #[derive(Debug, Clone, Copy)]
 pub struct FolderScanConfig {
     /// Максимум рекурсивних файлів, щоб папка вважалась «майже порожньою» (≥1).
     pub sparse_max_files: u32,
+    /// Глибина папки (сегментів під коренем тому) понад це значення →
+    /// «Глибокі шляхи».
+    pub deep_path_max_depth: u32,
 }
 
 impl Default for FolderScanConfig {
     fn default() -> Self {
         Self {
             sparse_max_files: trashradar_domain::settings::DEFAULT_SPARSE_MAX_FILES,
+            deep_path_max_depth: trashradar_domain::settings::DEFAULT_DEEP_PATH_MAX_DEPTH,
         }
     }
+}
+
+/// Класифікація директорії (взаємовиключна, за пріоритетом Empty > Sparse >
+/// Deep) — щоб одна папка потрапляла рівно в одну категорію й не роздвоювала
+/// цифру «можна звільнити».
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DirClass {
+    Empty,
+    Sparse,
+    Deep,
+    None,
 }
 
 /// Внутрішній вузол директорії під час агрегації.
@@ -82,6 +97,7 @@ pub fn detect_folder_units(
     cfg: FolderScanConfig,
 ) -> Vec<FileRecord> {
     let sparse_max = cfg.sparse_max_files.max(1) as u64;
+    let deep_max = cfg.deep_path_max_depth.max(1) as usize;
 
     // 1) Унікальні директорії за нормалізованим ключем; перший оригінал виграє.
     let mut index_of: HashMap<String, usize> = HashMap::with_capacity(dir_paths.len());
@@ -137,42 +153,66 @@ pub fn detect_folder_units(
         }
     }
 
-    // 5) Вибір topmost-одиниць кожної категорії.
+    // 5) Взаємовиключна класифікація кожної директорії (Empty > Sparse > Deep).
+    let class: Vec<DirClass> = (0..nodes.len())
+        .map(|i| {
+            if is_drive_root(&norms[i]) {
+                return DirClass::None; // цілий том — не кандидат
+            }
+            let files = nodes[i].recursive_files;
+            if files == 0 {
+                DirClass::Empty
+            } else if files <= sparse_max {
+                DirClass::Sparse
+            } else if depth(&norms[i]) > deep_max {
+                DirClass::Deep
+            } else {
+                DirClass::None
+            }
+        })
+        .collect();
+
+    // 6) Topmost кожної категорії = вузол свого класу, чий батько має ІНШИЙ клас
+    //    (батько без запису в множині → цей вузол найвищий у гілці).
     let mut units = Vec::new();
     for i in 0..nodes.len() {
-        if is_drive_root(&norms[i]) {
-            continue; // цілий том — не кандидат
+        let my = class[i];
+        if my == DirClass::None {
+            continue;
         }
-        let files_here = nodes[i].recursive_files;
-        let parent_files = nodes[i].parent.map(|p| nodes[p].recursive_files);
-
-        if files_here == 0 {
-            // Порожня, і батько НЕ порожній (інакше topmost — вище).
-            let parent_not_empty = parent_files.map(|pf| pf > 0).unwrap_or(true);
-            if parent_not_empty {
-                units.push(make_unit(
-                    &nodes[i].orig,
-                    0,
-                    0,
-                    CategoryId::EmptyFolders,
-                    empty_explanation(),
-                    id_ns::EMPTY_FOLDERS,
-                ));
-            }
-        } else if files_here <= sparse_max {
-            // Майже порожня, і батько вже НЕ майже порожній (topmost).
-            let parent_over = parent_files.map(|pf| pf > sparse_max).unwrap_or(true);
-            if parent_over {
-                units.push(make_unit(
-                    &nodes[i].orig,
-                    nodes[i].recursive_bytes,
-                    files_here,
-                    CategoryId::SparseFolders,
-                    sparse_explanation(files_here, nodes[i].recursive_bytes),
-                    id_ns::SPARSE_FOLDERS,
-                ));
-            }
+        let parent_same = nodes[i]
+            .parent
+            .map(|p| class[p] == my)
+            .unwrap_or(false);
+        if parent_same {
+            continue; // topmost — вище по гілці
         }
+        let (category, explanation, id_namespace) = match my {
+            DirClass::Empty => (
+                CategoryId::EmptyFolders,
+                empty_explanation(),
+                id_ns::EMPTY_FOLDERS,
+            ),
+            DirClass::Sparse => (
+                CategoryId::SparseFolders,
+                sparse_explanation(nodes[i].recursive_files, nodes[i].recursive_bytes),
+                id_ns::SPARSE_FOLDERS,
+            ),
+            DirClass::Deep => (
+                CategoryId::DeepPaths,
+                deep_explanation(depth(&norms[i]), nodes[i].recursive_bytes),
+                id_ns::DEEP_PATHS,
+            ),
+            DirClass::None => unreachable!(),
+        };
+        units.push(make_unit(
+            &nodes[i].orig,
+            nodes[i].recursive_bytes,
+            nodes[i].recursive_files,
+            category,
+            explanation,
+            id_namespace,
+        ));
     }
     units
 }
@@ -196,6 +236,14 @@ fn sparse_explanation(files: u64, bytes: u64) -> String {
             format_bytes_as_gb(bytes)
         )
     }
+}
+
+fn deep_explanation(depth: usize, bytes: u64) -> String {
+    format!(
+        "задовга вкладеність · глибина {} · {}",
+        depth,
+        format_bytes_as_gb(bytes)
+    )
 }
 
 fn make_unit(
@@ -239,9 +287,19 @@ mod tests {
         pairs.iter().map(|(p, s)| (p.to_string(), *s)).collect()
     }
 
+    /// Поріг глибини «вимкнено» (дуже високий) — щоб тести empty/sparse не
+    /// зачіпались класифікацією Deep.
     fn cfg(n: u32) -> FolderScanConfig {
         FolderScanConfig {
             sparse_max_files: n,
+            deep_path_max_depth: 1000,
+        }
+    }
+
+    fn cfg_deep(sparse: u32, deep: u32) -> FolderScanConfig {
+        FolderScanConfig {
+            sparse_max_files: sparse,
+            deep_path_max_depth: deep,
         }
     }
 
@@ -353,6 +411,49 @@ mod tests {
         assert_eq!(units.len(), 1);
         assert_eq!(units[0].category, CategoryId::SparseFolders);
         assert_eq!(units[0].size.0, 3);
+    }
+
+    #[test]
+    fn deep_path_reports_topmost_too_deep_folder() {
+        // Гілка глибиною 5; поріг 3 → topmost-deep = папка на глибині 4
+        // (батько на глибині 3 = поріг, не «занадто глибокий»).
+        let dir_paths = dirs(&[
+            r"C:\a",           // depth 1
+            r"C:\a\b",         // 2
+            r"C:\a\b\c",       // 3
+            r"C:\a\b\c\d",     // 4  ← topmost deep (parent depth 3 == поріг)
+            r"C:\a\b\c\d\e",   // 5
+        ]);
+        // Файли в найглибших папках, щоб вони не були empty/sparse.
+        let file_list: Vec<(String, u64)> = (0..10)
+            .map(|i| (format!(r"C:\a\b\c\d\e\f{i}.dat"), 100))
+            .collect();
+        let units = detect_folder_units(&dir_paths, &file_list, cfg_deep(3, 3));
+        let deep: Vec<_> = units
+            .iter()
+            .filter(|u| u.category == CategoryId::DeepPaths)
+            .collect();
+        assert_eq!(deep.len(), 1, "лише topmost занадто-глибока");
+        assert_eq!(deep[0].path, r"C:\a\b\c\d");
+        assert_eq!(deep[0].unit, CandidateUnit::Folder);
+    }
+
+    #[test]
+    fn deep_and_sparse_are_mutually_exclusive_per_folder() {
+        // Глибока папка з ≤3 файлів → класифікується Sparse (пріоритет), НЕ Deep.
+        let dir_paths = dirs(&[
+            r"C:\a", r"C:\a\b", r"C:\a\b\c", r"C:\a\b\c\d", r"C:\a\b\c\d\e",
+        ]);
+        let file_list = files(&[(r"C:\a\b\c\d\e\only.txt", 5)]);
+        let units = detect_folder_units(&dir_paths, &file_list, cfg_deep(3, 3));
+        // Уся гілка має 1 файл рекурсивно → topmost sparse = C:\a; жодної Deep.
+        assert!(units.iter().all(|u| u.category != CategoryId::DeepPaths));
+        let sparse: Vec<_> = units
+            .iter()
+            .filter(|u| u.category == CategoryId::SparseFolders)
+            .collect();
+        assert_eq!(sparse.len(), 1);
+        assert_eq!(sparse[0].path, r"C:\a");
     }
 
     #[test]

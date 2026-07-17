@@ -143,6 +143,8 @@ pub mod id_ns {
     pub const EMPTY_FOLDERS: u64 = 0xD000_0000_0000_0000;
     /// Майже порожні папки (мало файлів).
     pub const SPARSE_FOLDERS: u64 = 0xE000_0000_0000_0000;
+    /// Задовга вкладеність («Глибокі шляхи»).
+    pub const DEEP_PATHS: u64 = 0xF000_0000_0000_0000;
 }
 
 /// Перевірка форми explanation під DoD (label · ГБ · N файлів).

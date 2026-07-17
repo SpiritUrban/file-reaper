@@ -22,6 +22,9 @@ pub enum CategoryId {
     /// Папки з дуже малою рекурсивною кількістю файлів (1..=поріг, дефолт 3) —
     /// кандидати на прибирання зайвого ускладнення структури (folder-unit).
     SparseFolders,
+    /// Папки із задовгим ланцюжком вкладення (глибина > поріг) — показуємо
+    /// найвищу «занадто глибоку» папку гілки (folder-unit).
+    DeepPaths,
     /// Скановано, але ще не заявлено жодним детектором (architecture.md §3.4:
     /// «знайдений сканером → у пам'яті → категоризований»). Такий запис живе
     /// лише в гарячому in-memory індексі й не показується користувачу; у
@@ -35,7 +38,7 @@ impl CategoryId {
     ///
     /// Порядок збігається з [`crate::aggregate::FreeableSummary::by_category`]
     /// / [`CategoryId::mvp_index`].
-    pub const ALL: [CategoryId; 11] = [
+    pub const ALL: [CategoryId; 12] = [
         CategoryId::LargeFiles,
         CategoryId::OldFiles,
         CategoryId::ForgottenVideos,
@@ -47,6 +50,7 @@ impl CategoryId {
         CategoryId::DevArtifacts,
         CategoryId::EmptyFolders,
         CategoryId::SparseFolders,
+        CategoryId::DeepPaths,
     ];
 
     /// Індекс у [`CategoryId::ALL`] / `FreeableSummary::by_category` (T-054).
@@ -63,6 +67,7 @@ impl CategoryId {
             CategoryId::DevArtifacts => Some(8),
             CategoryId::EmptyFolders => Some(9),
             CategoryId::SparseFolders => Some(10),
+            CategoryId::DeepPaths => Some(11),
             CategoryId::Uncategorized => None,
         }
     }
