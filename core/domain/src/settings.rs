@@ -8,6 +8,12 @@ pub const DEFAULT_QUARANTINE_WARNING_BYTES: u64 = 50 * 1024 * 1024 * 1024;
 pub const MIN_QUARANTINE_WARNING_BYTES: u64 = 1024 * 1024;
 pub const MAX_QUARANTINE_TTL_DAYS: u32 = 3650;
 pub const MAX_EXCLUDED_PATHS: usize = 4096;
+/// Дефолтний поріг «майже порожньої» папки: рекурсивно 1..=N файлів (T: порожні/
+/// майже порожні папки). N=3 — консервативно (Q&A з користувачем).
+pub const DEFAULT_SPARSE_MAX_FILES: u32 = 3;
+/// Стеля порога sparse: захист від абсурдних значень (папка з тисячами файлів
+/// уже не «майже порожня»).
+pub const MAX_SPARSE_MAX_FILES: u32 = 1000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettingsFieldError {
@@ -69,11 +75,29 @@ impl Default for QuarantineSettings {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScanSettings {
     pub excluded_paths: Vec<String>,
     pub minimum_size_bytes: u64,
+    /// Поріг розділу «майже порожні папки» (рекурсивно 1..=N файлів). Відсутнє
+    /// поле у старому конфігу → [`DEFAULT_SPARSE_MAX_FILES`] (не 0 від derive).
+    #[serde(default = "default_sparse_max_files")]
+    pub sparse_max_files: u32,
+}
+
+impl Default for ScanSettings {
+    fn default() -> Self {
+        Self {
+            excluded_paths: Vec::new(),
+            minimum_size_bytes: 0,
+            sparse_max_files: DEFAULT_SPARSE_MAX_FILES,
+        }
+    }
+}
+
+fn default_sparse_max_files() -> u32 {
+    DEFAULT_SPARSE_MAX_FILES
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -101,6 +125,9 @@ impl SettingsOverrides {
         if let Some(value) = self.scan.minimum_size_bytes {
             settings.scan.minimum_size_bytes = value;
         }
+        if let Some(value) = self.scan.sparse_max_files {
+            settings.scan.sparse_max_files = value;
+        }
         settings.detectors = self.detectors.clone();
         settings
     }
@@ -120,6 +147,9 @@ impl SettingsOverrides {
                 minimum_size_bytes: (settings.scan.minimum_size_bytes
                     != defaults.scan.minimum_size_bytes)
                     .then_some(settings.scan.minimum_size_bytes),
+                sparse_max_files: (settings.scan.sparse_max_files
+                    != defaults.scan.sparse_max_files)
+                    .then_some(settings.scan.sparse_max_files),
             },
             detectors: settings.detectors.clone(),
         }
@@ -160,6 +190,12 @@ pub fn validate_settings(settings: &AppSettings) -> Result<(), SettingsFieldErro
             message: format!("елемент {index} не може бути порожнім"),
         });
     }
+    if !(1..=MAX_SPARSE_MAX_FILES).contains(&settings.scan.sparse_max_files) {
+        return Err(SettingsFieldError {
+            field: "scan.sparseMaxFiles",
+            message: format!("має бути від 1 до {MAX_SPARSE_MAX_FILES}"),
+        });
+    }
     Ok(())
 }
 
@@ -185,11 +221,15 @@ pub struct ScanOverrides {
     pub excluded_paths: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub minimum_size_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sparse_max_files: Option<u32>,
 }
 
 impl ScanOverrides {
     pub fn is_empty(&self) -> bool {
-        self.excluded_paths.is_none() && self.minimum_size_bytes.is_none()
+        self.excluded_paths.is_none()
+            && self.minimum_size_bytes.is_none()
+            && self.sparse_max_files.is_none()
     }
 }
 

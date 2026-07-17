@@ -33,7 +33,7 @@ pub struct FreeableSummary {
     /// Наївна сума категорій (Σ by_category.bytes) — для UI/діагностики.
     pub category_sum_bytes: ByteSize,
     /// Порядок = [`CategoryId::ALL`].
-    pub by_category: [CategoryRollup; 9],
+    pub by_category: [CategoryRollup; CategoryId::ALL.len()],
 }
 
 impl Default for FreeableSummary {
@@ -42,7 +42,7 @@ impl Default for FreeableSummary {
             unique_bytes: ByteSize(0),
             unique_files: 0,
             category_sum_bytes: ByteSize(0),
-            by_category: [CategoryRollup::default(); 9],
+            by_category: [CategoryRollup::default(); CategoryId::ALL.len()],
         }
     }
 }

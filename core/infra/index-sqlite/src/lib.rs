@@ -95,7 +95,9 @@ CREATE TABLE IF NOT EXISTS file_records (
             'installers',
             'temp_files',
             'app_caches',
-            'dev_artifacts'
+            'dev_artifacts',
+            'empty_folders',
+            'sparse_folders'
         )
     ),
     safety TEXT NOT NULL CHECK (safety IN ('safe_to_bulk', 'review_recommended')),
@@ -1930,6 +1932,8 @@ fn category_name(category: CategoryId) -> &'static str {
         CategoryId::TempFiles => "temp_files",
         CategoryId::AppCaches => "app_caches",
         CategoryId::DevArtifacts => "dev_artifacts",
+        CategoryId::EmptyFolders => "empty_folders",
+        CategoryId::SparseFolders => "sparse_folders",
         // Не входить у схему CHECK: uncategorized-записи живуть лише в гарячому
         // in-memory індексі. Спроба записати такий у SQLite впаде на CHECK —
         // це навмисний інваріант «persistent = лише категоризоване».
@@ -1948,6 +1952,8 @@ fn parse_category(value: &str) -> Result<CategoryId> {
         "temp_files" => Ok(CategoryId::TempFiles),
         "app_caches" => Ok(CategoryId::AppCaches),
         "dev_artifacts" => Ok(CategoryId::DevArtifacts),
+        "empty_folders" => Ok(CategoryId::EmptyFolders),
+        "sparse_folders" => Ok(CategoryId::SparseFolders),
         "uncategorized" => Ok(CategoryId::Uncategorized),
         value => invalid_enum("category", value),
     }

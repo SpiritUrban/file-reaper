@@ -178,22 +178,26 @@ pub fn scan_volume_to_index_cancel<F>(
 where
     F: FnMut(Vec<FileRecord>) -> Result<(), CoreError>,
 {
-    scan_volume_to_index_cancel_progress(drive, batch_size, is_cancelled, |_| {}, sink)
+    scan_volume_to_index_cancel_progress(drive, batch_size, is_cancelled, |_| {}, |_| {}, sink)
 }
 
 /// Як [`scan_volume_to_index_cancel`], з `on_progress` після кожного chunk MFT
-/// — щоб UI не зависав на «0 файлів» під час довгого pass 1.
+/// — щоб UI не зависав на «0 файлів» під час довгого pass 1 — та `on_dir`, який
+/// отримує **повний шлях кожної директорії** тому (для розділів «Порожні/майже
+/// порожні папки»: порожня папка не має файлів і невидима файловому конвеєру).
 #[cfg(windows)]
-pub fn scan_volume_to_index_cancel_progress<F, P>(
+pub fn scan_volume_to_index_cancel_progress<F, P, D>(
     drive: char,
     batch_size: usize,
     is_cancelled: impl Fn() -> bool,
     mut on_progress: P,
+    mut on_dir: D,
     mut sink: F,
 ) -> Result<(IndexingStats, bool), CoreError>
 where
     F: FnMut(Vec<FileRecord>) -> Result<(), CoreError>,
     P: FnMut(MftIndexProgress),
+    D: FnMut(String),
 {
     // Прохід 1: тільки директорії — вони потрібні резолверу шляхів.
     let mut dirs = Vec::new();
@@ -224,6 +228,13 @@ where
         ));
     }
     let resolver = PathResolver::from_entries(drive, &dirs);
+    // Винести повні шляхи всіх директорій (incl. порожніх) до resolver-drop:
+    // caller відфільтрує виключення й агрегує порожні/майже порожні папки.
+    for dir in &dirs {
+        if let Some(path) = resolver.full_path(dir) {
+            on_dir(path);
+        }
+    }
     drop(dirs);
 
     // Прохід 2: файли → батчі. Рахуємо files_emitted у обгортці sink.

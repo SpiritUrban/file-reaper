@@ -10,6 +10,7 @@ pub mod app_caches;
 pub mod archives;
 pub mod build_artifacts;
 mod contract;
+pub mod empty_folders;
 pub mod folder_units;
 pub mod forgotten_videos;
 mod format;
@@ -28,9 +29,10 @@ pub use app_caches::{AppCachesDetector, DETECTOR_ID as APP_CACHES_ID};
 pub use archives::{ArchivesDetector, DETECTOR_ID as ARCHIVES_ID};
 pub use build_artifacts::{BuildArtifactsDetector, DETECTOR_ID as BUILD_ARTIFACTS_ID};
 pub use contract::{Detector, DetectorHit, DetectorId};
+pub use empty_folders::{detect_folder_units, FolderScanConfig};
 pub use folder_units::{
     apply_unit_decision, build_folder_unit, build_folder_unit_from_acc, is_folder_unit,
-    sort_folder_units_by_size_desc, FolderUnitAcc, FolderUnitSpec,
+    sort_folder_units_by_size_desc, stable_folder_id, FolderUnitAcc, FolderUnitSpec,
 };
 pub use forgotten_videos::{ForgottenVideosDetector, DETECTOR_ID as FORGOTTEN_VIDEOS_ID};
 pub use installers::{InstallersDetector, DETECTOR_ID as INSTALLERS_ID};

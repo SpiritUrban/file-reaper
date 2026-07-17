@@ -24,6 +24,8 @@ export const CATEGORIES: readonly CategoryDescriptor[] = [
   { id: "installers", title: "Інсталятори", glyph: "⬇" },
   { id: "large_files", title: "Великі файли", glyph: "◼" },
   { id: "old_files", title: "Старі файли", glyph: "◻" },
+  { id: "empty_folders", title: "Порожні папки", glyph: "▱" },
+  { id: "sparse_folders", title: "Майже порожні", glyph: "▨" },
 ] as const;
 
 export function categoryTitle(id: CategoryId): string {
@@ -41,6 +43,8 @@ const CATEGORY_RULES: Record<CategoryId, string> = {
   app_caches: "Кеш-каталоги популярних програм (реєстр відомих локацій)",
   dev_artifacts: "node_modules/build/dist/target/obj/Library — за маркерами проєкту",
   duplicates: "Групи файлів з ідентичним вмістом (каскад хешування)",
+  empty_folders: "Рекурсивно порожні папки (жодного файла в піддереві) — показано найвищу",
+  sparse_folders: "Папки з дуже малою кількістю файлів (поріг у Налаштуваннях)",
 };
 
 export function categoryRule(id: CategoryId): string {

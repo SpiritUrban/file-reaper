@@ -16,6 +16,12 @@ pub enum CategoryId {
     TempFiles,
     AppCaches,
     DevArtifacts,
+    /// Рекурсивно порожні папки (жодного файла в усьому піддереві) — показуємо
+    /// найвищу порожню папку, видалення прибирає всю порожню гілку (folder-unit).
+    EmptyFolders,
+    /// Папки з дуже малою рекурсивною кількістю файлів (1..=поріг, дефолт 3) —
+    /// кандидати на прибирання зайвого ускладнення структури (folder-unit).
+    SparseFolders,
     /// Скановано, але ще не заявлено жодним детектором (architecture.md §3.4:
     /// «знайдений сканером → у пам'яті → категоризований»). Такий запис живе
     /// лише в гарячому in-memory індексі й не показується користувачу; у
@@ -29,7 +35,7 @@ impl CategoryId {
     ///
     /// Порядок збігається з [`crate::aggregate::FreeableSummary::by_category`]
     /// / [`CategoryId::mvp_index`].
-    pub const ALL: [CategoryId; 9] = [
+    pub const ALL: [CategoryId; 11] = [
         CategoryId::LargeFiles,
         CategoryId::OldFiles,
         CategoryId::ForgottenVideos,
@@ -39,6 +45,8 @@ impl CategoryId {
         CategoryId::TempFiles,
         CategoryId::AppCaches,
         CategoryId::DevArtifacts,
+        CategoryId::EmptyFolders,
+        CategoryId::SparseFolders,
     ];
 
     /// Індекс у [`CategoryId::ALL`] / `FreeableSummary::by_category` (T-054).
@@ -53,6 +61,8 @@ impl CategoryId {
             CategoryId::TempFiles => Some(6),
             CategoryId::AppCaches => Some(7),
             CategoryId::DevArtifacts => Some(8),
+            CategoryId::EmptyFolders => Some(9),
+            CategoryId::SparseFolders => Some(10),
             CategoryId::Uncategorized => None,
         }
     }

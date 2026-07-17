@@ -296,6 +296,60 @@ fn run_duplicates_cascade<R: Runtime>(
     }
 }
 
+/// Пост-скановий пас папок-одиниць: порожні та майже порожні папки (розділи
+/// «Порожні папки» / «Майже порожні»). Той самий патерн, що й
+/// [`run_duplicates_cascade`] — інʼєкція готової категорії поза фермою
+/// детекторів: агрегуємо повний перелік директорій тому (винесений сканером у
+/// `dir_sink`, порожні папки невидимі файловому конвеєру) + файли з індексу,
+/// `upsert` folder-одиниць зі стабільним namespaced-id, оновлення live-цифри.
+fn run_folder_units_pass<R: Runtime>(
+    app: &AppHandle<R>,
+    index: &InMemoryIndex,
+    last_totals: &Mutex<LiveTotals>,
+    dir_sink: &Mutex<Vec<String>>,
+    sparse_max_files: u32,
+    cancel: &CancellationToken,
+) {
+    if cancel.is_cancelled() {
+        return;
+    }
+    let dir_paths = match dir_sink.lock() {
+        Ok(mut guard) => std::mem::take(&mut *guard),
+        Err(_) => return,
+    };
+    if dir_paths.is_empty() {
+        return;
+    }
+    let files: Vec<(String, u64)> = index
+        .get_all()
+        .into_iter()
+        .filter(|r| r.unit == CandidateUnit::File)
+        .map(|r| (r.path, r.size.0))
+        .collect();
+    let units = trashradar_app::detectors::detect_folder_units(
+        &dir_paths,
+        &files,
+        trashradar_app::detectors::FolderScanConfig { sparse_max_files },
+    );
+    let unit_count = units.len();
+    if units.is_empty() {
+        return;
+    }
+    if let Err(error) = index.upsert_batch(units) {
+        tracing::warn!(%error, "folder-units: не вдалося застосувати папки-одиниці в індекс");
+        return;
+    }
+    tracing::info!(
+        dirs = dir_paths.len(),
+        units = unit_count,
+        "folder-units: порожні/майже порожні папки додано"
+    );
+    if let Ok(mut live) = last_totals.lock() {
+        live.ingest_primary(&index.get_all());
+        events::emit_cleanup_totals(app, &live.summary());
+    }
+}
+
 fn duplicate_explanation(group_size_bytes: u64, member_count: usize) -> String {
     let gb = group_size_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
     format!("дублікат · {member_count} копії по {gb:.1} ГБ")
@@ -466,6 +520,10 @@ fn strategies_for(volumes: &[char]) -> Vec<ScanStrategy> {
 /// дефолтами T-027 на кожен том.
 struct AutoVolumeScanner {
     user_excluded: Vec<String>,
+    /// Повні шляхи всіх директорій усіх томів сесії (incl. порожніх), уже
+    /// відфільтровані виключеннями — вхід пост-сканового folder-units пасу
+    /// (розділи «Порожні/майже порожні папки»).
+    dir_sink: Arc<Mutex<Vec<String>>>,
 }
 
 impl CancellableVolumeScanner for AutoVolumeScanner {
@@ -475,7 +533,18 @@ impl CancellableVolumeScanner for AutoVolumeScanner {
         cancel: &CancellationToken,
         on_batch: &mut dyn FnMut(Vec<FileRecord>, ScanBatchMeta) -> Result<(), CoreError>,
     ) -> Result<VolumeScanOutcome, CoreError> {
-        scan_one_volume_auto(volume, &self.user_excluded, cancel, on_batch)
+        scan_one_volume_auto(volume, &self.user_excluded, &self.dir_sink, cancel, on_batch)
+    }
+}
+
+/// Додати директорію до стоку, якщо вона не під виключеннями (MFT перелічує
+/// весь том — системні/карантинні/користувацькі теки треба відсіяти тут).
+fn collect_dir(dir_sink: &Mutex<Vec<String>>, exclusions: &PathExclusions, path: String) {
+    if exclusions.is_excluded(std::path::Path::new(&path)) {
+        return;
+    }
+    if let Ok(mut sink) = dir_sink.lock() {
+        sink.push(path);
     }
 }
 
@@ -509,6 +578,7 @@ fn retain_not_excluded(batch: &mut Vec<FileRecord>, exclusions: &PathExclusions)
 fn scan_one_volume_auto(
     volume: char,
     user_excluded: &[String],
+    dir_sink: &Mutex<Vec<String>>,
     cancel: &CancellationToken,
     on_batch: &mut dyn FnMut(Vec<FileRecord>, ScanBatchMeta) -> Result<(), CoreError>,
 ) -> Result<VolumeScanOutcome, CoreError> {
@@ -521,9 +591,9 @@ fn scan_one_volume_auto(
     let exclusions = exclusions_for_volume(volume, user_excluded);
     tracing::info!(target: "scan_diag", volume = %volume, ?strategy, "strategy selected");
     match strategy {
-        ScanStrategy::Mft => scan_mft_cancellable(volume, &exclusions, cancel, on_batch),
+        ScanStrategy::Mft => scan_mft_cancellable(volume, &exclusions, dir_sink, cancel, on_batch),
         ScanStrategy::DirectoryWalk | ScanStrategy::UsnDelta => {
-            scan_walk_cancellable(volume, exclusions, cancel, on_batch)
+            scan_walk_cancellable(volume, exclusions, dir_sink, cancel, on_batch)
         }
     }
 }
@@ -531,6 +601,7 @@ fn scan_one_volume_auto(
 fn scan_mft_cancellable(
     volume: char,
     exclusions: &PathExclusions,
+    dir_sink: &Mutex<Vec<String>>,
     cancel: &CancellationToken,
     on_batch: &mut dyn FnMut(Vec<FileRecord>, ScanBatchMeta) -> Result<(), CoreError>,
 ) -> Result<VolumeScanOutcome, CoreError> {
@@ -574,6 +645,7 @@ fn scan_mft_cancellable(
                         },
                     );
                 },
+                |dir_path: String| collect_dir(dir_sink, exclusions, dir_path),
                 |mut batch: Vec<FileRecord>| {
                     retain_not_excluded(&mut batch, exclusions);
                     if batch.is_empty() {
@@ -608,6 +680,7 @@ fn scan_mft_cancellable(
 fn scan_walk_cancellable(
     volume: char,
     exclusions: PathExclusions,
+    dir_sink: &Mutex<Vec<String>>,
     cancel: &CancellationToken,
     on_batch: &mut dyn FnMut(Vec<FileRecord>, ScanBatchMeta) -> Result<(), CoreError>,
 ) -> Result<VolumeScanOutcome, CoreError> {
@@ -619,8 +692,9 @@ fn scan_walk_cancellable(
     }
 
     // T-027/T-151: у виключені піддерева обхід не заходить взагалі.
+    // Клон у config — сам `exclusions` лишаємо для фільтра директорій нижче.
     let config = WalkConfig {
-        exclusions,
+        exclusions: exclusions.clone(),
         ..WalkConfig::default()
     };
 
@@ -693,6 +767,12 @@ fn scan_walk_cancellable(
             });
         }
         if e.is_directory {
+            // Директорію (incl. порожню) виносимо в сток для folder-units пасу.
+            // Обхід T-027 уже не заходить у виключені піддерева, але фільтруємо
+            // ще раз для симетрії з MFT-шляхом.
+            if let Some(dir_path) = resolver.full_path(e) {
+                collect_dir(dir_sink, &exclusions, dir_path);
+            }
             continue;
         }
         let Some(path) = resolver.full_path(e) else {
@@ -805,8 +885,12 @@ pub async fn scan_start<R: Runtime>(
 
             // T-151: виключені шляхи фіксуються на старті сесії — зміна
             // списку в Налаштуваннях діє з наступного скану.
+            // Сток директорій усіх томів (incl. порожніх) для folder-units пасу.
+            let dir_paths: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+            let sparse_max_files = settings.scan.sparse_max_files;
             let scanner = AutoVolumeScanner {
                 user_excluded: settings.scan.excluded_paths.clone(),
+                dir_sink: Arc::clone(&dir_paths),
             };
             // Глобально-унікальний candidate_id на всю сесію: per-volume сканери
             // (scan-mft `Batcher`, walk) видають id з 0 у КОЖНОМУ томі — тож без
@@ -899,6 +983,16 @@ pub async fn scan_start<R: Runtime>(
                     &also_in,
                     &duplicates,
                     &hash_cache,
+                    &token,
+                );
+                // Порожні/майже порожні папки — після каскаду (спільний індекс,
+                // окремий namespace id, без колізій з файлами/дублікатами).
+                run_folder_units_pass(
+                    &app2,
+                    index.as_ref(),
+                    &last_totals,
+                    &dir_paths,
+                    sparse_max_files,
                     &token,
                 );
             }

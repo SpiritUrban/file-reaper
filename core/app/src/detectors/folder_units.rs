@@ -138,6 +138,11 @@ pub mod id_ns {
     pub const NODE_MODULES: u64 = 0xC000_0000_0000_0000;
     pub const BUILD_ARTIFACTS: u64 = 0xA000_0000_0000_0000;
     pub const UNITY: u64 = 0xB000_0000_0000_0000;
+    /// Порожні папки (рекурсивно порожні) — окремий namespace, щоб id не
+    /// колізіонував з файловими (0..N, старші біти чисті) та іншими папками.
+    pub const EMPTY_FOLDERS: u64 = 0xD000_0000_0000_0000;
+    /// Майже порожні папки (мало файлів).
+    pub const SPARSE_FOLDERS: u64 = 0xE000_0000_0000_0000;
 }
 
 /// Перевірка форми explanation під DoD (label · ГБ · N файлів).

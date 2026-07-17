@@ -16,7 +16,9 @@ export type CategoryId =
   | "installers"
   | "temp_files"
   | "app_caches"
-  | "dev_artifacts";
+  | "dev_artifacts"
+  | "empty_folders"
+  | "sparse_folders";
 
 export type FileKind =
   | "video"
@@ -458,6 +460,8 @@ export interface AppSettings {
   scan: {
     excludedPaths: string[];
     minimumSizeBytes: number;
+    /** Поріг розділу «Майже порожні»: рекурсивно 1..=N файлів (дефолт 3). */
+    sparseMaxFiles: number;
   };
   detectors: Record<
     string,
