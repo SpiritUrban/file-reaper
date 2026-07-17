@@ -67,6 +67,9 @@ export const TOGGLEABLE_CATEGORIES: readonly CategoryId[] = [
   "archives",
   "installers",
   "duplicates",
+  "temp_files",
+  "app_caches",
+  "dev_artifacts",
 ];
 
 /** Детектор категорії увімкнено (відсутність запису/поля = увімкнено). */

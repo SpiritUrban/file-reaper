@@ -12,9 +12,11 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Runtime, State};
 use trashradar_app::detectors::{
-    DetectorHit, DetectorId, DetectorOrchestrator, DetectorRegistry, ThresholdValue,
-    DUPLICATES_CASCADE_DETECTOR_ID,
+    AppCachesDetector, BuildArtifactsDetector, DetectorHit, DetectorId, DetectorOrchestrator,
+    DetectorRegistry, NodeModulesDetector, TempFilesDetector, ThresholdValue,
+    UnityArtifactsDetector, DUPLICATES_CASCADE_DETECTOR_ID,
 };
+use trashradar_app::location_registry::KnownLocationsRegistry;
 use trashradar_app::ports::{HotIndex, ScanEnvironment};
 use trashradar_app::scan_control::{
     run_scan_session, CancellableVolumeScanner, ScanBatchMeta, ScanController, ScanProgress,
@@ -309,6 +311,7 @@ fn run_folder_units_pass<R: Runtime>(
     dir_sink: &Mutex<Vec<String>>,
     sparse_max_files: u32,
     deep_path_max_depth: u32,
+    dev_artifacts_enabled: bool,
     cancel: &CancellationToken,
 ) {
     if cancel.is_cancelled() {
@@ -318,23 +321,42 @@ fn run_folder_units_pass<R: Runtime>(
         Ok(mut guard) => std::mem::take(&mut *guard),
         Err(_) => return,
     };
-    if dir_paths.is_empty() {
-        return;
+    // Повні записи потрібні dev-детекторам (маркери package.json, дати
+    // активності); empty/sparse/deep беруть з них лише (path, size) файлів.
+    let all = index.get_all();
+    let mut units: Vec<FileRecord> = Vec::new();
+
+    // Порожні / майже порожні / глибокі — з переліку директорій + файлів.
+    if !dir_paths.is_empty() {
+        let files: Vec<(String, u64)> = all
+            .iter()
+            .filter(|r| r.unit == CandidateUnit::File)
+            .map(|r| (r.path.clone(), r.size.0))
+            .collect();
+        units.extend(trashradar_app::detectors::detect_folder_units(
+            &dir_paths,
+            &files,
+            trashradar_app::detectors::FolderScanConfig {
+                sparse_max_files,
+                deep_path_max_depth,
+            },
+        ));
     }
-    let files: Vec<(String, u64)> = index
-        .get_all()
-        .into_iter()
-        .filter(|r| r.unit == CandidateUnit::File)
-        .map(|r| (r.path, r.size.0))
-        .collect();
-    let units = trashradar_app::detectors::detect_folder_units(
-        &dir_paths,
-        &files,
-        trashradar_app::detectors::FolderScanConfig {
-            sparse_max_files,
-            deep_path_max_depth,
-        },
-    );
+
+    // Dev-сміття (T-049…T-053): структурні детектори збирають маркери зі шляхів
+    // індексу, тоді згортають кожну виявлену теку в одну folder-одиницю
+    // (окремий namespace id — без колізій з empty/sparse/deep). Це вмикає
+    // розділ «Dev-сміття», який досі не був підключений до живого скану.
+    if dev_artifacts_enabled {
+        let path_refs: Vec<&str> = all.iter().map(|r| r.path.as_str()).collect();
+        let node_modules = NodeModulesDetector::from_index_paths(path_refs.iter().copied());
+        units.extend(node_modules.aggregate_units(&all));
+        let build_artifacts = BuildArtifactsDetector::from_index_paths(path_refs.iter().copied());
+        units.extend(build_artifacts.aggregate_units(&all));
+        let unity = UnityArtifactsDetector::from_index_paths(path_refs.iter().copied());
+        units.extend(unity.aggregate_units(&all));
+    }
+
     let unit_count = units.len();
     if units.is_empty() {
         return;
@@ -346,7 +368,7 @@ fn run_folder_units_pass<R: Runtime>(
     tracing::info!(
         dirs = dir_paths.len(),
         units = unit_count,
-        "folder-units: порожні/майже порожні папки додано"
+        "folder-units: порожні/майже порожні/глибокі + dev-сміття додано"
     );
     if let Ok(mut live) = last_totals.lock() {
         live.ingest_primary(&index.get_all());
@@ -360,7 +382,24 @@ fn duplicate_explanation(group_size_bytes: u64, member_count: usize) -> String {
 }
 
 fn configured_registry(settings: &AppSettings) -> Result<DetectorRegistry, CoreError> {
-    let registry = mvp_predicate_registry();
+    let mut registry = mvp_predicate_registry();
+    // Локаційні детектори (T-047): «Тимчасові» + «Кеші» з реєстру відомих
+    // локацій (registry/known-locations.json). Best-effort: якщо реєстр не
+    // знайдено (деплой без теки registry/), ці розділи лишаються порожні, але
+    // скан не падає.
+    match KnownLocationsRegistry::load_default_or_embedded() {
+        Ok(locations) => {
+            registry.register(TempFilesDetector::from_registry(&locations));
+            registry.register(AppCachesDetector::from_registry(&locations));
+            tracing::info!(
+                locations = locations.len(),
+                "known-locations підключено — розділи Тимчасові/Кеші активні"
+            );
+        }
+        Err(error) => {
+            tracing::warn!(%error, "known-locations не завантажено (ні файл, ні вбудований) — Тимчасові/Кеші будуть порожні");
+        }
+    }
     for (id, detector) in &settings.detectors {
         let detector_id = match id.as_str() {
             "large_files" => DetectorId::new("large_files"),
@@ -368,12 +407,20 @@ fn configured_registry(settings: &AppSettings) -> Result<DetectorRegistry, CoreE
             "forgotten_videos" => DetectorId::new("forgotten_videos"),
             "archives" => DetectorId::new("archives"),
             "installers" => DetectorId::new("installers"),
+            "temp_files" => DetectorId::new("temp_files"),
+            "app_caches" => DetectorId::new("app_caches"),
             // Не-farm перемикачі (каскад дублікатів, обчислювані folder-категорії
             // empty/sparse/deep) не мають детектора у фермі — їхній enabled
             // читається окремо (напр. `duplicates_enabled`), тут просто
             // пропускаємо, а не валимо весь settings.set помилкою.
             _ => continue,
         };
+        // Детектор може бути не зареєстрований (напр. temp/caches без реєстру) —
+        // тоді set_threshold/set_enabled поверне помилку; ігноруємо, щоб toggle
+        // неіснуючого детектора не валив settings.set.
+        if registry.get(detector_id).is_none() {
+            continue;
+        }
         for (key, value) in &detector.thresholds {
             registry.set_threshold(detector_id, key, ThresholdValue::U64(*value))?;
         }
@@ -472,7 +519,16 @@ fn parse_volume_letter(s: &str) -> Option<char> {
     }
 }
 
-fn resolve_volumes(payload: &ScanStartPayload) -> Result<Vec<char>, CoreError> {
+/// Набір виключених з аналізу літер томів (Налаштування → «Диски»).
+fn excluded_volume_set(excluded: &[String]) -> std::collections::HashSet<char> {
+    excluded.iter().filter_map(|s| parse_volume_letter(s)).collect()
+}
+
+fn resolve_volumes(
+    payload: &ScanStartPayload,
+    excluded: &[String],
+) -> Result<Vec<char>, CoreError> {
+    let excluded_set = excluded_volume_set(excluded);
     if let Some(list) = &payload.volumes {
         if list.is_empty() {
             return Err(CoreError::invalid_argument(
@@ -486,18 +542,29 @@ fn resolve_volumes(payload: &ScanStartPayload) -> Result<Vec<char>, CoreError> {
                     "Некоректна літера тому «{s}»."
                 )));
             };
-            if !out.contains(&v) {
-                out.push(v);
+            // Явно переданий, але виключений у Налаштуваннях том — не скануємо.
+            if excluded_set.contains(&v) || out.contains(&v) {
+                continue;
             }
+            out.push(v);
+        }
+        if out.is_empty() {
+            return Err(CoreError::invalid_argument(
+                "Усі передані томи виключені з аналізу в Налаштуваннях.",
+            ));
         }
         return Ok(out);
     }
     let env = WinScanEnvironment;
-    let vols = env.list_scan_volumes();
+    let vols: Vec<char> = env
+        .list_scan_volumes()
+        .into_iter()
+        .filter(|v| !excluded_set.contains(v))
+        .collect();
     if vols.is_empty() {
         return Err(CoreError::new(
             ErrorCode::Io,
-            "Не знайдено томів для сканування.".to_string(),
+            "Немає томів для сканування (усі доступні виключені в Налаштуваннях).".to_string(),
         ));
     }
     Ok(vols)
@@ -831,7 +898,14 @@ pub async fn scan_start<R: Runtime>(
 ) -> Result<ScanStartAck, CoreError> {
     record_command();
     let payload = payload.unwrap_or_default();
-    let volumes = match resolve_volumes(&payload) {
+    // Виключені з аналізу томи (Налаштування → «Диски»). Читаємо з тієї самої
+    // копії settings, що її оновлює settings.set через scan.apply_settings.
+    let excluded_volumes = state
+        .settings
+        .read()
+        .map(|s| s.scan.excluded_volumes.clone())
+        .unwrap_or_default();
+    let volumes = match resolve_volumes(&payload, &excluded_volumes) {
         Ok(v) => v,
         Err(e) => {
             record_command_error();
@@ -899,6 +973,11 @@ pub async fn scan_start<R: Runtime>(
             let duplicates_enabled = settings
                 .detectors
                 .get("duplicates")
+                .map(|d| d.enabled)
+                .unwrap_or(true);
+            let dev_artifacts_enabled = settings
+                .detectors
+                .get("dev_artifacts")
                 .map(|d| d.enabled)
                 .unwrap_or(true);
             let scanner = AutoVolumeScanner {
@@ -1011,6 +1090,7 @@ pub async fn scan_start<R: Runtime>(
                     &dir_paths,
                     sparse_max_files,
                     deep_path_max_depth,
+                    dev_artifacts_enabled,
                     &token,
                 );
             }
@@ -1623,8 +1703,22 @@ mod tests {
         let p = ScanStartPayload {
             volumes: Some(vec!["C".into(), "D:".into(), "C".into()]),
         };
-        let v = resolve_volumes(&p).unwrap();
+        let v = resolve_volumes(&p, &[]).unwrap();
         assert_eq!(v, vec!['C', 'D']);
+    }
+
+    #[test]
+    fn resolve_volumes_drops_excluded_disks() {
+        // Явний список: виключений том відсіюється; лишається решта.
+        let p = ScanStartPayload {
+            volumes: Some(vec!["C".into(), "D".into(), "E".into()]),
+        };
+        let v = resolve_volumes(&p, &["D".into()]).unwrap();
+        assert_eq!(v, vec!['C', 'E']);
+
+        // Усі передані виключені → помилка (немає що сканувати).
+        let all_excluded = resolve_volumes(&p, &["C".into(), "D".into(), "E".into()]);
+        assert!(all_excluded.is_err());
     }
 
     /// T-151: набір виключень тому = системні дефолти T-027 + `.trashradar`

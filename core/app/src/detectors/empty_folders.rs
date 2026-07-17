@@ -85,6 +85,16 @@ fn is_drive_root(norm: &str) -> bool {
     !norm.contains('\\')
 }
 
+/// Службовий файл, що не рахується як «вміст» теки для порожності:
+/// `desktop.ini`, `Thumbs.db`, `ehthumbs.db`, `.DS_Store`.
+fn is_ignorable_leaf(path: &str) -> bool {
+    let name = path.rsplit(['\\', '/']).next().unwrap_or(path);
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "desktop.ini" | "thumbs.db" | "ehthumbs.db" | ".ds_store"
+    )
+}
+
 /// Знайти folder-одиниці порожніх і майже порожніх папок.
 ///
 /// - `dir_paths` — **усі** директорії тому (включно з порожніми), виключення
@@ -128,7 +138,14 @@ pub fn detect_folder_units(
     }
 
     // 3) Безпосередні файли/байти → директорія-батько кожного файла.
+    //    Службові junk-файли (desktop.ini, Thumbs.db, .DS_Store) НЕ рахуються
+    //    як вміст: інакше на реальному Windows майже кожна «порожня» тека має
+    //    desktop.ini і розділ «Порожні папки» нічого не знаходить. Такий
+    //    junk піде в карантин разом з текою — це очікувано для прибирання.
     for (path, size) in files {
+        if is_ignorable_leaf(path) {
+            continue;
+        }
         let norm = normalize(path);
         let Some(dir_norm) = parent_of(&norm) else {
             continue;
@@ -411,6 +428,24 @@ mod tests {
         assert_eq!(units.len(), 1);
         assert_eq!(units[0].category, CategoryId::SparseFolders);
         assert_eq!(units[0].size.0, 3);
+    }
+
+    #[test]
+    fn folder_with_only_junk_files_counts_as_empty() {
+        // Тека лише з desktop.ini/Thumbs.db → «Порожня папка» (реальний Windows).
+        let dir_paths = dirs(&[r"C:\Root", r"C:\Root\JunkOnly"]);
+        let file_list = files(&[
+            (r"C:\Root\real.txt", 100), // Root не порожній
+            (r"C:\Root\JunkOnly\desktop.ini", 282),
+            (r"C:\Root\JunkOnly\Thumbs.db", 4096),
+        ]);
+        let units = detect_folder_units(&dir_paths, &file_list, cfg(3));
+        let empty: Vec<_> = units
+            .iter()
+            .filter(|u| u.category == CategoryId::EmptyFolders)
+            .collect();
+        assert_eq!(empty.len(), 1);
+        assert_eq!(empty[0].path, r"C:\Root\JunkOnly");
     }
 
     #[test]

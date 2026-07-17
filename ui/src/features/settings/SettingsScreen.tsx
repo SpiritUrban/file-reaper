@@ -445,6 +445,57 @@ export function SettingsScreen() {
           Пороги папок діють з наступного скану.
         </div>
         <div className="flex flex-wrap gap-2 py-1.5">
+          <span className="w-64 shrink-0 text-ink-dim">Диски в аналізі</span>
+          <div className="flex min-w-0 flex-1 flex-col gap-1">
+            {settings && volumes.length > 0 ? (
+              volumes.map((v) => {
+                const letter = v.volume.replace(/[^A-Za-z]/g, "").toUpperCase();
+                const excluded = (settings.scan.excludedVolumes ?? []).some(
+                  (x) => x.toUpperCase() === letter,
+                );
+                const usedBytes = Math.max(0, v.capacityBytes - v.freeBytes);
+                return (
+                  <label
+                    key={v.volume}
+                    className={`flex cursor-pointer items-center gap-2 ${excluded ? "text-ink-faint" : ""}`}
+                    title={
+                      excluded
+                        ? "Увімкнути диск в аналіз"
+                        : "Вимкнути диск з аналізу (не сканувати)"
+                    }
+                  >
+                    <input
+                      type="checkbox"
+                      checked={!excluded}
+                      onChange={(e) => {
+                        const current = settings.scan.excludedVolumes ?? [];
+                        const next = e.target.checked
+                          ? current.filter((x) => x.toUpperCase() !== letter)
+                          : [...current, letter];
+                        void saveSettings({
+                          ...settings,
+                          scan: { ...settings.scan, excludedVolumes: next },
+                        });
+                      }}
+                      className="accent-[--color-accent]"
+                    />
+                    <span className="font-mono text-ink">{v.volume}</span>
+                    <span className="text-ink-faint">
+                      {formatBytes(usedBytes)} / {formatBytes(v.capacityBytes)}{" "}
+                      зайнято
+                    </span>
+                  </label>
+                );
+              })
+            ) : (
+              <span className="text-ink-faint">Список томів недоступний.</span>
+            )}
+            <span className="text-ink-faint">
+              Знята галочка — диск не сканується; діє з наступного скану.
+            </span>
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-2 py-1.5">
           <span className="w-64 shrink-0 text-ink-dim">Виключені шляхи</span>
           <div className="flex min-w-0 flex-1 flex-col gap-2">
             {/* DoD T-151: системні виключення (T-027 + T-088) видимі завжди. */}

@@ -94,6 +94,10 @@ pub struct ScanSettings {
     /// Поріг розділу «Глибокі шляхи»: глибина папки понад це значення.
     #[serde(default = "default_deep_path_max_depth")]
     pub deep_path_max_depth: u32,
+    /// Літери томів, виключених з аналізу (напр. `["D", "E"]`). Порожньо =
+    /// сканувати всі доступні томи. Відсутнє поле у старому конфігу → порожньо.
+    #[serde(default)]
+    pub excluded_volumes: Vec<String>,
 }
 
 impl Default for ScanSettings {
@@ -103,6 +107,7 @@ impl Default for ScanSettings {
             minimum_size_bytes: 0,
             sparse_max_files: DEFAULT_SPARSE_MAX_FILES,
             deep_path_max_depth: DEFAULT_DEEP_PATH_MAX_DEPTH,
+            excluded_volumes: Vec::new(),
         }
     }
 }
@@ -146,6 +151,9 @@ impl SettingsOverrides {
         if let Some(value) = self.scan.deep_path_max_depth {
             settings.scan.deep_path_max_depth = value;
         }
+        if let Some(value) = &self.scan.excluded_volumes {
+            settings.scan.excluded_volumes = value.clone();
+        }
         settings.detectors = self.detectors.clone();
         settings
     }
@@ -171,6 +179,9 @@ impl SettingsOverrides {
                 deep_path_max_depth: (settings.scan.deep_path_max_depth
                     != defaults.scan.deep_path_max_depth)
                     .then_some(settings.scan.deep_path_max_depth),
+                excluded_volumes: (settings.scan.excluded_volumes
+                    != defaults.scan.excluded_volumes)
+                    .then(|| settings.scan.excluded_volumes.clone()),
             },
             detectors: settings.detectors.clone(),
         }
@@ -256,6 +267,8 @@ pub struct ScanOverrides {
     pub sparse_max_files: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deep_path_max_depth: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub excluded_volumes: Option<Vec<String>>,
 }
 
 impl ScanOverrides {
@@ -264,6 +277,7 @@ impl ScanOverrides {
             && self.minimum_size_bytes.is_none()
             && self.sparse_max_files.is_none()
             && self.deep_path_max_depth.is_none()
+            && self.excluded_volumes.is_none()
     }
 }
 

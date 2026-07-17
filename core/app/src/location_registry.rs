@@ -20,6 +20,12 @@ pub const KNOWN_LOCATIONS_SCHEMA_VERSION: u32 = 1;
 /// Ім'я канонічного файлу в каталозі `registry/`.
 pub const KNOWN_LOCATIONS_FILE: &str = "known-locations.json";
 
+/// Вшитий у бінарник дефолтний реєстр (той самий `registry/known-locations.json`)
+/// — фолбек [`KnownLocationsRegistry::load_default_or_embedded`], коли теки
+/// `registry/` немає поруч із застосунком (продакшн-бандл).
+const EMBEDDED_KNOWN_LOCATIONS: &str =
+    include_str!("../../../registry/known-locations.json");
+
 /// До якого детектора/категорії належить локація.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -138,6 +144,18 @@ impl KnownLocationsRegistry {
             )
         })?;
         Self::load_from_file(path)
+    }
+
+    /// Як [`Self::load_default`], але з вбудованим фолбеком: якщо файл реєстру
+    /// не знайдено (продакшн-бандл без теки `registry/`), парсимо вшитий у
+    /// бінарник дефолт. Файловий шлях має пріоритет — дозволяє оновлювати
+    /// локації без ребілду. Так розділи «Тимчасові»/«Кеші» працюють і в dev,
+    /// і в упакованому застосунку.
+    pub fn load_default_or_embedded() -> Result<Self, CoreError> {
+        match Self::load_default() {
+            Ok(registry) => Ok(registry),
+            Err(_) => Self::from_json_str(EMBEDDED_KNOWN_LOCATIONS),
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -370,6 +388,13 @@ mod tests {
 
     #[test]
     fn parses_valid_document() {
+        // Вшитий дефолт має парситись і містити temp/caches локації — інакше
+        // «Тимчасові/Кеші» мовчки порожні в продакшн-бандлі без registry/.
+        let embedded = KnownLocationsRegistry::from_json_str(EMBEDDED_KNOWN_LOCATIONS)
+            .expect("вбудований known-locations.json валідний");
+        assert!(!embedded.is_empty(), "вбудований реєстр не порожній");
+        assert!(KnownLocationsRegistry::load_default_or_embedded().is_ok());
+
         let reg = KnownLocationsRegistry::from_json_str(MINIMAL_OK).expect("parse");
         assert_eq!(reg.schema_version, 1);
         assert_eq!(reg.len(), 1);

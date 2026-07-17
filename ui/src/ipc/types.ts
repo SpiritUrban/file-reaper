@@ -465,6 +465,8 @@ export interface AppSettings {
     sparseMaxFiles: number;
     /** Поріг розділу «Глибокі шляхи»: глибина папки понад це значення (дефолт 10). */
     deepPathMaxDepth: number;
+    /** Літери томів, виключених з аналізу (напр. ["D"]). Порожньо = усі. */
+    excludedVolumes: string[];
   };
   detectors: Record<
     string,
