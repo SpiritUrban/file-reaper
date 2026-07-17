@@ -1171,6 +1171,9 @@ fn parse_category_id(value: &str) -> Result<CategoryId, CoreError> {
         "temp_files" => Ok(CategoryId::TempFiles),
         "app_caches" => Ok(CategoryId::AppCaches),
         "dev_artifacts" => Ok(CategoryId::DevArtifacts),
+        "empty_folders" => Ok(CategoryId::EmptyFolders),
+        "sparse_folders" => Ok(CategoryId::SparseFolders),
+        "deep_paths" => Ok(CategoryId::DeepPaths),
         _ => Err(CoreError::invalid_argument("невідома категорія")),
     }
 }
@@ -1471,6 +1474,22 @@ mod tests {
     use trashradar_app::ports::HotIndex;
 
     use super::*;
+
+    /// Регрес: `parse_category_id` має приймати серде-рядок КОЖНОЇ категорії.
+    /// Раніше empty_folders/sparse_folders/deep_paths падали в `_ => Err` →
+    /// `category.window` повертав помилку, і нові розділи виглядали порожніми.
+    #[test]
+    fn parse_category_id_covers_all_categories() {
+        for category in CategoryId::ALL {
+            let wire = serde_json::to_value(category).unwrap();
+            let name = wire.as_str().expect("category serde string");
+            assert_eq!(
+                parse_category_id(name).expect("parse"),
+                category,
+                "категорія {name} не парситься у category.window"
+            );
+        }
+    }
 
     /// Застосунок на mock-рантаймі з тим самим списком команд, що й main.
     fn test_app() -> (

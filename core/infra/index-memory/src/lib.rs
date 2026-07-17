@@ -263,6 +263,9 @@ fn parse_category_val(val: u16) -> CategoryId {
         6 => CategoryId::TempFiles,
         7 => CategoryId::AppCaches,
         8 => CategoryId::DevArtifacts,
+        9 => CategoryId::EmptyFolders,
+        10 => CategoryId::SparseFolders,
+        11 => CategoryId::DeepPaths,
         _ => CategoryId::Uncategorized,
     }
 }
@@ -798,6 +801,28 @@ mod tests {
         assert_eq!(restored.safety, record.safety);
         assert_eq!(restored.decision, record.decision);
         assert_eq!(restored.attributes, record.attributes);
+    }
+
+    /// Регрес: КОЖНА категорія має пережити pack→unpack. Раніше нові
+    /// EmptyFolders/SparseFolders/DeepPaths (дискримінанти 9/10/11) падали в
+    /// `_ => Uncategorized` у `parse_category_val` — folder-розділи виглядали
+    /// порожніми, бо категорія губилась у компактному записі. Ітеруємо
+    /// `CategoryId::ALL`, щоб будь-яка майбутня категорія не повторила це мовчки.
+    #[test]
+    fn every_category_survives_pack_unpack() {
+        for (i, category) in CategoryId::ALL.iter().enumerate() {
+            let mut record = sample_record(i as u64, &format!("C:\\dir_{i}\\unit"));
+            record.category = *category;
+            record.unit = CandidateUnit::Folder;
+            let index = InMemoryIndex::new();
+            index.insert(&record);
+            let restored = index.get(0).unwrap();
+            assert_eq!(
+                restored.category, *category,
+                "категорія {category:?} не пережила pack/unpack"
+            );
+            assert_eq!(restored.unit, CandidateUnit::Folder);
+        }
     }
 
     #[test]
