@@ -16,6 +16,7 @@
 
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::{Condvar, Mutex, OnceLock};
 
 use trashradar_app::ports::{RawThumbnail, ScrubStrip, VideoFrameSource, VideoMetadata};
 use trashradar_domain::error::CoreError;
@@ -24,6 +25,60 @@ use crate::image::fit_within;
 
 /// Змінна середовища з явним шляхом до бінарника ffmpeg.
 pub const FFMPEG_ENV_VAR: &str = "TRASHRADAR_FFMPEG";
+
+/// Глобальна стеля одночасних ffmpeg-процесів (перф-запобіжник).
+///
+/// ffmpeg запускається з двох шляхів конвеєра превью: мініатюри відео йдуть
+/// через чергу `PreviewScheduler` (2 воркери), але скраб-смуги
+/// (`preview.scrub_strip`) стартують **напряму** зі `spawn_blocking`, повз
+/// чергу. Швидкий скрол/наведення по багатьох відео-плитках інакше породжував
+/// десятки паралельних ffmpeg, кожен з яких (без `-threads`) захоплює всі
+/// ядра — звідси «все зависає». Цей воротар обмежує **сумарну** кількість
+/// живих ffmpeg незалежно від шляху виклику.
+struct FfmpegGate {
+    permits: Mutex<usize>,
+    changed: Condvar,
+}
+
+fn ffmpeg_gate() -> &'static FfmpegGate {
+    static GATE: OnceLock<FfmpegGate> = OnceLock::new();
+    GATE.get_or_init(|| {
+        let cores = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        // ~чверть ядер, але хоча б 1 і не більше 3: превью — фонове
+        // навантаження, воно не має конкурувати з рештою системи за CPU.
+        let permits = (cores / 4).clamp(1, 3);
+        FfmpegGate {
+            permits: Mutex::new(permits),
+            changed: Condvar::new(),
+        }
+    })
+}
+
+/// RAII-дозвіл воротаря: тримається на час життя дочірнього ffmpeg
+/// (`cmd.output()` блокує до завершення процесу), звільняється при Drop.
+struct FfmpegPermit;
+
+impl FfmpegPermit {
+    fn acquire() -> Self {
+        let gate = ffmpeg_gate();
+        let mut permits = gate.permits.lock().unwrap();
+        while *permits == 0 {
+            permits = gate.changed.wait(permits).unwrap();
+        }
+        *permits -= 1;
+        FfmpegPermit
+    }
+}
+
+impl Drop for FfmpegPermit {
+    fn drop(&mut self) {
+        let gate = ffmpeg_gate();
+        *gate.permits.lock().unwrap() += 1;
+        gate.changed.notify_one();
+    }
+}
 
 /// Джерело кадрів відео на базі sidecar-процесу ffmpeg (T-071).
 #[derive(Debug, Clone)]
@@ -52,17 +107,27 @@ impl FfmpegVideoFrameSource {
     /// Запустити ffmpeg з аргументами; `None` — процес не вдалося виконати.
     fn run(&self, args: &[&str]) -> Option<std::process::Output> {
         let ffmpeg = self.ffmpeg.as_ref()?;
+        // Стеля одночасних процесів: тримаємо дозвіл до завершення ffmpeg.
+        let _permit = FfmpegPermit::acquire();
         let mut cmd = Command::new(ffmpeg);
+        // `-threads 1` (глобальна опція перед входом → потоки декодера): без
+        // неї кожен ffmpeg бере всі ядра, і кілька процесів разом кладуть
+        // систему. Один потік на процес + стеля процесів (FfmpegPermit)
+        // тримають сумарне навантаження превью помірним.
+        cmd.arg("-threads").arg("1");
         cmd.args(args)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
-        // Без миготіння консольного вікна поруч з GUI-застосунком.
+        // Без миготіння консольного вікна поруч з GUI-застосунком + знижений
+        // пріоритет: превью фонове, воно не має відбирати CPU у самого UI
+        // й решти системи (перф-запобіжник «щоб не зависало»).
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
             const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            cmd.creation_flags(CREATE_NO_WINDOW);
+            const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x0000_4000;
+            cmd.creation_flags(CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS);
         }
         cmd.output().ok()
     }
