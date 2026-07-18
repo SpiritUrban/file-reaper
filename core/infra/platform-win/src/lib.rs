@@ -688,9 +688,17 @@ mod windows {
     /// `.arg()` заекранував би вбудовані лапки й зламав парсинг.
     pub fn reveal_in_explorer(path: &str) -> Result<(), CoreError> {
         use std::os::windows::process::CommandExt;
+        // Папку-одиницю (T-053) ВІДКРИВАЄМО (заходимо всередину), а не
+        // `/select` (виділення в батьківській теці) — користувач хоче бачити
+        // вміст теки. Для файла лишається `/select` з підсвіткою у папці.
+        let is_dir = std::path::Path::new(path).is_dir();
+        let arg = if is_dir {
+            format!("\"{path}\"")
+        } else {
+            format!("/select,\"{path}\"")
+        };
         // Explorer — GUI-підсистема, не консоль: CREATE_NO_WINDOW (як для
         // ffmpeg sidecar, T-071) тут ні до чого, не додаємо.
-        let arg = format!("/select,\"{path}\"");
         std::process::Command::new("explorer.exe")
             .raw_arg(&arg)
             .spawn()

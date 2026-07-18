@@ -324,7 +324,24 @@ fn run_folder_units_pass<R: Runtime>(
     // Повні записи потрібні dev-детекторам (маркери package.json, дати
     // активності); empty/sparse/deep беруть з них лише (path, size) файлів.
     let all = index.get_all();
-    let mut units: Vec<FileRecord> = Vec::new();
+
+    // Кожну групу folder-одиниць застосовуємо й публікуємо ОКРЕМО — так лічильники
+    // відповідних розділів у Sidebar «тікають» покроково під час пост-сканового
+    // аналізу, а не зʼявляються всі разом наприкінці (прогрес по групах).
+    let mut total_units = 0usize;
+    let mut flush = |units: Vec<FileRecord>| {
+        if units.is_empty() {
+            return;
+        }
+        total_units += units.len();
+        if let Ok(mut live) = last_totals.lock() {
+            live.ingest_primary(&units);
+            events::emit_cleanup_totals(app, &live.summary());
+        }
+        if let Err(error) = index.upsert_batch(units) {
+            tracing::warn!(%error, "folder-units: не вдалося застосувати папки-одиниці в індекс");
+        }
+    };
 
     // Порожні / майже порожні / глибокі — з переліку директорій + файлів.
     if !dir_paths.is_empty() {
@@ -333,7 +350,7 @@ fn run_folder_units_pass<R: Runtime>(
             .filter(|r| r.unit == CandidateUnit::File)
             .map(|r| (r.path.clone(), r.size.0))
             .collect();
-        units.extend(trashradar_app::detectors::detect_folder_units(
+        flush(trashradar_app::detectors::detect_folder_units(
             &dir_paths,
             &files,
             trashradar_app::detectors::FolderScanConfig {
@@ -347,33 +364,22 @@ fn run_folder_units_pass<R: Runtime>(
     // індексу, тоді згортають кожну виявлену теку в одну folder-одиницю
     // (окремий namespace id — без колізій з empty/sparse/deep). Це вмикає
     // розділ «Dev-сміття», який досі не був підключений до живого скану.
+    // Кожен детектор публікується окремо — прогрес розділу «Dev-сміття» видно.
     if dev_artifacts_enabled {
         let path_refs: Vec<&str> = all.iter().map(|r| r.path.as_str()).collect();
         let node_modules = NodeModulesDetector::from_index_paths(path_refs.iter().copied());
-        units.extend(node_modules.aggregate_units(&all));
+        flush(node_modules.aggregate_units(&all));
         let build_artifacts = BuildArtifactsDetector::from_index_paths(path_refs.iter().copied());
-        units.extend(build_artifacts.aggregate_units(&all));
+        flush(build_artifacts.aggregate_units(&all));
         let unity = UnityArtifactsDetector::from_index_paths(path_refs.iter().copied());
-        units.extend(unity.aggregate_units(&all));
+        flush(unity.aggregate_units(&all));
     }
 
-    let unit_count = units.len();
-    if units.is_empty() {
-        return;
-    }
-    if let Err(error) = index.upsert_batch(units) {
-        tracing::warn!(%error, "folder-units: не вдалося застосувати папки-одиниці в індекс");
-        return;
-    }
     tracing::info!(
         dirs = dir_paths.len(),
-        units = unit_count,
+        units = total_units,
         "folder-units: порожні/майже порожні/глибокі + dev-сміття додано"
     );
-    if let Ok(mut live) = last_totals.lock() {
-        live.ingest_primary(&index.get_all());
-        events::emit_cleanup_totals(app, &live.summary());
-    }
 }
 
 fn duplicate_explanation(group_size_bytes: u64, member_count: usize) -> String {
@@ -1543,42 +1549,65 @@ fn execute_reap_batch(
         .unwrap_or(0);
     let expires_at = now.saturating_add(i64::from(ttl_days) * 86_400);
 
-    let mut requests = Vec::with_capacity(records.len());
+    let roots = vec![profile_root];
+    let reaper = trashradar_app::TransactionalReaper::new(&filesystem, &database, &roots);
+
+    // Per-item, стійко до збоїв: один проблемний кандидат (недоступна тека,
+    // хмарний плейсхолдер, заблокований файл, змінений файл) НЕ валить увесь
+    // reap — його пропускаємо з warn-логом, решту переміщуємо. Це критично для
+    // папок-одиниць (T-053): серед сотень тек майже завжди трапляється одна
+    // «важка», а стара батч-семантика через `?`/`reap_batch` через це давала
+    // «затримка й нічого». Помилку повертаємо лише якщо НЕ переміщено жодного.
+    let mut outcomes: Vec<trashradar_app::ReapOutcome> = Vec::with_capacity(records.len());
+    let mut first_error: Option<CoreError> = None;
+    let mut skipped = 0u64;
+
     for record in &records {
-        // UNC/нелокальний шлях — не резолвиться на том, пропускаємо (той
-        // самий fail-open принцип, що й candidate.batch: невідома позиція
-        // не валить весь батч).
         let Some(volume) = volume_of(&record.path) else {
+            skipped += 1;
             continue;
         };
-
-        // Гарячий індекс (T-024/T-057, infra/index-memory::CompactFileRecord)
-        // зберігає modified_at лише з точністю до цілої секунди (u32 unix
-        // secs) заради економії пам'яті на весь сеанс сканування — тоді як
-        // жива перевірка нижче (T-086, TransactionalReaper::reap_one) звіряє
-        // повну 100-нс FILETIME-точність. Порівняння впритул record.modified_at
-        // (завжди округлене) з живим точним читанням майже завжди хибно
-        // відмовляло б із file_changed для БУДЬ-ЯКОГО реального файла. Тому
-        // тут звіряємо на найкращій точності, яку справді захопило сканування
-        // (розмір точно, mtime до цілої секунди), а якщо збігається —
-        // передаємо в TransactionalReaper щойно прочитане ТОЧНЕ значення як
-        // expected_identity: внутрішня сувора перевірка тоді звіряє себе з
-        // тим самим моментом і коректно ловить лише зміни в короткому вікні
-        // між цим читанням і фактичним move.
-        let live = trashradar_platform_win::read_file_identity(std::path::Path::new(&record.path))?;
-        let record_seconds = record.modified_at.map(|timestamp| timestamp.0 / 10_000_000);
-        let live_seconds = live.modified_at.map(|timestamp| timestamp.0 / 10_000_000);
-        if live.size != record.size || live_seconds != record_seconds {
-            return Err(CoreError::file_changed(format!(
-                "Файл «{}» змінився після сканування; reap скасовано.",
-                record.path
-            )));
+        // Жива ідентичність (T-086): для файла — ще й пре-перевірка «не
+        // змінився» (розмір + mtime до секунди, як зберіг гарячий індекс).
+        // Для папки-одиниці метадані директорії дають size ≈ 0 ≠ сумі
+        // піддерева, тож пре-перевірку пропускаємо (цілісність move гарантує
+        // `validate_file_identity` усередині move_into_quarantine).
+        let live = match trashradar_platform_win::read_file_identity(std::path::Path::new(
+            &record.path,
+        )) {
+            Ok(live) => live,
+            Err(error) => {
+                tracing::warn!(path = %record.path, %error, "reap: не вдалось прочитати ідентичність — пропущено");
+                first_error.get_or_insert(error);
+                skipped += 1;
+                continue;
+            }
+        };
+        if record.unit == CandidateUnit::File {
+            let record_seconds = record.modified_at.map(|timestamp| timestamp.0 / 10_000_000);
+            let live_seconds = live.modified_at.map(|timestamp| timestamp.0 / 10_000_000);
+            if live.size != record.size || live_seconds != record_seconds {
+                tracing::warn!(path = %record.path, "reap: файл змінився після сканування — пропущено");
+                first_error.get_or_insert(CoreError::file_changed(format!(
+                    "Файл «{}» змінився після сканування; пропущено.",
+                    record.path
+                )));
+                skipped += 1;
+                continue;
+            }
         }
-
-        let directory = filesystem.ensure_on_volume(volume)?;
+        let directory = match filesystem.ensure_on_volume(volume) {
+            Ok(directory) => directory,
+            Err(error) => {
+                tracing::warn!(volume = %volume, %error, "reap: том без каталогу карантину — пропущено");
+                first_error.get_or_insert(error);
+                skipped += 1;
+                continue;
+            }
+        };
         let surrogate_name = format!("{:016}.bin", record.candidate_id.0);
         let destination = directory.quarantine_root.join(&surrogate_name);
-        requests.push(trashradar_app::ReapRequest {
+        let request = trashradar_app::ReapRequest {
             entry: QuarantineEntry {
                 id: QuarantineEntryId(record.candidate_id.0),
                 batch_id: Some(BatchId(batch_id)),
@@ -1591,17 +1620,30 @@ fn execute_reap_batch(
             },
             destination_path: destination.to_string_lossy().into_owned(),
             expected_identity: live,
-        });
-    }
-    if requests.is_empty() {
-        return Err(CoreError::invalid_argument(
-            "Жоден позначений файл не резолвився на локальний том.",
-        ));
+        };
+        match reaper.reap_one(request) {
+            Ok(outcome) => outcomes.push(outcome),
+            Err(error) => {
+                tracing::warn!(path = %record.path, unit = ?record.unit, %error, "reap: переміщення кандидата провалилось — пропущено");
+                first_error.get_or_insert(error);
+                skipped += 1;
+            }
+        }
     }
 
-    let roots = vec![profile_root];
-    trashradar_app::TransactionalReaper::new(&filesystem, &database, &roots)
-        .reap_batch(BatchId(batch_id), requests)
+    if outcomes.is_empty() {
+        return Err(first_error.unwrap_or_else(|| {
+            CoreError::invalid_argument("Жоден позначений кандидат не резолвився на локальний том.")
+        }));
+    }
+    if skipped > 0 {
+        tracing::warn!(
+            reaped = outcomes.len(),
+            skipped,
+            "reap: частину кандидатів пропущено (деталі — warn вище)"
+        );
+    }
+    Ok(outcomes)
 }
 
 /// Параметри `reap.undo_batch` (T-138): «Скасувати» на тості після reap.

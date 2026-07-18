@@ -6,7 +6,7 @@
  *     Після змін: `npm --prefix ui run test:grid`
  */
 
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { Candidate } from "@/ipc/types";
 
@@ -43,7 +43,20 @@ export interface VirtualCandidateGridProps {
   onHoverCandidate?: (candidate: Candidate) => void;
   onHoverMove?: (candidate: Candidate, ratio: number) => void;
   onColumnsChange?: (columns: number) => void;
+  /**
+   * Виділення прямокутною областю (гумка): тягнення з порожнього місця сітки
+   * позначає всі плитки, що перетнула область. Передаються id перетнутих —
+   * власник selectionStore (CategoryScreen) вирішує, як застосувати.
+   */
+  onMarqueeSelect?: (ids: number[]) => void;
   emptyTitle?: string;
+}
+
+interface MarqueeRect {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
 }
 
 export function VirtualCandidateGrid({
@@ -62,11 +75,57 @@ export function VirtualCandidateGrid({
   onHoverCandidate,
   onHoverMove,
   onColumnsChange,
+  onMarqueeSelect,
   emptyTitle = "Немає кандидатів у цій категорії",
 }: VirtualCandidateGridProps) {
   const viewportRef = useRef<HTMLDivElement>(null);
+  const gridInnerRef = useRef<HTMLDivElement>(null);
   const frameRef = useRef<number | null>(null);
   const [viewport, setScrollTop] = useGridViewport(active, viewportRef);
+  const [marquee, setMarquee] = useState<MarqueeRect | null>(null);
+
+  // Гумка: старт лише з порожнього місця (не з плитки — там клік/тягнення).
+  // Слухачі на window, щоб тягнути й за межі viewport; на mouseup — hit-test
+  // прямокутника проти реально відрендерених плиток (віртуалізація — лише
+  // видимі мають DOM, що й треба для екранної гумки).
+  const beginMarquee = (event: React.MouseEvent) => {
+    if (event.button !== 0 || !onMarqueeSelect) return;
+    if ((event.target as HTMLElement).closest("[data-candidate-id]")) return;
+    event.preventDefault();
+    const start = { x: event.clientX, y: event.clientY };
+    let moved = false;
+    const onMove = (move: MouseEvent) => {
+      if (!moved && Math.hypot(move.clientX - start.x, move.clientY - start.y) < 4) {
+        return;
+      }
+      moved = true;
+      setMarquee({ x0: start.x, y0: start.y, x1: move.clientX, y1: move.clientY });
+    };
+    const onUp = (up: MouseEvent) => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      setMarquee(null);
+      if (!moved) return;
+      const left = Math.min(start.x, up.clientX);
+      const right = Math.max(start.x, up.clientX);
+      const top = Math.min(start.y, up.clientY);
+      const bottom = Math.max(start.y, up.clientY);
+      const ids: number[] = [];
+      gridInnerRef.current
+        ?.querySelectorAll<HTMLElement>("[data-candidate-id]")
+        .forEach((el) => {
+          const r = el.getBoundingClientRect();
+          const outside =
+            r.right < left || r.left > right || r.bottom < top || r.top > bottom;
+          if (outside) return;
+          const id = Number(el.dataset.candidateId);
+          if (Number.isFinite(id)) ids.push(id);
+        });
+      if (ids.length > 0) onMarqueeSelect(ids);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  };
 
   useEffect(
     () => () => {
@@ -120,9 +179,10 @@ export function VirtualCandidateGrid({
   return (
     <div
       ref={viewportRef}
-      className="h-full overflow-y-auto overscroll-contain p-1"
+      className="relative h-full overflow-y-auto overscroll-contain p-1"
       data-grid-active={active || undefined}
       data-columns={gridWindow.columns}
+      onMouseDown={beginMarquee}
       onScroll={(event) => {
         const scrollTop = event.currentTarget.scrollTop;
         if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
@@ -134,6 +194,7 @@ export function VirtualCandidateGrid({
     >
       <div className="relative" style={{ height: gridWindow.totalHeight }}>
         <div
+          ref={gridInnerRef}
           className="absolute inset-x-0 top-0 grid gap-1"
           style={{
             gridTemplateColumns: `repeat(${gridWindow.columns}, minmax(0, 1fr))`,
@@ -167,6 +228,17 @@ export function VirtualCandidateGrid({
           })}
         </div>
       </div>
+      {marquee ? (
+        <div
+          className="pointer-events-none fixed z-50 rounded-sm border border-accent bg-accent/20"
+          style={{
+            left: Math.min(marquee.x0, marquee.x1),
+            top: Math.min(marquee.y0, marquee.y1),
+            width: Math.abs(marquee.x1 - marquee.x0),
+            height: Math.abs(marquee.y1 - marquee.y0),
+          }}
+        />
+      ) : null}
     </div>
   );
 }

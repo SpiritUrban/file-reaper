@@ -145,6 +145,7 @@ export function CandidateTile({
       {...(cursor ? { style: { cursor } } : {})}
       aria-label={`${fileName(candidate.path)}, ${formatBytes(candidate.sizeBytes)}, ${formatAge(candidate.lastAccessAt)}`}
       aria-pressed={marked}
+      data-candidate-id={candidate.id}
       data-decision={candidate.decision}
       data-marked={marked || undefined}
       data-kept={kept || undefined}

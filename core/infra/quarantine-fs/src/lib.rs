@@ -384,6 +384,60 @@ mod tests {
         root
     }
 
+    /// Ізолюючий тест: reap РЕАЛЬНОЇ порожньої теки через FS-шар. Ловить
+    /// будь-яке файло-специфічне припущення, що ламає reap папок-одиниць.
+    #[cfg(windows)]
+    #[test]
+    fn moves_real_empty_directory_into_quarantine() {
+        let root = temp_volume("reap_empty_dir");
+        let directory = NativeQuarantineFs.ensure_at_root(&root).unwrap();
+
+        let empty = root.join("EmptyFolder");
+        fs::create_dir_all(&empty).unwrap();
+        let empty_str = empty.to_string_lossy().into_owned();
+
+        let identity = trashradar_platform_win::read_file_identity(&empty).unwrap();
+        let destination = directory.quarantine_root.join("0000000000000001.bin");
+        let dest_str = destination.to_string_lossy().into_owned();
+        let roots = vec![directory.service_root.to_string_lossy().into_owned()];
+
+        let result =
+            NativeQuarantineFs.move_into_quarantine(&empty_str, &dest_str, identity, &roots);
+        assert!(result.is_ok(), "reap порожньої теки провалився: {result:?}");
+        assert!(!empty.exists(), "тека мала зникнути з оригінального місця");
+        assert!(destination.is_dir(), "тека має опинитись у карантині як директорія");
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Той самий шлях, але тека З ВМІСТОМ (sparse/deep/dev): rename переносить
+    /// усе піддерево одним махом.
+    #[cfg(windows)]
+    #[test]
+    fn moves_real_directory_with_contents_into_quarantine() {
+        let root = temp_volume("reap_dir_contents");
+        let directory = NativeQuarantineFs.ensure_at_root(&root).unwrap();
+
+        let folder = root.join("Sparse");
+        fs::create_dir_all(folder.join("sub")).unwrap();
+        fs::write(folder.join("a.txt"), b"hi").unwrap();
+        fs::write(folder.join("sub").join("b.txt"), b"there").unwrap();
+        let folder_str = folder.to_string_lossy().into_owned();
+
+        let identity = trashradar_platform_win::read_file_identity(&folder).unwrap();
+        let destination = directory.quarantine_root.join("0000000000000002.bin");
+        let dest_str = destination.to_string_lossy().into_owned();
+        let roots = vec![directory.service_root.to_string_lossy().into_owned()];
+
+        let result =
+            NativeQuarantineFs.move_into_quarantine(&folder_str, &dest_str, identity, &roots);
+        assert!(result.is_ok(), "reap теки з вмістом провалився: {result:?}");
+        assert!(!folder.exists());
+        assert!(destination.join("a.txt").is_file(), "вміст переїхав разом з текою");
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
     #[test]
     fn creates_hidden_writable_quarantine_directory() {
         let root = temp_volume("create");

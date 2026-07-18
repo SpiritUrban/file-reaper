@@ -6,9 +6,10 @@
  * подія `settings.changed` провокує рефетч (без ручного стейт-менеджменту).
  * Фільтр-чипси TopBar звужують кандидатів через store/filters (T-107).
  * T-116: позначення клік/Space (toggle), Shift-клік/Shift+Space (діапазон
- * від останнього toggle до поточного) і A (все видиме) — усі три способи
- * пишуть в один спільний `selectionStore` (T-108), тож Reap Bar і плитки
- * оновлюються ідентично й миттєво.
+ * від останнього toggle до поточного), Ctrl+A (все видиме) і гумка —
+ * тягнення прямокутної області з порожнього місця сітки (`onMarqueeSelect`) —
+ * усі способи пишуть в один спільний `selectionStore` (T-108), тож Reap Bar і
+ * плитки оновлюються ідентично й миттєво.
  * T-117: K на сфокусованій плитці — Keep; ховає файл з усіх категорій сесії
  * одразу (спільний `keepStore`) і персистентно на боці Core (`candidate.keep`).
  * T-118: щільність сітки `-`/`=` (Compact/Standard/Large) через спільний
@@ -408,6 +409,15 @@ export function CategoryScreen({ categoryId }: CategoryScreenProps) {
           onHoverMove={scrubIfLive}
           onColumnsChange={(columns) => {
             columnsRef.current = columns;
+          }}
+          onMarqueeSelect={(ids) => {
+            // Гумка додає до позначеного (Reap-набір): позначаємо всі плитки,
+            // що перетнула область (у Live Preview вибір областю не діє —
+            // там клік = озброєна дія).
+            if (livePreview.enabled) return;
+            const wanted = new Set(ids);
+            const picked = visibleRef.current.filter((c) => wanted.has(c.id));
+            if (picked.length > 0) selectionStore.markMultiple(picked);
           }}
           emptyTitle={
             (hasFilters || hasSearch) && candidates.length > 0

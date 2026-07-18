@@ -101,14 +101,24 @@ pub fn build_folder_unit_from_acc(
     Some(build_folder_unit(spec))
 }
 
-/// Стабільний id папки: namespace у старших бітах + hash шляху.
+/// Стабільний id папки: namespace у бітах 48–50 + 48-бітний hash шляху.
+///
+/// **Критично — JS-безпечний діапазон:** UI (JavaScript) тримає candidate_id як
+/// `number` (f64), що точно представляє цілі лише до `2^53 - 1`
+/// (`Number.MAX_SAFE_INTEGER`). Старий namespace у верхніх 4 бітах давав id
+/// ~1.5·10¹⁹ ≫ 2^53 → id спотворювався при round-trip category.window →
+/// selectionStore → candidate.batch/reap.execute, і жоден позначений
+/// папка-кандидат не знаходився в індексі (порожній reap-оверлей, reap теки
+/// не спрацьовував). Тепер namespace = `k << 48` (k=1..7), hash = 48 біт →
+/// максимум id = 8·2^48 − 1 = 2^51 − 1 ≈ 2.25·10¹⁵ < 2^53 (з великим запасом),
+/// і не колізіонує з файловими id (0..N, N ≪ 2^48).
 pub fn stable_folder_id(path: &str, namespace: u64) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     let mut h = DefaultHasher::new();
     path.to_ascii_lowercase().hash(&mut h);
-    let hash = h.finish() & 0x0fff_ffff_ffff_ffff;
-    (namespace & 0xF000_0000_0000_0000) | hash
+    let hash = h.finish() & ((1u64 << 48) - 1);
+    (namespace & (0x7 << 48)) | hash
 }
 
 /// Сортування плиток: найбільші зверху, потім шлях.
@@ -134,17 +144,18 @@ pub fn apply_unit_decision(unit: &mut FileRecord, decision: Decision) {
 
 /// Namespace id для детекторів (щоб candidate_id не перетинались).
 pub mod id_ns {
-    pub const APP_CACHES: u64 = 0x8000_0000_0000_0000;
-    pub const NODE_MODULES: u64 = 0xC000_0000_0000_0000;
-    pub const BUILD_ARTIFACTS: u64 = 0xA000_0000_0000_0000;
-    pub const UNITY: u64 = 0xB000_0000_0000_0000;
-    /// Порожні папки (рекурсивно порожні) — окремий namespace, щоб id не
-    /// колізіонував з файловими (0..N, старші біти чисті) та іншими папками.
-    pub const EMPTY_FOLDERS: u64 = 0xD000_0000_0000_0000;
+    // namespace = `k << 48` (k=1..7): id лишається < 2^53 (JS-safe), не
+    // колізіонує з файловими id (0..N ≪ 2^48). Див. [`super::stable_folder_id`].
+    pub const APP_CACHES: u64 = 1 << 48;
+    pub const BUILD_ARTIFACTS: u64 = 2 << 48;
+    pub const UNITY: u64 = 3 << 48;
+    pub const NODE_MODULES: u64 = 4 << 48;
+    /// Порожні папки (рекурсивно порожні).
+    pub const EMPTY_FOLDERS: u64 = 5 << 48;
     /// Майже порожні папки (мало файлів).
-    pub const SPARSE_FOLDERS: u64 = 0xE000_0000_0000_0000;
+    pub const SPARSE_FOLDERS: u64 = 6 << 48;
     /// Задовга вкладеність («Глибокі шляхи»).
-    pub const DEEP_PATHS: u64 = 0xF000_0000_0000_0000;
+    pub const DEEP_PATHS: u64 = 7 << 48;
 }
 
 /// Перевірка форми explanation під DoD (label · ГБ · N файлів).
@@ -311,6 +322,36 @@ mod tests {
         sort_folder_units_by_size_desc(&mut units);
         assert_eq!(units[0].path, r"C:\b");
         assert_eq!(units[1].path, r"C:\a");
+    }
+
+    /// Регрес: id папки має лишатись у JS-safe діапазоні (< 2^53), інакше UI
+    /// (f64) спотворює його й позначені папки не знаходяться в індексі →
+    /// порожній reap-оверлей / reap теки не працює.
+    #[test]
+    fn folder_ids_stay_js_safe_and_keep_namespace() {
+        const MAX_SAFE: u64 = (1u64 << 53) - 1;
+        let namespaces = [
+            id_ns::APP_CACHES,
+            id_ns::BUILD_ARTIFACTS,
+            id_ns::UNITY,
+            id_ns::NODE_MODULES,
+            id_ns::EMPTY_FOLDERS,
+            id_ns::SPARSE_FOLDERS,
+            id_ns::DEEP_PATHS,
+        ];
+        for ns in namespaces {
+            for path in [
+                r"C:\a",
+                r"C:\very\deep\nested\path\node_modules",
+                r"D:\проєкт\кеш\тека",
+            ] {
+                let id = stable_folder_id(path, ns);
+                assert!(id <= MAX_SAFE, "id {id} перевищив 2^53-1 для ns {ns:#x}");
+                assert_eq!(id >> 48, ns >> 48, "namespace-біти збережено");
+            }
+        }
+        // Реалістичний файловий id (мільярди) не потрапляє в folder-діапазон.
+        assert!(2_000_000_000u64 < id_ns::APP_CACHES);
     }
 
     #[test]

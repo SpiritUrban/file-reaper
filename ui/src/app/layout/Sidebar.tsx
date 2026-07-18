@@ -16,7 +16,12 @@ import { toast } from "@/store/toasts";
 import { appStateStore, useAppState } from "@/store/appState";
 import { command, ipcErrorMessage } from "@/ipc/client";
 import type { HotkeyActionEventDetail } from "@/hotkeys";
-import type { ScanStartAck, VolumeUsageInfo } from "@/ipc/types";
+import type {
+  CategorySummary,
+  DuplicatesCascadeEvent,
+  ScanStartAck,
+  VolumeUsageInfo,
+} from "@/ipc/types";
 
 const itemBase =
   "flex items-center gap-2 rounded px-2 py-1.5 text-sm hover:bg-panel-2";
@@ -45,8 +50,31 @@ function rescanVolume(volume: string): void {
   );
 }
 
+/** Короткий підпис одиниці лічильника групи (docs/ui.md §1). */
+function countSuffix(unit: CategorySummary["countUnit"]): string {
+  switch (unit) {
+    case "groups":
+      return " гр.";
+    case "folders":
+      return " тек";
+    default:
+      return "";
+  }
+}
+
+/** Каскад дублікатів ще працює (не idle/complete/cancelled). */
+function cascadeActive(cascade: DuplicatesCascadeEvent | null): boolean {
+  if (!cascade) return false;
+  return (
+    cascade.phase === "size_grouping" ||
+    cascade.phase === "partial_hashing" ||
+    cascade.phase === "full_hashing"
+  );
+}
+
 export function Sidebar() {
-  const { cleanup, scanRunning, volumes, quarantine, settings } = useAppState();
+  const { cleanup, scanRunning, volumes, quarantine, settings, cascadeProgress } =
+    useAppState();
   const [collapsed, setCollapsed] = useState(false);
   // T-152: вимкнені детектори прибираються зі списку категорій повністю.
   const rows = categoryRowsByWeight(cleanup.categories, settings);
@@ -133,7 +161,14 @@ export function Sidebar() {
       <nav className="flex flex-1 flex-col gap-0.5 overflow-y-auto px-2">
         {rows.map(({ descriptor, summary }) => {
           const totalBytes = summary?.totalBytes ?? 0;
-          const isEmpty = totalBytes === 0;
+          const count = summary?.itemCount ?? 0;
+          const isEmpty = totalBytes === 0 && count === 0;
+          // Прогрес по групі: лічильник знайденого «тікає» під час скану/аналізу;
+          // для Дублікатів — окремий спінер, поки триває хешування каскаду.
+          const dupWorking =
+            descriptor.id === "duplicates" &&
+            scanRunning &&
+            cascadeActive(cascadeProgress);
           return (
             <NavLink
               key={descriptor.id}
@@ -147,13 +182,38 @@ export function Sidebar() {
               {!collapsed && (
                 <>
                   <span className="flex-1 truncate">{descriptor.title}</span>
+                  {dupWorking ? (
+                    <span
+                      className="inline-block animate-spin text-xs text-accent"
+                      aria-label="аналіз триває"
+                    >
+                      ⟳
+                    </span>
+                  ) : null}
                   {isEmpty ? (
-                    <span className="font-mono text-xs text-ink-faint">—</span>
+                    <span className="font-mono text-xs text-ink-faint">
+                      {scanRunning ? "…" : "—"}
+                    </span>
                   ) : (
-                    <AnimatedBytes
-                      value={totalBytes}
-                      className="font-mono text-xs text-ink-dim"
-                    />
+                    <span className="flex items-baseline gap-1 font-mono text-xs">
+                      {count > 0 ? (
+                        <span className="text-ink-faint">
+                          <AnimatedInteger value={count} />
+                          {countSuffix(summary?.countUnit ?? "files")}
+                        </span>
+                      ) : null}
+                      {totalBytes > 0 ? (
+                        <>
+                          {count > 0 ? (
+                            <span className="text-ink-faint">·</span>
+                          ) : null}
+                          <AnimatedBytes
+                            value={totalBytes}
+                            className="text-ink-dim"
+                          />
+                        </>
+                      ) : null}
+                    </span>
                   )}
                 </>
               )}
