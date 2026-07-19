@@ -102,6 +102,15 @@ export class AppStateStore {
     );
   }
 
+  /**
+   * Оптимістичний snapshot settings (чекбокси/поля Налаштувань): UI не чекає
+   * `settings.changed` / важкий перерахунок індексу. При помилці `settings.set`
+   * викликач відкочує через попереднє значення.
+   */
+  patchSettings(settings: AppSettings): void {
+    this.project((state) => ({ ...state, settings }));
+  }
+
   private publish(next: AppState): void {
     this.state = next;
     for (const listener of this.listeners) listener();
@@ -164,10 +173,11 @@ export class AppStateStore {
           this.project((state) => ({
             ...state,
             quarantine: {
-              // heldBytes у події authoritative; count коригуємо purge-ами.
-              heldCount: Math.max(0, state.quarantine.heldCount - event.purgedCount),
+              // Snapshot з Core (reap/restore/purge) — без дельт: інакше після
+              // reap бейдж лишався 0 і екран Quarantine не рефетчив список.
+              heldCount: event.heldCount,
               heldBytes: event.heldBytes,
-              nextPurgeAtUnix: state.quarantine.nextPurgeAtUnix,
+              nextPurgeAtUnix: event.nextPurgeAtUnix,
             },
           })),
         ),

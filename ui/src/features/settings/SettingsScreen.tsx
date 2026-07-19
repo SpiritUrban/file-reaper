@@ -32,7 +32,7 @@ import { ThresholdInput } from "@/components/ThresholdInput";
 import { hotkeys } from "@/hotkeys";
 import { command, ipcErrorMessage, isTauri } from "@/ipc/client";
 import { ARMED_ACTIONS, type ArmedAction } from "@/store/armedAction";
-import { useAppState } from "@/store/appState";
+import { appStateStore, useAppState } from "@/store/appState";
 import {
   CATEGORIES,
   categoryRule,
@@ -77,12 +77,17 @@ const SYSTEM_EXCLUSIONS = [
  *  T-150 у progress.md: Core вимагає TTL 1..3650 дн). */
 const TTL_OPTIONS = [7, 30, 90, 365] as const;
 
-/** settings.set з повним об'єктом; помилка валідації Core → toast з полем. */
+/** settings.set з повним об'єктом; помилка валідації Core → toast + rollback. */
 async function saveSettings(next: AppSettings): Promise<void> {
+  const previous = appStateStore.getSnapshot().settings;
+  // Оптимістично — чекбокси/поля реагують одразу (Core раніше блокував
+  // IPC на повний перерахунок індексу → «не перемикаються»).
+  appStateStore.patchSettings(next);
   try {
     await command<AppSettings>("settings.set", { settings: next });
-    // Стан оновиться подією settings.changed → appState (T-093/T-098).
+    // Підтвердження / узгодження: settings.changed → appState.
   } catch (error) {
+    if (previous) appStateStore.patchSettings(previous);
     toast({ message: ipcErrorMessage(error), tone: "warning" });
   }
 }

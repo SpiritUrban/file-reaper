@@ -93,6 +93,12 @@ impl ScanRuntime {
         }
     }
 
+    /// Швидко підмінити settings без перерахунку індексу (UI toggle /
+    /// excluded volumes діють одразу; важкий `apply_settings` — у фоні).
+    pub fn replace_settings_snapshot(&self, settings: AppSettings) {
+        *self.settings.write().expect("scan settings lock") = settings;
+    }
+
     pub fn apply_settings(&self, settings: &AppSettings) -> Result<u64, CoreError> {
         let registry = configured_registry(settings)?;
         let stats = DetectorOrchestrator::new(&registry)
@@ -1631,12 +1637,8 @@ pub async fn reap_execute<R: Runtime>(
     }
 
     let wanted: std::collections::HashSet<u64> = payload.candidate_ids.iter().copied().collect();
-    let records: Vec<FileRecord> = state
-        .index
-        .get_all()
-        .into_iter()
-        .filter(|r| wanted.contains(&r.candidate_id.0))
-        .collect();
+    // Не get_all() на 100k+ записів — лише потрібні id (лаг UI при reap).
+    let records: Vec<FileRecord> = state.index.get_by_candidate_ids(&wanted);
     if records.is_empty() {
         record_command_error();
         return Err(CoreError::invalid_argument(
@@ -1645,6 +1647,7 @@ pub async fn reap_execute<R: Runtime>(
     }
 
     let profile_dir = profile.profile_dir();
+    let profile_dir_for_badge = profile_dir.clone();
     let ttl_days = settings.current().quarantine.ttl_days;
     let batch_id = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1675,6 +1678,14 @@ pub async fn reap_execute<R: Runtime>(
     {
         apply_and_emit_totals(&app, &state, &result);
     }
+
+    // Живий бейдж + рефетч екрана Quarantine (раніше подія не летіла → UI «пусто»).
+    let badge = tauri::async_runtime::spawn_blocking(move || {
+        crate::ipc::read_profile_quarantine_badge(profile_dir_for_badge)
+    })
+    .await
+    .unwrap_or_else(|_| crate::ipc::QuarantineBadge::default());
+    events::emit_quarantine_changed(&app, &badge, 0, 0, false, None);
 
     let reaped_bytes: u64 = outcomes.iter().map(|o| o.entry.size.0).sum();
     Ok(ReapExecuteAck {
@@ -1822,6 +1833,7 @@ pub async fn reap_undo_batch<R: Runtime>(
 ) -> Result<Vec<crate::ipc::QuarantineRestoredDto>, CoreError> {
     record_command();
     let profile_dir = profile.profile_dir();
+    let profile_dir_for_badge = profile_dir.clone();
     let batch_id = payload.batch_id;
     let outcomes =
         tauri::async_runtime::spawn_blocking(move || undo_reap_batch(profile_dir, batch_id))
@@ -1845,6 +1857,12 @@ pub async fn reap_undo_batch<R: Runtime>(
             used_suffix: outcome.used_suffix,
         });
     }
+    let badge = tauri::async_runtime::spawn_blocking(move || {
+        crate::ipc::read_profile_quarantine_badge(profile_dir_for_badge)
+    })
+    .await
+    .unwrap_or_else(|_| crate::ipc::QuarantineBadge::default());
+    events::emit_quarantine_changed(&app, &badge, 0, 0, false, None);
     Ok(dtos)
 }
 

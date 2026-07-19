@@ -513,10 +513,15 @@ export interface AppStateSnapshot {
   /** Перший запуск: чистий профіль без попередніх сканів (T-114). */
   isFirstRun: boolean;
 }
+/** Подія quarantine.changed — authoritative snapshot hold (після reap/restore/purge). */
 export interface QuarantineChangedEvent {
   purgedCount: number;
   purgedBytes: number;
+  /** Поточна кількість quarantined (джерело істини для бейджа). */
+  heldCount: number;
   heldBytes: number;
+  /** UNIX-секунди наступного автоочищення, або 0 якщо порожньо. */
+  nextPurgeAtUnix: number;
   thresholdExceeded: boolean;
   message?: string;
 }

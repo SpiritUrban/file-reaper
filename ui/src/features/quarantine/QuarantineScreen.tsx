@@ -365,11 +365,11 @@ export function QuarantineScreen() {
       .catch((err) => setError(ipcErrorMessage(err)));
   }, []);
 
-  // Рефетч на кожну зміну бейджа (T-106) — той самий сигнал, що й
-  // quarantine.changed (purge/restore міняють held-лічильники).
+  // Рефетч на кожну зміну бейджа (T-106) — quarantine.changed після
+  // reap/restore/purge (authoritative heldCount/heldBytes/nextPurgeAtUnix).
   useEffect(() => {
     load();
-  }, [load, quarantine.heldCount, quarantine.heldBytes]);
+  }, [load, quarantine.heldCount, quarantine.heldBytes, quarantine.nextPurgeAtUnix]);
 
   // T-132: Restore — Core вже робить move+manifest+аудит (`QuarantineRestorer`,
   // T-080); тут лише виклик з одним entryId, локальне видалення з `entries`

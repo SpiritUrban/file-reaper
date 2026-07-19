@@ -204,18 +204,46 @@ pub fn emit_quarantine_restored<R: Runtime>(
     emit(app, topic::QUARANTINE_RESTORED, &payload);
 }
 
-/// Payload `quarantine.changed`: тримання Quarantine змінилось — TTL-sweeper
-/// (T-082, `emit_quarantine_sweep`, ще не підключений до lifecycle) або
-/// ручний `quarantine.purge` (T-133, підключено).
+/// Payload `quarantine.changed`: тримання Quarantine змінилось — reap
+/// (T-138), restore, TTL-sweeper (T-082) або ручний `quarantine.purge` (T-133).
+///
+/// `held_count` / `held_bytes` / `next_purge_at_unix` — **authoritative**
+/// snapshot з manifest (UI не робить дельти: інакше після reap бейдж лишався 0).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QuarantineChangedEvent {
     pub purged_count: u64,
     pub purged_bytes: u64,
+    pub held_count: u64,
     pub held_bytes: u64,
+    pub next_purge_at_unix: i64,
     pub threshold_exceeded: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+}
+
+/// Живий бейдж Sidebar + рефетч екрана Quarantine після будь-якої зміни hold.
+pub fn emit_quarantine_changed<R: Runtime>(
+    app: &AppHandle<R>,
+    badge: &crate::ipc::QuarantineBadge,
+    purged_count: u64,
+    purged_bytes: u64,
+    threshold_exceeded: bool,
+    message: Option<String>,
+) {
+    emit(
+        app,
+        topic::QUARANTINE_CHANGED,
+        &QuarantineChangedEvent {
+            purged_count,
+            purged_bytes,
+            held_count: badge.held_count,
+            held_bytes: badge.held_bytes,
+            next_purge_at_unix: badge.next_purge_at_unix,
+            threshold_exceeded,
+            message,
+        },
+    );
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -246,13 +274,17 @@ pub fn emit_quarantine_sweep<R: Runtime>(app: &AppHandle<R>, result: &trashradar
             result.held_bytes
         )
     });
+    // SweepResult має held_bytes, але не held_count/next_purge — lifecycle
+    // має read_profile_quarantine_badge + emit_quarantine_changed.
     emit(
         app,
         topic::QUARANTINE_CHANGED,
         &QuarantineChangedEvent {
             purged_count: result.purged.len() as u64,
             purged_bytes: result.purged_bytes,
+            held_count: 0,
             held_bytes: result.held_bytes,
+            next_purge_at_unix: 0,
             threshold_exceeded: result.threshold_exceeded,
             message,
         },

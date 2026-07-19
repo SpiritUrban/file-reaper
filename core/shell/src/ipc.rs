@@ -172,10 +172,13 @@ pub async fn settings_set<R: Runtime>(
     apply_and_persist_settings(&app, &state, &scan, settings).await
 }
 
-/// Валідація + атомарний запис + гарячий перерахунок + подія `settings.changed`
-/// (T-092/T-093). Спільний шлях для `settings.set` і `category.set_threshold`
-/// (T-115) — редагування порога детектора це теж зміна settings, лише з
-/// іншим UI-входом.
+/// Валідація + атомарний запис + подія `settings.changed` + фоновий
+/// перерахунок індексу (T-092/T-093). Спільний шлях для `settings.set` і
+/// `category.set_threshold` (T-115).
+///
+/// Важливо: важкий `apply_settings` (get_all + evaluate 100k+ записів) **не
+/// блокує** відповідь команди — інакше чекбокси в UI «не перемикаються»
+/// (контрольовані з appState, який чекає `settings.changed`).
 async fn apply_and_persist_settings<R: Runtime>(
     app: &AppHandle<R>,
     state: &SettingsRuntime,
@@ -191,31 +194,51 @@ async fn apply_and_persist_settings<R: Runtime>(
         .await
         .map_err(|error| CoreError::internal(format!("Settings write task failed: {error}")))??;
     let previous = state.current();
-    let recalculated = scan.apply_settings(&settings)?;
-    // T-152 (DoD «прибирає категорію з Sidebar і цифри»): live totals щойно
-    // перебудовані з перерахованого індексу — віддати їх UI одразу, а не
-    // чекати наступної події скану/рішення. Закриває й T-093-прогалину:
-    // зміна порога тепер теж миттєво оновлює цифру.
-    if let Ok(live) = scan.last_totals.lock() {
-        events::emit_cleanup_totals(app, &live.summary());
-    }
     let rescheduled = previous.quarantine != settings.quarantine;
     let generation = if rescheduled {
         state.schedule_generation.fetch_add(1, Ordering::SeqCst) + 1
     } else {
         state.schedule_generation.load(Ordering::SeqCst)
     };
+    // Snapshot для UI + наступного scan.start — одразу, до фонового recalc.
     *state.current.write().expect("settings lock") = settings.clone();
+    scan.replace_settings_snapshot(settings.clone());
     events::emit(
         app,
         events::topic::SETTINGS_CHANGED,
         &SettingsChangedEvent {
             settings: settings.clone(),
-            detector_records_recalculated: recalculated,
+            detector_records_recalculated: 0,
             quarantine_rescheduled: rescheduled,
             schedule_generation: generation,
         },
     );
+
+    // Перерахунок індексу / totals у фоні (T-152 Sidebar + цифра).
+    let app_bg = app.clone();
+    let settings_bg = settings.clone();
+    tauri::async_runtime::spawn(async move {
+        use tauri::Manager;
+        let scan = app_bg.state::<crate::scan_runtime::ScanRuntime>();
+        match scan.apply_settings(&settings_bg) {
+            Ok(recalculated) => {
+                if let Ok(live) = scan.last_totals.lock() {
+                    events::emit_cleanup_totals(&app_bg, &live.summary());
+                }
+                tracing::info!(
+                    recalculated,
+                    "settings: фоновий перерахунок індексу завершено"
+                );
+            }
+            Err(error) => {
+                tracing::error!(
+                    %error,
+                    "settings: фоновий apply_settings провалився (snapshot уже збережено)"
+                );
+            }
+        }
+    });
+
     Ok(settings)
 }
 
@@ -335,7 +358,8 @@ fn open_profile_manifest(
 
 /// Бейдж з профільного manifest; недоступна БД → порожній бейдж (деградація,
 /// не збій snapshot — той самий принцип, що й health-проби T-089).
-fn read_profile_quarantine_badge(profile: Option<std::path::PathBuf>) -> QuarantineBadge {
+/// `pub(crate)` — після reap/restore shell емітить `quarantine.changed`.
+pub(crate) fn read_profile_quarantine_badge(profile: Option<std::path::PathBuf>) -> QuarantineBadge {
     match open_profile_manifest(profile) {
         Some(database) => quarantine_badge(&database).unwrap_or_else(|error| {
             tracing::warn!(%error, "Бейдж Quarantine недоступний");
@@ -450,6 +474,7 @@ pub async fn quarantine_restore_batch<R: Runtime>(
         return Err(CoreError::invalid_argument("Список entryIds порожній."));
     }
     let profile_dir = profile.profile_dir();
+    let profile_dir_for_badge = profile_dir.clone();
     let entry_ids = payload.entry_ids.clone();
     let outcomes = tauri::async_runtime::spawn_blocking(move || {
         restore_profile_quarantine_entries(profile_dir, &entry_ids)
@@ -474,6 +499,12 @@ pub async fn quarantine_restore_batch<R: Runtime>(
             used_suffix: outcome.used_suffix,
         });
     }
+    let badge = tauri::async_runtime::spawn_blocking(move || {
+        read_profile_quarantine_badge(profile_dir_for_badge)
+    })
+    .await
+    .unwrap_or_else(|_| QuarantineBadge::default());
+    events::emit_quarantine_changed(&app, &badge, 0, 0, false, None);
     Ok(dtos)
 }
 
@@ -588,16 +619,13 @@ pub async fn quarantine_purge<R: Runtime>(
     .await
     .map_err(|error| CoreError::internal(format!("Quarantine badge task failed: {error}")))?;
 
-    events::emit(
+    events::emit_quarantine_changed(
         &app,
-        events::topic::QUARANTINE_CHANGED,
-        &events::QuarantineChangedEvent {
-            purged_count: result.purged.len() as u64,
-            purged_bytes: result.purged_bytes,
-            held_bytes: held.held_bytes,
-            threshold_exceeded: false,
-            message: None,
-        },
+        &held,
+        result.purged.len() as u64,
+        result.purged_bytes,
+        false,
+        None,
     );
 
     Ok(QuarantinePurgeAck {

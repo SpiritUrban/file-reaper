@@ -471,6 +471,28 @@ impl InMemoryIndex {
         records
     }
 
+    /// Розпакувати лише записи з даними `candidate_id` (reap/batch lookup).
+    /// Не клонує весь індекс — критично при 100k+ файлах.
+    pub fn get_by_candidate_ids(
+        &self,
+        ids: &std::collections::HashSet<u64>,
+    ) -> Vec<FileRecord> {
+        if ids.is_empty() {
+            return Vec::new();
+        }
+        let inner = self.inner.read().unwrap();
+        let mut records = Vec::with_capacity(ids.len());
+        for compact in &inner.records {
+            if ids.contains(&compact.candidate_id) {
+                records.push(compact.unpack(inner.resolve_path(compact)));
+                if records.len() == ids.len() {
+                    break;
+                }
+            }
+        }
+        records
+    }
+
     /// Підрядковий регістронезалежний пошук за іменем файла та шляхом (T-018).
     ///
     /// Підрядок шукається один раз по унікальних інтернованих директоріях та
