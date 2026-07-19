@@ -26,6 +26,9 @@ Thumbs.db
 # Logs
 *.log
 
+# Dev: dump кандидатів після скану (перезаписується кожним проходом)
+scan-found-files.txt
+
 # Локальний ffmpeg для відео-превʼю (T-071) — не комітимо ~100МБ бінарник
 ffmpeg*/
 ffmpeg.exe

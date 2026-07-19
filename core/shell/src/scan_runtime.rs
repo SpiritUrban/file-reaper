@@ -4,10 +4,12 @@
 //! Tauri State, фоновий потік і адаптери MFT/walk.
 
 use std::collections::HashMap;
+use std::fs;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Runtime, State};
@@ -887,6 +889,155 @@ fn scan_walk_cancellable(
     })
 }
 
+/// Ім'я dump-файла в корені репозиторію (завжди перезаписується).
+const SCAN_FOUND_DUMP_NAME: &str = "scan-found-files.txt";
+
+/// Корінь репо: `core/shell` → `../..`, або parent від cwd=`core` (tauri.mjs).
+fn resolve_repo_root() -> PathBuf {
+    let from_manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .ok();
+    if let Some(p) = from_manifest {
+        return p;
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        if cwd.file_name().and_then(|s| s.to_str()) == Some("core") {
+            if let Some(parent) = cwd.parent() {
+                return parent.to_path_buf();
+            }
+        }
+        return cwd;
+    }
+    PathBuf::from(".")
+}
+
+fn category_label(c: CategoryId) -> &'static str {
+    match c {
+        CategoryId::LargeFiles => "large_files",
+        CategoryId::OldFiles => "old_files",
+        CategoryId::ForgottenVideos => "forgotten_videos",
+        CategoryId::Duplicates => "duplicates",
+        CategoryId::Archives => "archives",
+        CategoryId::Installers => "installers",
+        CategoryId::TempFiles => "temp_files",
+        CategoryId::AppCaches => "app_caches",
+        CategoryId::DevArtifacts => "dev_artifacts",
+        CategoryId::EmptyFolders => "empty_folders",
+        CategoryId::SparseFolders => "sparse_folders",
+        CategoryId::DeepPaths => "deep_paths",
+        CategoryId::Uncategorized => "uncategorized",
+    }
+}
+
+fn kind_label(k: FileKind) -> &'static str {
+    match k {
+        FileKind::Video => "video",
+        FileKind::Image => "image",
+        FileKind::Audio => "audio",
+        FileKind::Archive => "archive",
+        FileKind::Installer => "installer",
+        FileKind::DiskImage => "disk_image",
+        FileKind::Document => "document",
+        FileKind::Other => "other",
+    }
+}
+
+fn unit_label(u: CandidateUnit) -> &'static str {
+    match u {
+        CandidateUnit::File => "file",
+        CandidateUnit::Folder => "folder",
+    }
+}
+
+fn unix_now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Куди писати dump (усі шляхи перезаписуються одним вмістом).
+fn scan_found_dump_paths() -> Vec<PathBuf> {
+    let mut paths = vec![resolve_repo_root().join(SCAN_FOUND_DUMP_NAME)];
+    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        paths.push(
+            PathBuf::from(local)
+                .join("TrashRadar")
+                .join(SCAN_FOUND_DUMP_NAME),
+        );
+    }
+    // Дубль поруч із exe (core/target/debug) — якщо корінь репо недоступний.
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            paths.push(dir.join(SCAN_FOUND_DUMP_NAME));
+        }
+    }
+    paths
+}
+
+/// Перезаписати `scan-found-files.txt`: усі записи індексу (size ↓).
+/// Пише в кілька місць (корінь репо + LocalAppData + dir exe).
+fn dump_scan_found_files(index: &InMemoryIndex, stage: &str) {
+    let mut records = index.get_all();
+    records.sort_by(|a, b| b.size.0.cmp(&a.size.0).then_with(|| a.path.cmp(&b.path)));
+    let body = format_scan_found_dump(&records);
+    for path in scan_found_dump_paths() {
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        match fs::write(&path, &body) {
+            Ok(()) => tracing::info!(
+                stage,
+                path = %path.display(),
+                bytes = body.len(),
+                records = records.len(),
+                "dump знайдених файлів перезаписано"
+            ),
+            Err(error) => tracing::warn!(
+                stage,
+                %error,
+                path = %path.display(),
+                "не вдалося записати dump знайдених файлів"
+            ),
+        }
+    }
+}
+
+fn format_scan_found_dump(records: &[FileRecord]) -> String {
+    let candidates = records
+        .iter()
+        .filter(|r| r.category != CategoryId::Uncategorized)
+        .count();
+    let mut out = String::with_capacity(records.len().saturating_mul(160).saturating_add(512));
+    out.push_str("# TrashRadar scan-found-files — overwritten each scan pass\n");
+    out.push_str(&format!("# generated_unix: {}\n", unix_now_secs()));
+    out.push_str(&format!("# total_index: {}\n", records.len()));
+    out.push_str(&format!("# candidates: {candidates}\n"));
+    out.push_str(
+        "# columns: size_bytes\tcategory\tkind\tunit\tsystem\thidden\tpath\texplanation\n",
+    );
+    for r in records {
+        let explanation = r
+            .explanation
+            .replace(['\t', '\r', '\n'], " ")
+            .trim()
+            .to_string();
+        out.push_str(&format!(
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            r.size.0,
+            category_label(r.category),
+            kind_label(r.kind),
+            unit_label(r.unit),
+            if r.attributes.is_system { 1 } else { 0 },
+            if r.attributes.is_hidden { 1 } else { 0 },
+            r.path,
+            explanation
+        ));
+    }
+    out
+}
+
 fn emit_progress<R: Runtime>(app: &AppHandle<R>, p: &ScanProgress) {
     events::emit(
         app,
@@ -1046,6 +1197,9 @@ pub async fn scan_start<R: Runtime>(
                 Ok(summary) => tracing::info!(target: "scan_diag", session_id, files_indexed = summary.files_indexed, volumes_completed = summary.volumes_completed, cancelled = summary.cancelled, index_len = HotIndex::len(index.as_ref()).unwrap_or(0), elapsed_ms = session_started.elapsed().as_millis(), "scan pipeline finished"),
                 Err(error) => tracing::error!(target: "scan_diag", session_id, %error, index_len = HotIndex::len(index.as_ref()).unwrap_or(0), elapsed_ms = session_started.elapsed().as_millis(), "scan pipeline failed"),
             }
+            // Dump ОДРАЗУ після індексації томів — до каскаду дублікатів
+            // (каскад може бути довгим; dump потрібен для аналізу keep-hints).
+            dump_scan_found_files(index.as_ref(), "after_pipeline");
             // T-126: каскад дублікатів — UI лишається «зайнятим» (done=false),
             // щоб не виглядало, ніби все вже готово, поки йде хешування.
             let (files_indexed, session_cancelled) = match &result {
@@ -1100,6 +1254,9 @@ pub async fn scan_start<R: Runtime>(
                     &token,
                 );
             }
+
+            // Повторний dump після folder-units / cascade (повніший набір).
+            dump_scan_found_files(index.as_ref(), "after_postprocess");
 
             // Фінальний snapshot без втрати підсумку (T-055 / T-006 flush).
             let _ = throttle.flush(Instant::now());

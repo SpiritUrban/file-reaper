@@ -1,5 +1,6 @@
 import type { Candidate, FileKind } from "@/ipc/types";
 import { categoryTitle } from "@/store/categories";
+import { doNotDeleteHint } from "@/store/doNotDeleteHints";
 import { formatAge, formatBytes } from "@/store/format";
 import { useThumbnail, useVideoScrub } from "@/store/preview";
 
@@ -104,13 +105,27 @@ export function CandidateTile({
   const kept = keptOverride ?? candidate.decision === "keep";
   // T-147: опрацьована (marked/keep) — затемнена на місці, сітка не зсувається.
   const processed = marked || kept;
+  // Відомі системні/службові файли: напівпрозорі + короткий опис (+ ⚠ critical).
+  const keepHint = doNotDeleteHint(candidate.path);
+  const isCritical = keepHint?.severity === "critical";
   const stateClass = marked
     ? "border-reap"
     : kept
       ? "border-keep/80"
-      : "border-line hover:border-ink-dim";
+      : isCritical
+        ? "border-reap/70 hover:border-reap"
+        : keepHint
+          ? "border-ink-faint hover:border-ink-dim"
+          : "border-line hover:border-ink-dim";
   const focusClass = focused ? "ring-2 ring-accent/70" : "";
-  const processedClass = processed ? "opacity-50" : "";
+  // Keep-hint слабший за processed (marked/keep), щоб стани дій лишались читабельними.
+  const processedClass = processed
+    ? "opacity-50"
+    : keepHint
+      ? isCritical
+        ? "opacity-45"
+        : "opacity-40"
+      : "";
 
   // T-120: коли батьківський компонент не передав preview явно (звичайний
   // шлях сітки категорії), плитка сама запитує статичну мініатюру.
@@ -143,13 +158,24 @@ export function CandidateTile({
       type="button"
       className={`group relative aspect-[4/3] w-full overflow-hidden rounded-sm border bg-panel text-left outline-none transition-colors ${stateClass} ${focusClass} ${processedClass} ${flashRing ?? ""} focus-visible:border-accent focus-visible:ring-2 focus-visible:ring-accent/70 ${className}`}
       {...(cursor ? { style: { cursor } } : {})}
-      aria-label={`${fileName(candidate.path)}, ${formatBytes(candidate.sizeBytes)}, ${formatAge(candidate.lastAccessAt)}`}
+      aria-label={[
+        fileName(candidate.path),
+        formatBytes(candidate.sizeBytes),
+        formatAge(candidate.lastAccessAt),
+        keepHint
+          ? `${isCritical ? "критично не видаляти" : "не видаляти"}: ${keepHint.label}`
+          : null,
+      ]
+        .filter(Boolean)
+        .join(", ")}
       aria-pressed={marked}
       data-candidate-id={candidate.id}
       data-decision={candidate.decision}
       data-marked={marked || undefined}
       data-kept={kept || undefined}
       data-processed={processed || undefined}
+      data-do-not-delete={keepHint?.id || undefined}
+      data-keep-severity={keepHint?.severity || undefined}
       data-focused={focused || undefined}
       onContextMenu={
         onSecondaryActivate
@@ -194,7 +220,42 @@ export function CandidateTile({
         </span>
       ) : null}
 
-      {candidate.alsoIn[0] ? (
+      {keepHint ? (
+        <>
+          <span
+            className={`absolute left-2 top-2 z-30 max-w-[calc(100%-2.75rem)] rounded-sm px-2 py-1 text-xs leading-snug backdrop-blur-sm ${
+              isCritical
+                ? "border border-reap/50 bg-reap/15 text-ink"
+                : "bg-bg/90 text-ink-dim"
+            }`}
+            title={
+              isCritical
+                ? `Критично не видаляти: ${keepHint.label}`
+                : `Не варто видаляти: ${keepHint.label}`
+            }
+          >
+            <span
+              className={`font-medium ${isCritical ? "text-reap" : "text-ink-faint"}`}
+            >
+              {isCritical ? "критично" : "не видаляти"}
+            </span>
+            <span
+              className={`mt-0.5 block truncate ${isCritical ? "text-ink" : "text-ink-dim"}`}
+            >
+              {keepHint.label}
+            </span>
+          </span>
+          {isCritical ? (
+            <span
+              className="absolute right-2 top-2 z-30 grid h-7 w-7 place-items-center rounded-full bg-reap text-sm font-bold text-bg shadow-sm"
+              title="Критично: не видаляти"
+              aria-hidden="true"
+            >
+              ⚠
+            </span>
+          ) : null}
+        </>
+      ) : candidate.alsoIn[0] ? (
         <span
           className="absolute left-2 top-2 z-30 max-w-[75%] truncate rounded-full bg-bg/85 px-2 py-0.5 text-xs text-ink-dim backdrop-blur-sm"
           title={`Також у: ${candidate.alsoIn.map(categoryTitle).join(", ")}`}
