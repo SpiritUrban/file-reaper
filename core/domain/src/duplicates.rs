@@ -1071,7 +1071,15 @@ mod tests {
         assert!(!e.is_valid_for(ByteSize(101), Some(FsTimestamp(9))));
         assert!(!e.is_valid_for(ByteSize(100), Some(FsTimestamp(8))));
         assert!(!e.is_valid_for(ByteSize(100), None));
-        assert_eq!(normalize_hash_cache_path(r"C:/A/F.BIN"), r"c:\a\f.bin");
+        // Ключ кешу нормалізується за правилами платформи (правило 6a):
+        // Windows зводить `/`→`\` і згортає регістр, Linux не робить ні того,
+        // ні іншого — там `C:/A/F.BIN` це просто ім'я з такими символами.
+        let key = normalize_hash_cache_path(r"C:/A/F.BIN");
+        if cfg!(windows) {
+            assert_eq!(key, r"c:\a\f.bin");
+        } else {
+            assert_eq!(key, "C:/A/F.BIN");
+        }
     }
 
     #[test]
@@ -1079,12 +1087,15 @@ mod tests {
         let members = [
             DuplicateMemberRef {
                 candidate_id: CandidateId(1),
-                path: r"C:\Users\Ada\Downloads\vid.mp4".into(),
+                // Сегменти шляху ріже платформний роздільник, тож фікстура
+                // мусить бути в рідній формі — інакше на Linux увесь шлях це
+                // один сегмент і «Downloads» не знаходиться (правило 6a).
+                path: crate::path_key::fixture(r"C:\Users\Ada\Downloads\vid.mp4"),
                 modified_at: Some(FsTimestamp(1)),
             },
             DuplicateMemberRef {
                 candidate_id: CandidateId(2),
-                path: r"C:\Videos\vid.mp4".into(),
+                path: crate::path_key::fixture(r"C:\Videos\vid.mp4"),
                 modified_at: Some(FsTimestamp(99)),
             },
         ];

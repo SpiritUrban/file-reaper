@@ -95,13 +95,21 @@ jobs:
       - name: Surface clippy output
         if: failure() && steps.clippy.conclusion == 'failure'
         run: bash ../scripts/ci-annotate.sh "Clippy output (linux)" clippy.log
-      - name: Tests
+      # Тести — лише `domain` і `app`: це платформно-нейтральні шари
+      # (docs/repository.md §3–4), і саме там шляхова логіка мусить бути
+      # правильною на будь-якій ФС. Саме тут вилізають припущення на кшталт
+      # «глибина = кількість `\`» — реальний баг, знайдений цією джобою.
+      #
+      # `infra/*` навмисно НЕ тестується тут: це адаптери під конкретну
+      # платформу (MFT, USN, WinAPI-виключення, індекс за Windows-шляхами), і
+      # їхні фікстури записані у Windows-формі. Прогін їх на Linux перевіряв
+      # би роздільник, а не логіку. Компіляцію й лінти всього воркспейсу
+      # крок clippy вище все одно робить — саме він ловить правило 6.
+      - name: Tests (platform-neutral layers)
         id: tests
         run: |
           set -o pipefail
-          cargo test --workspace --exclude trashradar-shell 2>&1 | tee cargo-test.log
-      # Саме тут вилізають шляхові припущення: тест, що хардкодить `\`,
-      # зелений на Windows і червоний тут.
+          cargo test -p trashradar-domain -p trashradar-app 2>&1 | tee cargo-test.log
       - name: Surface cargo test output
         if: failure() && steps.tests.conclusion == 'failure'
         run: bash ../scripts/ci-annotate.sh "cargo test output (linux)" cargo-test.log

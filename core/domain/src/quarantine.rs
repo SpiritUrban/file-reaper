@@ -341,6 +341,11 @@ mod tests {
     use super::*;
     use crate::error::ErrorCode;
 
+    /// Перевіряє guard-list **Windows-тому**: конструктор `windows_volume`,
+    /// шляхи з літерою диска, регістронезалежне порівняння. Поза Windows це
+    /// не «зламано», а просто інша модель шляхів — там діє `unix_roots`, і
+    /// його покривають `platform_guard_tests` нижче (правило 6a).
+    #[cfg(windows)]
     #[test]
     fn guard_blocks_system_app_and_own_paths_segment_safely() {
         let guard = QuarantineGuard::windows_volume('C')
@@ -361,6 +366,10 @@ mod tests {
         assert!(guard.validate(r"C:\Program Files Backup\clip.mp4").is_ok());
     }
 
+    /// Windows-форма шляху: літера диска, `\\?\`-префікс, регістронезалежність.
+    /// Unix-двійник — [`service_directory_detection_on_unix`] нижче, щоб
+    /// покриття цієї функції не зникло на другій платформі.
+    #[cfg(windows)]
     #[test]
     fn service_directory_detection_is_segment_safe_and_normalized() {
         // Під службовим каталогом — будь-яка глибина, регістр, роздільники.
@@ -461,6 +470,24 @@ mod platform_guard_tests {
             "{system_path} мусить бути захищений guard-list'ом"
         );
         assert!(guard.validate(system_path).is_err());
+    }
+
+    /// Unix-двійник Windows-тесту `service_directory_detection_…`: службовий
+    /// каталог лежить у корені файлової системи, а не тому з літерою.
+    #[cfg(not(windows))]
+    #[test]
+    fn service_directory_detection_on_unix() {
+        assert!(is_under_service_directory("/.trashradar"));
+        assert!(is_under_service_directory(
+            "/.trashradar/quarantine/00000001.bin"
+        ));
+        // Сусіднє ім'я, службовий каталог не в корені, відносний шлях і
+        // порожній рядок — не під ним.
+        assert!(!is_under_service_directory("/.trashradar2/file.bin"));
+        assert!(!is_under_service_directory("/home/ada/.trashradar/x"));
+        assert!(!is_under_service_directory("/home/ada/video.mp4"));
+        assert!(!is_under_service_directory(".trashradar/x"));
+        assert!(!is_under_service_directory(""));
     }
 
     /// А звичайний файл користувача — ні, інакше застосунок не працює взагалі.
