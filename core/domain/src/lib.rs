@@ -14,6 +14,7 @@ pub mod category;
 pub mod duplicates;
 pub mod error;
 pub mod forecast;
+pub mod path_key;
 pub mod quarantine;
 pub mod scan;
 pub mod settings;

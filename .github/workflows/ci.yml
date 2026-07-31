@@ -36,16 +36,42 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: core
+          # Правило 5: свій ключ кешу на джобу.
+          key: core-windows
       - run: cargo fmt --all --check
       # shell тягне повний Tauri — він у власному джобі нижче,
       # щоб швидкі перевірки шарів не чекали на нього.
       - run: cargo check --workspace --exclude trashradar-shell
-      - run: cargo clippy --workspace --exclude trashradar-shell -- -D warnings
-      - run: cargo test --workspace --exclude trashradar-shell
+      - name: Clippy
+        id: clippy
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo clippy --workspace --exclude trashradar-shell --message-format=short -- -D warnings 2>&1 | tee clippy.log
+      - name: Surface clippy output
+        if: failure() && steps.clippy.conclusion == 'failure'
+        shell: bash
+        run: bash ../scripts/ci-annotate.sh "Clippy output (windows)" clippy.log
+      - name: Tests
+        id: tests
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --workspace --exclude trashradar-shell 2>&1 | tee cargo-test.log
+      - name: Surface cargo test output
+        if: failure() && steps.tests.conclusion == 'failure'
+        shell: bash
+        run: bash ../scripts/ci-annotate.sh "cargo test output (windows)" cargo-test.log
 
-  shell:
-    name: Core shell (tauri check)
-    runs-on: windows-latest
+  # Правило 7a: «тести зелені локально» не означає нічого про CI — локально
+  # інша ОС, і помітити різницю нічим. Правило 6a: платформно-нейтральний код
+  # із платформним припущенням у рантаймі компілюється всюди й проходить
+  # clippy на будь-якій платформі, а працює лише на одній. Ця джоба — перше
+  # і єдине місце, де таке видно, і зробити її зеленою треба ДО першого тега,
+  # а не разом із ним.
+  core-linux:
+    name: Core on Linux (правила 6a/7a)
+    runs-on: ubuntu-22.04
     defaults:
       run:
         working-directory: core
@@ -53,12 +79,70 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+          key: core-linux
+      # Форматування перевіряється і тут: .gitattributes тримає LF, і саме на
+      # Linux-раннері видно, якщо це перестало діяти.
+      - run: cargo fmt --all --check
+      - name: Clippy
+        id: clippy
+        run: |
+          set -o pipefail
+          cargo clippy --workspace --exclude trashradar-shell --message-format=short -- -D warnings 2>&1 | tee clippy.log
+      - name: Surface clippy output
+        if: failure() && steps.clippy.conclusion == 'failure'
+        run: bash ../scripts/ci-annotate.sh "Clippy output (linux)" clippy.log
+      - name: Tests
+        id: tests
+        run: |
+          set -o pipefail
+          cargo test --workspace --exclude trashradar-shell 2>&1 | tee cargo-test.log
+      # Саме тут вилізають шляхові припущення: тест, що хардкодить `\`,
+      # зелений на Windows і червоний тут.
+      - name: Surface cargo test output
+        if: failure() && steps.tests.conclusion == 'failure'
+        run: bash ../scripts/ci-annotate.sh "cargo test output (linux)" cargo-test.log
+
+  shell:
+    name: Core shell (tauri check)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+        with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: core
-      - run: cargo check -p trashradar-shell
-      - run: cargo clippy -p trashradar-shell -- -D warnings
+          key: shell-windows
+
+      # Правило 2: `tauri::generate_context!` вбудовує бандл на етапі
+      # компіляції, а ui/dist у .gitignore. Без цих кроків cargo падає з
+      # «proc macro panicked» і кодом 101 — що виглядає як проблема Rust-коду.
+      - name: Build frontend
+        run: npm ci && npm run build
+        working-directory: ui
+
+      - name: Check shell
+        id: check_shell
+        shell: bash
+        working-directory: core
+        run: |
+          set -o pipefail
+          cargo check -p trashradar-shell 2>&1 | tee check.log
+          cargo clippy -p trashradar-shell -- -D warnings 2>&1 | tee -a check.log
+      - name: Surface shell output
+        if: failure() && steps.check_shell.conclusion == 'failure'
+        shell: bash
+        run: bash scripts/ci-annotate.sh "Shell check output" core/check.log
 
   e2e:
     name: E2E (crash recovery matrix)
@@ -77,7 +161,16 @@ jobs:
       # T-156: reap/purge crash-recovery matrix on real FS + SQLite.
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test
+      - name: Tests
+        id: tests
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test 2>&1 | tee e2e.log
+      - name: Surface e2e output
+        if: failure() && steps.tests.conclusion == 'failure'
+        shell: bash
+        run: bash ../../scripts/ci-annotate.sh "E2E output" e2e.log
 
   bench:
     name: Bench (§15 regression gates)

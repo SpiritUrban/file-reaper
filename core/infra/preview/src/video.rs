@@ -16,7 +16,7 @@
 
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::{Condvar, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock};
 
 use trashradar_app::ports::{RawThumbnail, ScrubStrip, VideoFrameSource, VideoMetadata};
 use trashradar_domain::error::CoreError;
@@ -81,32 +81,67 @@ impl Drop for FfmpegPermit {
 }
 
 /// Джерело кадрів відео на базі sidecar-процесу ffmpeg (T-071).
+///
+/// Шлях за замком, а не простим полем: 1-клік завантаження ffmpeg із UI
+/// (правило 29) має вмикати відео-превʼю **без перезапуску**, а ланцюжок
+/// джерел до того моменту вже роздано по `Arc` у планувальник і префетчер —
+/// підмінити там сам об'єкт нікому.
 #[derive(Debug, Clone)]
 pub struct FfmpegVideoFrameSource {
-    ffmpeg: Option<PathBuf>,
+    ffmpeg: Arc<RwLock<Option<PathBuf>>>,
 }
 
 impl FfmpegVideoFrameSource {
     /// Створити джерело з автопошуком бінарника (`TRASHRADAR_FFMPEG` → `PATH`).
     pub fn new() -> Self {
+        Self::from_path(discover_ffmpeg())
+    }
+
+    fn from_path(path: Option<PathBuf>) -> Self {
         Self {
-            ffmpeg: discover_ffmpeg(),
+            ffmpeg: Arc::new(RwLock::new(path)),
         }
+    }
+
+    /// Прийняти щойно завантажений бінарник: наступний виклик уже піде через
+    /// нього, без перезапуску застосунку.
+    pub fn set_binary(&self, path: PathBuf) {
+        if let Ok(mut slot) = self.ffmpeg.write() {
+            *slot = Some(path);
+        }
+    }
+
+    /// Поточний шлях до бінарника (діагностика, health-екран).
+    pub fn binary_path(&self) -> Option<PathBuf> {
+        self.ffmpeg.read().ok().and_then(|slot| slot.clone())
+    }
+
+    /// Те саме, але з додатковими теками пошуку попереду решти порядку.
+    ///
+    /// Шлях до ресурсів бандла й до теки завантажень у профілі знає лише
+    /// оболонка (у Tauri він різний на кожній платформі), тому вона їх і
+    /// передає — замість того, щоб цей крейт вгадував розкладку інсталяції
+    /// (правило 6a: захардкоджена розкладка компілюється всюди, а працює
+    /// на одній платформі).
+    pub fn with_search_dirs(dirs: &[PathBuf]) -> Self {
+        Self::from_path(discover_ffmpeg_in(dirs))
     }
 
     /// Створити джерело з явним шляхом до ffmpeg (тести, майбутній конфіг).
     pub fn with_binary(path: PathBuf) -> Self {
-        Self { ffmpeg: Some(path) }
+        Self::from_path(Some(path))
     }
 
     /// Чи знайдено бінарник ffmpeg (для health-діагностики).
     pub fn is_available(&self) -> bool {
-        self.ffmpeg.is_some()
+        self.binary_path().is_some()
     }
 
     /// Запустити ffmpeg з аргументами; `None` — процес не вдалося виконати.
     fn run(&self, args: &[&str]) -> Option<std::process::Output> {
-        let ffmpeg = self.ffmpeg.as_ref()?;
+        // Шлях копіюється під короткий read-lock: тримати замок на весь час
+        // роботи дочірнього процесу означало б серіалізувати всі превʼю.
+        let ffmpeg = self.binary_path()?;
         // Стеля одночасних процесів: тримаємо дозвіл до завершення ffmpeg.
         let _permit = FfmpegPermit::acquire();
         let mut cmd = Command::new(ffmpeg);
@@ -280,19 +315,41 @@ impl FfmpegVideoFrameSource {
     }
 }
 
+/// Ім'я бінарника ffmpeg на поточній платформі.
+pub fn ffmpeg_exe_name() -> &'static str {
+    if cfg!(windows) {
+        "ffmpeg.exe"
+    } else {
+        "ffmpeg"
+    }
+}
+
 /// Знайти бінарник ffmpeg: `TRASHRADAR_FFMPEG` (явний шлях) → пошук у `PATH`.
 fn discover_ffmpeg() -> Option<PathBuf> {
+    discover_ffmpeg_in(&[])
+}
+
+/// Порядок пошуку (правило 29 брифу Стадії 2, багатозоновий пошук):
+/// `TRASHRADAR_FFMPEG` → передані теки (ресурси бандла, тека профілю) →
+/// поруч із застосунком → `PATH`.
+///
+/// Явна змінна попереду всього: якщо користувач сказав словами, ігнорувати
+/// не можна. Вкладені теки перед `PATH` — щоб укомплектована збірка мала
+/// пріоритет над випадковим системним ffmpeg невідомої версії.
+pub fn discover_ffmpeg_in(extra_dirs: &[PathBuf]) -> Option<PathBuf> {
     if let Ok(explicit) = std::env::var(FFMPEG_ENV_VAR) {
         let path = PathBuf::from(explicit);
         if path.is_file() {
             return Some(path);
         }
     }
-    let exe_name = if cfg!(windows) {
-        "ffmpeg.exe"
-    } else {
-        "ffmpeg"
-    };
+    let exe_name = ffmpeg_exe_name();
+    for dir in extra_dirs {
+        let candidate = dir.join(exe_name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
     // Поруч із застосунком (бандл / ручне розміщення) — до PATH, щоб вкладений
     // ffmpeg мав пріоритет над випадковим системним. Досить покласти
     // `ffmpeg.exe` у теку з застосунком — відео-превью запрацюють без

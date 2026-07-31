@@ -25,10 +25,19 @@ use crate::exclude::PathExclusions;
 /// Синтетичний `file_ref` кореня тому (walk-модель; у MFT корінь = record 5).
 pub const ROOT_REF: u64 = 0;
 
+// Правило 6 брифу Стадії 2: константи вживаються лише в Windows-гілці
+// `win_attributes`/`is_reparse_point`, тож без `cfg` вони дають на Linux
+// `dead_code` — а з `-D warnings` у CI це помилка збірки. З Windows такого
+// не побачити ніколи.
+#[cfg(windows)]
 const FILE_ATTRIBUTE_READONLY: u32 = 0x0000_0001;
+#[cfg(windows)]
 const FILE_ATTRIBUTE_HIDDEN: u32 = 0x0000_0002;
+#[cfg(windows)]
 const FILE_ATTRIBUTE_SYSTEM: u32 = 0x0000_0004;
+#[cfg(windows)]
 const FILE_ATTRIBUTE_TEMPORARY: u32 = 0x0000_0100;
+#[cfg(windows)]
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
 
 /// Інтервал FILETIME між 1601-01-01 і Unix epoch (100-нс тики).

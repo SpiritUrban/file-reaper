@@ -7,6 +7,8 @@
 import { useState } from "react";
 
 import { command, ipcErrorMessage, isTauri } from "@/ipc/client";
+import { openExternal } from "@/ipc/external";
+import { PRODUCT_METADATA } from "@/product";
 import { appStateStore, useAppState } from "@/store/appState";
 import { toast } from "@/store/toasts";
 import type { ScanStartAck } from "@/ipc/types";
@@ -108,6 +110,18 @@ export function ScanStartOverlay() {
         <p className="mt-3 text-xs text-ink-faint">
           Пізніше можна запустити кнопкою ⟳ у верхній панелі або біля диска в
           Sidebar.
+        </p>
+        {/* Розділ 7: поверхня «що бачить один раз» — рівно один тихий
+            рядок 11px, без бейджів і без прохань про зірочку. */}
+        <p className="mt-4 border-t border-line pt-3 text-[11px] text-ink-faint">
+          TrashRadar —{" "}
+          <button
+            type="button"
+            onClick={() => openExternal(PRODUCT_METADATA.authorUrl)}
+            className="underline decoration-ink-faint/40 underline-offset-2 hover:text-ink-dim"
+          >
+            {PRODUCT_METADATA.author}
+          </button>
         </p>
       </div>
     </div>

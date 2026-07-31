@@ -1,0 +1,117 @@
+name: Deploy GitHub Pages
+
+# Сайт-вітрина: статична сторінка + маніфест завантажень, зібраний з
+# GitHub API (імена артефактів ніколи не вигадуються — правило 15).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'site/**'
+      - 'scripts/generate-download-manifest.mjs'
+      - 'scripts/version-files.mjs'
+      - '.github/workflows/pages.yml'
+  # Правило 14: викликається залежною джобою реліз-рану.
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: 'pages'
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: Deploy site
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      # Правило 14b: контент сайту — завжди з дефолтної гілки.
+      #
+      # Деплой, викликаний з тега, інакше публікує сайт СТАНОМ НА ТЕГ і мовчки
+      # відкочує все, змержене пізніше: ран зелений, версія правильна, а
+      # правки сторінки зникли. Маніфест від цього не страждає — він читає
+      # GITHUB_REF_NAME, а не чекаут, і тому нижче все одно бачить тег.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch || 'main' }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Generate download manifest
+        id: manifest
+        env:
+          # Без токена GitHub дає 60 запитів/год на IP, далі 403.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/generate-download-manifest.mjs
+
+      - name: Surface manifest failure
+        if: failure() && steps.manifest.conclusion == 'failure'
+        run: echo "::error title=Download manifest::генерація маніфесту впала — сайт зібрався б без жодної кнопки завантаження"
+
+      # ::notice — публічна анотація: її видно без авторизації, на відміну від
+      # логів рану. Наступного разу, коли сайт відстане від релізу, буде
+      # видно, що саме побачив скрипт (розділ 11).
+      - name: Report resolved release
+        run: |
+          v=$(node -p "require('./site/download-manifest.json').version")
+          n=$(node -p "require('./site/download-manifest.json').assets.length")
+          s=$(node -p "require('./site/download-manifest.json').source")
+          echo "::notice title=Download manifest::ref=${GITHUB_REF_NAME} -> version ${v}, ${n} assets, source=${s}"
+
+      # Правило 31: перевіряти НАСЛІДОК, а не передумову. «Файл існує» — це
+      # інвентаризація; тут перевіряється, що маніфест справді описує тег, з
+      # якого йде реліз, і що кнопки не порожні.
+      - name: Verify manifest matches the tag
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          expected="${GITHUB_REF_NAME#v}"
+          actual=$(node -p "require('./site/download-manifest.json').version")
+          count=$(node -p "require('./site/download-manifest.json').assets.length")
+          if [ "$actual" != "$expected" ]; then
+            echo "::error title=Manifest version::маніфест описує ${actual}, а реліз іде з тега ${GITHUB_REF_NAME}. Сайт показав би чужу версію."
+            exit 1
+          fi
+          if [ "$count" -eq 0 ]; then
+            echo "::error title=Manifest empty::маніфест без ассетів — сторінка вийшла б без жодної кнопки завантаження."
+            exit 1
+          fi
+          echo "Маніфест: ${actual}, ${count} ассетів."
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: './site'
+      - id: deployment
+        uses: actions/deploy-pages@v4
+
+      # Розділ 11: деплой може відзвітувати success, а живий URL — віддавати
+      # попередню збірку. Раніше цей збій був НЕВИДИМИЙ: ран зелений, і ловила
+      # його лише випадкова ручна перевірка. Тепер ран падає з повідомленням,
+      # що реліз справний, а відстає саме сайт.
+      - name: Verify the live site serves this build
+        env:
+          PAGE_URL: ${{ steps.deployment.outputs.page_url }}
+        run: |
+          expected=$(node -p "require('./site/download-manifest.json').version")
+          live=""
+          for attempt in $(seq 1 12); do
+            live=$(curl -sS -L "${PAGE_URL}download-manifest.json?check=${GITHUB_RUN_ID}-${attempt}" \
+              | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{console.log(JSON.parse(s).version)}catch{console.log('')}})")
+            if [ "$live" = "$expected" ]; then
+              echo "Живий сайт віддає ${live} (спроба ${attempt})."
+              exit 0
+            fi
+            echo "Спроба ${attempt}: живий сайт віддає '${live}', очікується ${expected}. Чекаю 15 с."
+            sleep 15
+          done
+          echo "::error title=Site did not go live::${PAGE_URL} віддає '${live}' замість ${expected} після 3 хв. Реліз і автооновлення справні (вони живуть у GitHub Releases) — відстає саме вітрина. Обхід: Actions → Deploy GitHub Pages → Run workflow."
+          exit 1

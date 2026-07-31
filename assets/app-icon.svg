@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!--
+    Джерело всіх іконок TrashRadar. Набір генерується командою
+    `tauri icon assets/app-icon.svg  o core/shell/icons` (правило 24 брифу
+    Стадії 2: іконки перевіряються вмістом, а не наявністю файлів).
+
+    Обмеження: у коментарях XML заборонено подвійне тире (правило 25),
+    тому шлях команди вище записаний без дефісів прапорця.
+
+    Ідея: радарний екран. Кільця дальності, промінь розгортки і три
+    засвітки різного «розміру» за шкалою heat з ui/src/design/theme.css.
+    Читається на 32 пікселях: силует кола з яскравим сектором.
+  -->
+  <defs>
+    <linearGradient id="plate" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#171b23"/>
+      <stop offset="1" stop-color="#0a0c10"/>
+    </linearGradient>
+    <radialGradient id="scope" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#16324a"/>
+      <stop offset="0.75" stop-color="#0e1b28"/>
+      <stop offset="1" stop-color="#0b1219"/>
+    </radialGradient>
+    <linearGradient id="sweep" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" stop-color="#5b9dd9" stop-opacity="0"/>
+      <stop offset="1" stop-color="#5b9dd9" stop-opacity="0.85"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1024" height="1024" rx="216" fill="url(#plate)"/>
+  <circle cx="512" cy="512" r="372" fill="url(#scope)"/>
+
+  <!-- Кільця дальності. -->
+  <g fill="none" stroke="#2f4f6b" stroke-width="10">
+    <circle cx="512" cy="512" r="372"/>
+    <circle cx="512" cy="512" r="264" stroke-opacity="0.7"/>
+    <circle cx="512" cy="512" r="156" stroke-opacity="0.45"/>
+  </g>
+
+  <!-- Перехрестя. -->
+  <g stroke="#2f4f6b" stroke-width="8" stroke-opacity="0.55" stroke-linecap="round">
+    <line x1="512" y1="152" x2="512" y2="872"/>
+    <line x1="152" y1="512" x2="872" y2="512"/>
+  </g>
+
+  <!-- Сектор розгортки: від центру вгору та праворуч. -->
+  <path d="M512 512 L512 140 A372 372 0 0 1 875 442 Z" fill="url(#sweep)"/>
+  <line x1="512" y1="512" x2="512" y2="140" stroke="#8ec5f0" stroke-width="14" stroke-linecap="round"/>
+
+  <!-- Засвітки: чим більший знайдений файл, тим гарячіший колір. -->
+  <circle cx="660" cy="372" r="40" fill="#f06a3a"/>
+  <circle cx="386" cy="628" r="27" fill="#e8933a"/>
+  <circle cx="628" cy="676" r="19" fill="#d9c33a"/>
+
+  <circle cx="512" cy="512" r="26" fill="#0c0e12" stroke="#8ec5f0" stroke-width="12"/>
+</svg>

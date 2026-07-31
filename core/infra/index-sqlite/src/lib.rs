@@ -2877,7 +2877,11 @@ mod tests {
         QuarantineManifest::insert_entries(&database, &[entry(1), resumed, entry(3)]).unwrap();
         assert_eq!(database.list_quarantine_entries().unwrap().len(), 3);
         assert_eq!(
-            database.get_quarantine_entry(QuarantineEntryId(2)).unwrap().unwrap().batch_id,
+            database
+                .get_quarantine_entry(QuarantineEntryId(2))
+                .unwrap()
+                .unwrap()
+                .batch_id,
             Some(BatchId(99)),
             "залишковий in_flight має перезаписатись новим батчем"
         );
@@ -2890,9 +2894,16 @@ mod tests {
         let mut clobber = entry(2);
         clobber.batch_id = Some(BatchId(123));
         QuarantineManifest::insert_entries(&database, &[clobber]).unwrap();
-        let kept = database.get_quarantine_entry(QuarantineEntryId(2)).unwrap().unwrap();
+        let kept = database
+            .get_quarantine_entry(QuarantineEntryId(2))
+            .unwrap()
+            .unwrap();
         assert_eq!(kept.status, QuarantineStatus::Quarantined);
-        assert_eq!(kept.batch_id, Some(BatchId(99)), "quarantined рядок недоторканий");
+        assert_eq!(
+            kept.batch_id,
+            Some(BatchId(99)),
+            "quarantined рядок недоторканий"
+        );
         database
             .update_quarantine_status(QuarantineEntryId(2), QuarantineStatus::InFlight)
             .unwrap();
@@ -2901,7 +2912,8 @@ mod tests {
         // відкочує УВЕСЬ транзакційний запис — жодного часткового рядка.
         let mut oversized = entry(4);
         oversized.size = ByteSize(u64::MAX);
-        QuarantineManifest::insert_entries(&database, &[entry(5), oversized, entry(6)]).unwrap_err();
+        QuarantineManifest::insert_entries(&database, &[entry(5), oversized, entry(6)])
+            .unwrap_err();
         assert!(
             database
                 .list_quarantine_entries()

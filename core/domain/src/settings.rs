@@ -233,9 +233,7 @@ pub fn validate_settings(settings: &AppSettings) -> Result<(), SettingsFieldErro
     {
         return Err(SettingsFieldError {
             field: "scan.deepPathMaxDepth",
-            message: format!(
-                "має бути від {MIN_DEEP_PATH_MAX_DEPTH} до {MAX_DEEP_PATH_MAX_DEPTH}"
-            ),
+            message: format!("має бути від {MIN_DEEP_PATH_MAX_DEPTH} до {MAX_DEEP_PATH_MAX_DEPTH}"),
         });
     }
     Ok(())

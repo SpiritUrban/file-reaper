@@ -154,6 +154,16 @@
       "task": "T-146",
       "$comment": "{candidateIds:u64[], anchorIndex:usize, motion:i32} → {scheduledCount, scheduledPaths, metrics:{demands,cacheHits,scheduled,hitRate}}; integrates PreviewPrefetcher T-075 — P2 warm of next 2–3 tiles by cursor trajectory so Live Preview draft is ready (right pane never white). max 256 ids; motion=0 no-op"
     },
+    "ffmpeg.status": {
+      "status": "implemented",
+      "task": "Stage2-29",
+      "$comment": "{} → {available, path?, downloadable}; чи працюють відео-превʼю зараз і чи є статична збірка ffmpeg для цієї платформи. Правило 29 брифу Стадії 2"
+    },
+    "ffmpeg.download": {
+      "status": "implemented",
+      "task": "Stage2-29",
+      "$comment": "{} → {available, path?, downloadable}; 1-клік завантаження ffmpeg у профіль (<profile>/bin) з розпакуванням і ПЕРЕВІРКОЮ ЗАПУСКОМ; успіх вмикає відео-превʼю без перезапуску. Довга операція (~130 МБ), помилка повертається текстом для показу користувачу"
+    },
     "search.candidates": { "status": "planned", "task": "T-018" },
     "duplicates.groups": {
       "status": "implemented",

@@ -700,10 +700,8 @@ impl TwoStagePreviewer {
                         use std::hash::{Hash, Hasher};
                         let mut hasher = DefaultHasher::new();
                         path_owned.hash(&mut hasher);
-                        let tmp = std::env::temp_dir().join(format!(
-                            "trashradar-large-{:x}.png",
-                            hasher.finish()
-                        ));
+                        let tmp = std::env::temp_dir()
+                            .join(format!("trashradar-large-{:x}.png", hasher.finish()));
                         if std::fs::write(&tmp, &bytes).is_err() {
                             return;
                         }

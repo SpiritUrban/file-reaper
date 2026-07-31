@@ -3,6 +3,9 @@ name: Installer
 # Повна збірка NSIS-інсталятора артефактом (DoD T-002).
 # Запускається на push у main і вручну; не входить у PR-checks,
 # щоб не подвоювати найдовший джоб на кожен пуш гілки.
+#
+# Це НЕ реліз: публікація — release.yml (пуш тега v*.*.*). Тут артефакт
+# рану, який можна завантажити й поставити, не створюючи тега.
 on:
   workflow_dispatch:
   push:
@@ -14,6 +17,28 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+
+      # Правило 11: секрети підпису потрібні КОЖНОМУ кроку, що збирає, а не
+      # лише кроку tauri-action. Відколи ввімкнено createUpdaterArtifacts,
+      # ця збірка теж підписує оновлення — без ключа вона падає з
+      # «A public key has been found, but no private key».
+      # Правило 11a: секрет нормалізується до збірки, бо завершальний перенос
+      # рядка вбиває підпис уже ПІСЛЯ успішної компіляції.
+      - name: Normalize signing secret
+        shell: bash
+        env:
+          RAW_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          RAW_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          key=$(printf '%s' "$RAW_KEY" | tr -d '\r\n')
+          if [ -z "$key" ]; then
+            echo "::error title=Signing secret::TAURI_SIGNING_PRIVATE_KEY порожній — збірка з createUpdaterArtifacts не підпишеться."
+            exit 1
+          fi
+          echo "::add-mask::$key"
+          echo "TAURI_SIGNING_PRIVATE_KEY=$key" >> "$GITHUB_ENV"
+          printf 'TAURI_SIGNING_PRIVATE_KEY_PASSWORD=%s\n' "$(printf '%s' "$RAW_PASSWORD" | tr -d '\r\n')" >> "$GITHUB_ENV"
+
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -23,13 +48,36 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: core
+          key: installer-windows
       - run: npm ci
         working-directory: ui
-      # Tauri CLI — з devDependencies ui (та сама версія, що локально).
-      # beforeBuildCommand з tauri.conf.json збере фронтенд сам.
-      - run: ..\..\ui\node_modules\.bin\tauri.cmd build
-        shell: cmd
-        working-directory: core/shell
+
+      # Правило 27a: кеш повертає target/ разом зі старими бандлами й
+      # build-виходом крейта (через який не оновлюється іконка).
+      - name: Drop stale bundles from cache
+        shell: bash
+        run: |
+          rm -rf core/target/*/bundle core/target/bundle
+          rm -rf core/target/*/build/trashradar-shell-* core/target/build/trashradar-shell-*
+
+      # Правило 29: ffmpeg їде в бандл, щоб відео-превʼю працювали одразу.
+      - name: Fetch FFmpeg into bundle resources
+        shell: bash
+        run: node scripts/download-ffmpeg-resources.mjs
+
+      # Той самий виклик, що в release.yml (правило 9a): якщо шлях збірки
+      # розійдеться, ця джоба перестане щось доводити про реліз.
+      - name: Build installer
+        id: build_app
+        shell: bash
+        run: |
+          set -o pipefail
+          npm run tauri build -- 2>&1 | tee build.log
+      - name: Surface build output
+        if: failure() && steps.build_app.conclusion == 'failure'
+        shell: bash
+        run: bash scripts/ci-annotate.sh "Installer build output" build.log
+
       - uses: actions/upload-artifact@v4
         with:
           name: trashradar-nsis-installer

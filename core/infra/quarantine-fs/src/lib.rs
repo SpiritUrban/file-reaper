@@ -259,7 +259,10 @@ impl NativeQuarantineFs {
         } else {
             '?'
         };
-        QuarantineGuard::windows_volume(volume)
+        // Правило 6a: на Unix том дорівнює '?', і windows_volume повертав би
+        // ПОРОЖНІЙ guard-list — остання лінія захисту мовчки пропускала б
+        // будь-який системний шлях.
+        QuarantineGuard::for_current_platform(volume)
             .with_trashradar_roots(trashradar_roots)
             .validate(path)
     }
@@ -405,7 +408,10 @@ mod tests {
             NativeQuarantineFs.move_into_quarantine(&empty_str, &dest_str, identity, &roots);
         assert!(result.is_ok(), "reap порожньої теки провалився: {result:?}");
         assert!(!empty.exists(), "тека мала зникнути з оригінального місця");
-        assert!(destination.is_dir(), "тека має опинитись у карантині як директорія");
+        assert!(
+            destination.is_dir(),
+            "тека має опинитись у карантині як директорія"
+        );
 
         fs::remove_dir_all(&root).unwrap();
     }
@@ -433,7 +439,10 @@ mod tests {
             NativeQuarantineFs.move_into_quarantine(&folder_str, &dest_str, identity, &roots);
         assert!(result.is_ok(), "reap теки з вмістом провалився: {result:?}");
         assert!(!folder.exists());
-        assert!(destination.join("a.txt").is_file(), "вміст переїхав разом з текою");
+        assert!(
+            destination.join("a.txt").is_file(),
+            "вміст переїхав разом з текою"
+        );
 
         fs::remove_dir_all(&root).unwrap();
     }

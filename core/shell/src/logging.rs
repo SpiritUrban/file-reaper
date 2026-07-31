@@ -79,11 +79,21 @@ pub fn init() -> Result<PathBuf, String> {
     Ok(path)
 }
 
+/// Тека профілю: конфіг, БД індексу, кеші, логи.
+///
+/// Правило 6a брифу Стадії 2: `%LOCALAPPDATA%` — це хардкод Windows. Він
+/// компілюється всюди, а поза Windows тихо віддає `None`: без профілю немає
+/// ані бази, ані логів, ані карантину — застосунок «просто не працює», і
+/// компіляція про це не скаже нічого.
+///
+/// `dirs::data_local_dir()` дає штатну теку кожної платформи:
+/// `%LOCALAPPDATA%` на Windows, `~/Library/Application Support` на macOS,
+/// `$XDG_DATA_HOME` (або `~/.local/share`) на Linux.
 pub fn data_profile_dir() -> Option<PathBuf> {
-    std::env::var_os("LOCALAPPDATA").map(|base| PathBuf::from(base).join("TrashRadar"))
+    dirs::data_local_dir().map(|base| base.join("TrashRadar"))
 }
 
-/// `%LOCALAPPDATA%\TrashRadar\logs`.
+/// Тека логів усередині профілю.
 fn default_log_dir() -> Option<PathBuf> {
     data_profile_dir().map(|profile| profile.join("logs"))
 }

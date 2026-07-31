@@ -116,13 +116,12 @@ impl FrnPathCache {
 }
 
 fn normalize_path(path: &str) -> String {
-    // Єдиний роздільник для порівнянь у індексі (Windows).
-    path.replace('/', "\\")
+    // Єдиний роздільник для порівнянь у індексі — платформний (правило 6a).
+    trashradar_domain::path_key::normalize_separators(path)
 }
 
 fn join_child(parent: &str, name: &str) -> String {
-    let parent = parent.trim_end_matches(['\\', '/']);
-    format!("{parent}\\{name}")
+    trashradar_domain::path_key::join_child(parent, name)
 }
 
 fn paths_equal(a: &str, b: &str) -> bool {

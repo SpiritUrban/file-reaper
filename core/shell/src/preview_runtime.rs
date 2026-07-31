@@ -102,17 +102,30 @@ impl PreviewRuntime {
             },
             None => Arc::new(NullPreviewCache),
         };
-        let video = Arc::new(FfmpegVideoFrameSource::new());
+        // Правило 29: багатозоновий пошук — завантажене 1-кліком у профілі,
+        // ресурси бандла (розкладка своя на кожній платформі), поруч з exe,
+        // далі PATH. Без цього укомплектований бінарник лежав би в бандлі
+        // невидимим.
+        let exe_dir = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(PathBuf::from));
+        let search_dirs =
+            crate::ffmpeg_setup::ffmpeg_search_dirs(profile.as_deref(), exe_dir.as_deref());
+        let video = Arc::new(FfmpegVideoFrameSource::with_search_dirs(&search_dirs));
         // Стартова діагностика: одразу видно у логах, чи бекенд знайшов ffmpeg
         // (без нього постер-кадр і скраб-смуга відео недоступні — T-071).
-        if video.is_available() {
-            tracing::info!(target: "preview", "ffmpeg знайдено — відео-превʼю (постер + скраб) активні");
-        } else {
-            tracing::warn!(
-                target: "preview",
-                env_var = trashradar_preview::FFMPEG_ENV_VAR,
-                "ffmpeg НЕ знайдено (порядок пошуку: TRASHRADAR_FFMPEG → поруч з exe → PATH) — відео показуватимуть лише іконку, без кадрів"
-            );
+        match video.binary_path() {
+            Some(path) => {
+                tracing::info!(target: "preview", path = %path.display(), "ffmpeg знайдено — відео-превʼю (постер + скраб) активні");
+            }
+            None => {
+                tracing::warn!(
+                    target: "preview",
+                    env_var = trashradar_preview::FFMPEG_ENV_VAR,
+                    searched = search_dirs.len(),
+                    "ffmpeg НЕ знайдено — відео показуватимуть лише іконку. У Налаштуваннях є кнопка завантаження в 1 клік"
+                );
+            }
         }
         // Ланцюжок за спаданням швидкості (architecture.md §5.2): системний
         // кеш мініатюр Windows → власне декодування зображень → ключовий
@@ -150,6 +163,12 @@ impl PreviewRuntime {
             video,
             prefetcher,
         }
+    }
+
+    /// Джерело кадрів відео: спільний шлях до ffmpeg, який 1-клік
+    /// завантаження підміняє на місці, без перезапуску (правило 29).
+    pub fn video(&self) -> FfmpegVideoFrameSource {
+        (*self.video).clone()
     }
 
     /// Клон дескриптора кешу для перенесення у `spawn_blocking` (architecture.md §14:
@@ -766,4 +785,31 @@ fn metrics_dto(m: trashradar_app::preview::PreviewPrefetchMetrics) -> PreviewPre
         scheduled: m.scheduled,
         hit_rate: m.hit_rate(),
     }
+}
+
+/// Стан ffmpeg для UI: чи працюють відео-превʼю і чи є що качати
+/// (правило 29 брифу Стадії 2).
+#[tauri::command]
+pub async fn ffmpeg_status(
+    preview: tauri::State<'_, PreviewRuntime>,
+) -> Result<crate::ffmpeg_setup::FfmpegStatus, CoreError> {
+    record_command();
+    Ok(crate::ffmpeg_setup::status_for(&preview.video()))
+}
+
+/// 1-клік завантаження ffmpeg у профіль користувача.
+///
+/// Довга операція, але з очевидним прогресом для людини (вона щойно
+/// натиснула кнопку і чекає), тож окремої події не заводимо — команда
+/// повертає результат, коли бінарник уже перевірений запуском.
+#[tauri::command]
+pub async fn ffmpeg_download(
+    preview: tauri::State<'_, PreviewRuntime>,
+) -> Result<crate::ffmpeg_setup::FfmpegStatus, CoreError> {
+    record_command();
+    let video = preview.video();
+    let profile = crate::logging::data_profile_dir();
+    crate::ffmpeg_setup::download(profile, video)
+        .await
+        .map_err(CoreError::internal)
 }

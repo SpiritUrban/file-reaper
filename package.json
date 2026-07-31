@@ -1,14 +1,27 @@
 {
   "name": "trashradar",
   "private": true,
+  "version": "0.1.0",
   "description": "Root convenience scripts. Packages live in ui/ and core/.",
+  "author": "Vitaliy Dyachuk <https://spiriturban.github.io/>",
+  "license": "MIT",
+  "homepage": "https://spiriturban.github.io/file-reaper/",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/SpiritUrban/file-reaper.git"
+  },
   "scripts": {
     "setup": "npm --prefix ui install",
     "dev": "node scripts/tauri.mjs dev",
     "dev:ui": "npm --prefix ui run dev",
     "build": "node scripts/tauri.mjs build",
+    "tauri": "node scripts/tauri.mjs",
     "build:ui": "npm --prefix ui run build",
     "typecheck": "npm --prefix ui run typecheck",
-    "test:grid": "node scripts/check-grid-invariants.mjs"
+    "test:grid": "node scripts/check-grid-invariants.mjs",
+    "version:sync": "node scripts/sync-version.mjs",
+    "version:check": "node scripts/check-version.mjs",
+    "ffmpeg:fetch": "node scripts/download-ffmpeg-resources.mjs",
+    "site:manifest": "node scripts/generate-download-manifest.mjs"
   }
 }

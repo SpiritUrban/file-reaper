@@ -192,6 +192,47 @@ impl QuarantineGuard {
         }
     }
 
+    /// Guard-list для Unix-платформ (Linux, macOS).
+    ///
+    /// Правило 6a брифу Стадії 2, останній рядок таблиці: «список системних
+    /// папок виду `c:\windows` — на Linux/macOS захист просто не діє, тихо».
+    /// Саме так і було: [`Self::windows_volume`] на Unix-шляху отримував том
+    /// `'?'`, повертав ПОРОЖНІЙ список, і `validate` пропускав будь-що —
+    /// включно з `/usr/bin`. Помилки при цьому не було жодної.
+    pub fn unix_roots() -> Self {
+        let system = [
+            "/bin", "/sbin", "/boot", "/dev", "/etc", "/lib", "/lib32", "/lib64", "/proc", "/run",
+            "/sys", "/usr", "/var", "/system", "/private", "/library", "/volumes",
+        ];
+        let applications = ["/applications", "/opt", "/snap"];
+        let mut protected_roots: Vec<(String, ProtectedPathKind)> = system
+            .into_iter()
+            .map(|root| (root.to_string(), ProtectedPathKind::System))
+            .chain(
+                applications
+                    .into_iter()
+                    .map(|root| (root.to_string(), ProtectedPathKind::Applications)),
+            )
+            .collect();
+        protected_roots.push((
+            format!("/{SERVICE_DIRECTORY_NAME}"),
+            ProtectedPathKind::TrashRadar,
+        ));
+        Self { protected_roots }
+    }
+
+    /// Guard-list поточної платформи: том — лише на Windows.
+    ///
+    /// Єдина точка вибору, щоб жодна платформа не лишилась із порожнім
+    /// списком через те, що хтось викликав «не той» конструктор.
+    pub fn for_current_platform(volume: char) -> Self {
+        if cfg!(windows) {
+            Self::windows_volume(volume)
+        } else {
+            Self::unix_roots()
+        }
+    }
+
     /// Додати власні файли/каталоги TrashRadar (профіль, БД, кеш, executable).
     pub fn with_trashradar_roots<I, S>(mut self, roots: I) -> Self
     where
@@ -232,17 +273,22 @@ impl QuarantineGuard {
 }
 
 fn normalize_windows_path(path: &str) -> Option<String> {
-    let mut normalized = path.trim().replace('/', "\\").to_ascii_lowercase();
+    use crate::path_key::{fold_case, normalize_separators, SEPARATOR};
+    let mut normalized = fold_case(&normalize_separators(path.trim()));
     if normalized.is_empty() {
         return None;
     }
+    // Префікс довгого шляху існує лише на Windows; на Unix `\\?\` — це
+    // звичайні символи імені, і зрізати їх не можна (правило 6a).
+    #[cfg(windows)]
     if let Some(stripped) = normalized.strip_prefix(r"\\?\") {
         normalized = stripped.to_string();
     }
-    while normalized.contains(r"\\") {
-        normalized = normalized.replace(r"\\", r"\");
+    let doubled = format!("{SEPARATOR}{SEPARATOR}");
+    while normalized.contains(&doubled) {
+        normalized = normalized.replace(&doubled, &SEPARATOR.to_string());
     }
-    while normalized.ends_with('\\') {
+    while normalized.ends_with(SEPARATOR) {
         normalized.pop();
     }
     (!normalized.is_empty()).then_some(normalized)
@@ -255,7 +301,8 @@ fn drive_letter(path: &str) -> Option<char> {
 }
 
 fn path_is_under(path: &str, root: &str) -> bool {
-    path == root || (path.starts_with(root) && path.as_bytes().get(root.len()) == Some(&b'\\'))
+    let separator = crate::path_key::SEPARATOR as u8;
+    path == root || (path.starts_with(root) && path.as_bytes().get(root.len()) == Some(&separator))
 }
 
 #[cfg(test)]
@@ -350,5 +397,50 @@ mod tests {
             guard.validate(r"\\server\share\file.bin").unwrap_err().code,
             ErrorCode::PathProtected
         );
+    }
+}
+
+#[cfg(test)]
+mod platform_guard_tests {
+    use super::*;
+
+    /// Правило 33: спершу довести, що вхід непорожній. Guard із порожнім
+    /// списком коренів пропускає ВСЕ — і робить це тихо й зелено.
+    #[test]
+    fn current_platform_guard_is_never_empty() {
+        let guard = QuarantineGuard::for_current_platform('C');
+        assert!(
+            !guard.protected_roots.is_empty(),
+            "guard-list поточної платформи порожній — остання лінія захисту вимкнена"
+        );
+    }
+
+    /// Системний шлях СВОЄЇ платформи мусить бути заблокований. Очікуваний
+    /// шлях будується під платформу, а не хардкодиться (правило 6a).
+    #[test]
+    fn system_path_of_this_platform_is_protected() {
+        let guard = QuarantineGuard::for_current_platform('C');
+        let system_path = if cfg!(windows) {
+            r"C:\Windows\System32\kernel32.dll"
+        } else {
+            "/usr/bin/ls"
+        };
+        assert!(
+            guard.classify(system_path).is_some(),
+            "{system_path} мусить бути захищений guard-list'ом"
+        );
+        assert!(guard.validate(system_path).is_err());
+    }
+
+    /// А звичайний файл користувача — ні, інакше застосунок не працює взагалі.
+    #[test]
+    fn ordinary_user_path_is_not_protected() {
+        let guard = QuarantineGuard::for_current_platform('C');
+        let user_path = if cfg!(windows) {
+            r"C:\Users\Ada\Downloads\big.iso"
+        } else {
+            "/home/ada/Downloads/big.iso"
+        };
+        assert!(guard.classify(user_path).is_none(), "{user_path}");
     }
 }

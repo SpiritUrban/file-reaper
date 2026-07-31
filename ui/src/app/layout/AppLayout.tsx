@@ -20,6 +20,7 @@ import { LivePreviewSplit } from "@/features/live-preview/LivePreviewSplit";
 import { QuarantineScreen } from "@/features/quarantine/QuarantineScreen";
 import { ReapConfirmOverlay } from "@/features/reap-flow/ReapConfirmOverlay";
 import { SettingsScreen } from "@/features/settings/SettingsScreen";
+import { UpdateBanner } from "@/features/updates/UpdateBanner";
 import { CATEGORIES, categoryRowsByWeight, categoryTitle } from "@/store/categories";
 import { livePreviewStore, useLivePreview } from "@/store/livePreview";
 import { reapOverlayStore } from "@/store/reapOverlay";
@@ -174,6 +175,9 @@ export function AppLayout() {
           markedCount={marked.count}
           markedBytes={marked.bytes}
         />
+        {/* Правило 28: без цього компонента встановлена копія ніколи не
+            дізнається про нову версію — плагін сам ендпоінт не опитує. */}
+        <UpdateBanner />
         <ScanActivityBanner />
         <main className="min-h-0 flex-1">
           <section className={screenClass(isCleanup)} aria-hidden={!isCleanup}>

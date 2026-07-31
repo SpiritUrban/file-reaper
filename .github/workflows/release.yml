@@ -1,0 +1,213 @@
+name: Release
+
+# Реліз: пуш тега v*.*.* збирає інсталятори під усі платформи, публікує
+# GitHub Release з latest.json для апдейтера і оновлює сайт-вітрину.
+#
+# workflow_dispatch — пробний прогін: збирає все, але нічого не публікує
+# (tagName порожній, правило 10). Це найдешевший спосіб зловити 90% проблем.
+# Чого пробний прогін НЕ перевіряє: deploy-site у ньому пропускається.
+
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+
+jobs:
+  # Бар'єр між «тег v0.2.0» і релізом, у якому інсталятор називається 0.1.0:
+  # апдейтер порівнює версію з бандла, а не з іменем тега.
+  validate-version:
+    name: Validate version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: node scripts/check-version.mjs
+
+  build-tauri:
+    needs: validate-version
+    name: Build (${{ matrix.label }})
+    permissions:
+      contents: write
+    strategy:
+      # Одна впала платформа не має скасовувати три інші: інакше видно
+      # рівно одну помилку за ран.
+      fail-fast: false
+      matrix:
+        # Правило 3: жодного macos-13 — ярлик не отримує раннера і джоба
+        # висить у Queued годинами. Intel кросс-компілюється з macos-latest.
+        # Правило 4: ключі без дефісів (matrix.rust-targets парситься як
+        # віднімання).
+        include:
+          - platform: 'windows-latest'
+            label: 'windows-x64'
+            args: ''
+            rust_targets: ''
+          - platform: 'ubuntu-22.04'
+            label: 'linux-x64'
+            args: ''
+            rust_targets: ''
+          - platform: 'macos-latest'
+            label: 'macos-arm64'
+            args: '--target aarch64-apple-darwin'
+            rust_targets: 'aarch64-apple-darwin'
+          - platform: 'macos-latest'
+            label: 'macos-x64'
+            args: '--target x86_64-apple-darwin'
+            rust_targets: 'x86_64-apple-darwin'
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Правило 11a: секрет нормалізується ПЕРШИМ кроком, до збірки.
+      #
+      # GitHub зберігає рівно те, що вставили, включно із завершальним
+      # переносом рядка, і Tauri падає на ньому вже ПІСЛЯ успішної
+      # компіляції — «failed to decode base64 secret key: Invalid symbol 10».
+      # Це кладе всі чотири платформи одночасно, читається як проблема
+      # бандлінгу і локально не відтворюється взагалі.
+      #
+      # Результат іде в $GITHUB_ENV, тому ці змінні НЕ можна дублювати в
+      # job-level `env:` — job-level має пріоритет, сирий секрет переміг би,
+      # і нормалізація стала б безшумно непотрібною. Крок стоїть перед усіма,
+      # хто збирає, — це і виконує вимогу правила 11.
+      - name: Normalize and verify signing secret
+        shell: bash
+        env:
+          RAW_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          RAW_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          key=$(printf '%s' "$RAW_KEY" | tr -d '\r\n')
+          if [ -z "$key" ]; then
+            echo "::error title=Signing secret::TAURI_SIGNING_PRIVATE_KEY порожній. Секрет не доданий у Settings → Secrets and variables → Actions (Repository secrets, не Environment)."
+            exit 1
+          fi
+          KEY="$key" node -e '
+            const decoded = Buffer.from(process.env.KEY, "base64").toString("utf8").slice(0, 80);
+            if (decoded.includes("rsign encrypted secret key")) process.exit(0);
+            if (decoded.includes("minisign public key")) {
+              console.error("::error title=Signing secret::У TAURI_SIGNING_PRIVATE_KEY лежить вміст .tauri-key.pub замість .tauri-key.");
+              process.exit(2);
+            }
+            console.error("::error title=Signing secret::TAURI_SIGNING_PRIVATE_KEY не схожий на ключ rsign. Перевірте, що скопійовано весь файл .tauri-key.");
+            process.exit(3);'
+          echo "::add-mask::$key"
+          echo "TAURI_SIGNING_PRIVATE_KEY=$key" >> "$GITHUB_ENV"
+          printf 'TAURI_SIGNING_PRIVATE_KEY_PASSWORD=%s\n' "$(printf '%s' "$RAW_PASSWORD" | tr -d '\r\n')" >> "$GITHUB_ENV"
+          echo "Ключ підпису прийнято (приватний, без зайвих переносів)."
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: '${{ matrix.rust_targets }}'
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+          # Правило 5: різні ключі кешу, інакше дві macOS-джоби на одному
+          # раннері затирають кеш одна одної.
+          key: ${{ matrix.label }}
+
+      - name: Install Linux GUI dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
+            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - name: Install UI dependencies
+        run: npm ci
+        working-directory: ui
+
+      # Правило 27a: rust-cache повертає target/ разом із бандлами попередньої
+      # версії — вони приїхали б у реліз поруч зі свіжими, і жодної помилки.
+      # Другий рядок — правило 27: embed-resource не відстежує ВМІСТ icon.ico,
+      # тому з кешем нова іконка мовчки викидається.
+      - name: Drop stale bundles from cache
+        shell: bash
+        run: |
+          rm -rf core/target/*/bundle core/target/bundle
+          rm -rf core/target/*/build/trashradar-shell-* core/target/build/trashradar-shell-*
+
+      # Правило 29: користувач не має «скачати FFmpeg і прописати PATH».
+      - name: Fetch FFmpeg into bundle resources
+        shell: bash
+        run: node scripts/download-ffmpeg-resources.mjs
+
+      # Правило 20: tauri-action показує лише код виходу. Той самий білд
+      # спочатку своїм кроком — щоб побачити помилку.
+      #
+      # Правило 9a: викликається РІВНО так, як це робить tauri-action
+      # (`npm run tauri build -- <args>`), інакше крок дає хибну впевненість.
+      # Форму перевірено на цьому ж package.json: з непорожніми args скрипт
+      # отримує ["build","--target",…], з порожніми — ["build"].
+      - name: Build desktop app
+        id: build_app
+        shell: bash
+        env:
+          # Ту саму змінну tauri-action виставляє сам на macOS: без неї
+          # створення .dmg у CI може зависнути на діалозі Finder. Без цього
+          # рядка «той самий білд» не був би тим самим.
+          TAURI_BUNDLER_DMG_IGNORE_CI: 'true'
+        run: |
+          set -o pipefail
+          npm run tauri build -- ${{ matrix.args }} 2>&1 | tee build.log
+
+      # Правило 21b: анотація прив'язана до СВОГО кроку. Без
+      # `steps.build_app.conclusion` вона спрацювала б на падінні будь-якого
+      # попереднього кроку і відрапортувала про лог, якого немає.
+      # Правило 21a: мітка матриці в заголовку, інакше чотири анотації
+      # виглядають однаково.
+      - name: Surface build output
+        if: failure() && steps.build_app.conclusion == 'failure'
+        shell: bash
+        run: bash scripts/ci-annotate.sh "Build output (${{ matrix.label }})" build.log
+
+      - name: Publish release assets
+        id: tauri_action
+        uses: tauri-apps/tauri-action@v0.5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # projectPath — це ще й cwd для tauriScript, тому корінь: саме там
+          # лежить package.json зі скриптом `tauri`.
+          projectPath: '.'
+          # Правило 8a: БЕЗ трейлінгового `--` — дію розділювач вставляє сама.
+          # `npm run tauri --` дало б два `--` поспіль, npm зняв би лише
+          # перший, і Tauri віддав би `--target` у cargo: cargo зібрав би під
+          # потрібну архітектуру, а бандлер шукав би бінарник під архітектуру
+          # раннера. Падають при цьому ЛИШЕ macOS-джоби.
+          tauriScript: 'npm run tauri'
+          # Правило 10: без умови ручний запуск створив би реліз з тегом main.
+          tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
+          releaseName: ${{ startsWith(github.ref, 'refs/tags/') && format('TrashRadar {0}', github.ref_name) || '' }}
+          releaseBody: 'Інсталятори TrashRadar ${{ github.ref_name }}. Встановлена копія оновлюється сама.'
+          releaseDraft: false
+          prerelease: false
+          # Правило 12: без latest.json ендпоінт апдейтера віддає 404 і жоден
+          # клієнт ніколи не побачить оновлення.
+          includeUpdaterJson: true
+          args: ${{ matrix.args }}
+
+  # Правило 14: `release: types: [published]` як тригер не працює — реліз
+  # створює GITHUB_TOKEN, а GitHub навмисно не запускає воркфлоу від подій
+  # цього токена. Тому сайт деплоїться залежною джобою всередині реліз-рану.
+  deploy-site:
+    needs: build-tauri
+    # Правило 14a: `needs` за замовчуванням вимагає, щоб УСІ рядки матриці
+    # були зелені, — і цього замало. Джоба може стати червоною ПІСЛЯ того, як
+    # вивантажила артефакти (спостережено: падіння `Post Run` самого раннера).
+    # Реліз тоді повний, а сайт мовчки лишається на попередній версії.
+    # Захист від порожнього маніфесту в pages.yml усе одно впаде голосно.
+    if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/') }}
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    uses: ./.github/workflows/pages.yml

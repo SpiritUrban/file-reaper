@@ -164,7 +164,10 @@ pub fn unkeep_hot(
 }
 
 fn normalize_path_key(path: &str) -> String {
-    path.replace('/', "\\")
+    // Правило 6a: роздільник вирішує платформа, а не цей рядок. На Windows
+    // результат той самий, що й раніше; на Unix `\` більше не з'являється
+    // там, де він є легальним символом імені файла.
+    trashradar_domain::path_key::normalize_separators(path)
 }
 
 #[cfg(test)]

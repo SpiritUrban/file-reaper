@@ -460,7 +460,11 @@ mod tests {
         assert_eq!(out.disk_reads, 2, "лише 2 локальні файли читаються з диска");
         assert_eq!(out.stats.files_failed, 1, "хмарний файл рахується як skip");
         assert_eq!(out.groups.len(), 1);
-        assert_eq!(out.groups[0].members.len(), 2, "у групі лише локальні дублі");
+        assert_eq!(
+            out.groups[0].members.len(),
+            2,
+            "у групі лише локальні дублі"
+        );
     }
 
     #[test]

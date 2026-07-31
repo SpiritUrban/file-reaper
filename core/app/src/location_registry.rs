@@ -23,8 +23,7 @@ pub const KNOWN_LOCATIONS_FILE: &str = "known-locations.json";
 /// Вшитий у бінарник дефолтний реєстр (той самий `registry/known-locations.json`)
 /// — фолбек [`KnownLocationsRegistry::load_default_or_embedded`], коли теки
 /// `registry/` немає поруч із застосунком (продакшн-бандл).
-const EMBEDDED_KNOWN_LOCATIONS: &str =
-    include_str!("../../../registry/known-locations.json");
+const EMBEDDED_KNOWN_LOCATIONS: &str = include_str!("../../../registry/known-locations.json");
 
 /// До якого детектора/категорії належить локація.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

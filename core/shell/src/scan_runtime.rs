@@ -306,6 +306,18 @@ fn run_duplicates_cascade<R: Runtime>(
     }
 }
 
+/// Пороги пасу папок-одиниць — усі з налаштувань користувача.
+///
+/// Згруповані в структуру, а не окремими аргументами: три `u32`/`bool`
+/// поспіль у сигнатурі легко переплутати місцями, і компілятор про це не
+/// скаже (`too_many_arguments` у clippy — саме про це).
+#[derive(Debug, Clone, Copy)]
+struct FolderUnitsTuning {
+    sparse_max_files: u32,
+    deep_path_max_depth: u32,
+    dev_artifacts_enabled: bool,
+}
+
 /// Пост-скановий пас папок-одиниць: порожні та майже порожні папки (розділи
 /// «Порожні папки» / «Майже порожні»). Той самий патерн, що й
 /// [`run_duplicates_cascade`] — інʼєкція готової категорії поза фермою
@@ -317,11 +329,14 @@ fn run_folder_units_pass<R: Runtime>(
     index: &InMemoryIndex,
     last_totals: &Mutex<LiveTotals>,
     dir_sink: &Mutex<Vec<String>>,
-    sparse_max_files: u32,
-    deep_path_max_depth: u32,
-    dev_artifacts_enabled: bool,
+    tuning: FolderUnitsTuning,
     cancel: &CancellationToken,
 ) {
+    let FolderUnitsTuning {
+        sparse_max_files,
+        deep_path_max_depth,
+        dev_artifacts_enabled,
+    } = tuning;
     if cancel.is_cancelled() {
         return;
     }
@@ -535,7 +550,10 @@ fn parse_volume_letter(s: &str) -> Option<char> {
 
 /// Набір виключених з аналізу літер томів (Налаштування → «Диски»).
 fn excluded_volume_set(excluded: &[String]) -> std::collections::HashSet<char> {
-    excluded.iter().filter_map(|s| parse_volume_letter(s)).collect()
+    excluded
+        .iter()
+        .filter_map(|s| parse_volume_letter(s))
+        .collect()
 }
 
 fn resolve_volumes(
@@ -618,7 +636,13 @@ impl CancellableVolumeScanner for AutoVolumeScanner {
         cancel: &CancellationToken,
         on_batch: &mut dyn FnMut(Vec<FileRecord>, ScanBatchMeta) -> Result<(), CoreError>,
     ) -> Result<VolumeScanOutcome, CoreError> {
-        scan_one_volume_auto(volume, &self.user_excluded, &self.dir_sink, cancel, on_batch)
+        scan_one_volume_auto(
+            volume,
+            &self.user_excluded,
+            &self.dir_sink,
+            cancel,
+            on_batch,
+        )
     }
 }
 
@@ -1254,9 +1278,11 @@ pub async fn scan_start<R: Runtime>(
                     index.as_ref(),
                     &last_totals,
                     &dir_paths,
-                    sparse_max_files,
-                    deep_path_max_depth,
-                    dev_artifacts_enabled,
+                    FolderUnitsTuning {
+                        sparse_max_files,
+                        deep_path_max_depth,
+                        dev_artifacts_enabled,
+                    },
                     &token,
                 );
             }

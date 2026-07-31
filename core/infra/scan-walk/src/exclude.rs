@@ -105,14 +105,19 @@ fn normalize_prefix(path: &Path) -> Option<String> {
     if raw.is_empty() {
         return None;
     }
-    let mut s = raw.replace('/', "\\").to_ascii_lowercase();
+    // Правило 6a: роздільник і регістр — за платформою. Виключення шляхів —
+    // саме та логіка, де помилка тиха: зайвий `\` на Unix зробив би префікс
+    // таким, що не збігається ні з чим, і захист просто не діяв би.
+    use trashradar_domain::path_key::{fold_case, normalize_separators, SEPARATOR};
+    let doubled = format!("{SEPARATOR}{SEPARATOR}");
+    let mut s = fold_case(&normalize_separators(raw));
     // Згортаємо повторні сепаратори.
-    while s.contains("\\\\") {
-        s = s.replace("\\\\", "\\");
+    while s.contains(&doubled) {
+        s = s.replace(&doubled, &SEPARATOR.to_string());
     }
-    // Прибираємо хвостовий `\` (але лишаємо `c:` без сепаратора — корінь тома
-    // як префікс виключення означав би «весь том»; нормалізуємо `c:\` → `c:`).
-    while s.ends_with('\\') {
+    // Прибираємо хвостовий роздільник (але лишаємо `c:` без нього — корінь
+    // тома як префікс виключення означав би «весь том»: `c:\` → `c:`).
+    while s.ends_with(SEPARATOR) {
         s.pop();
     }
     if s.is_empty() {
@@ -126,9 +131,10 @@ fn path_is_under(path: &str, prefix: &str) -> bool {
     if path == prefix {
         return true;
     }
-    // `prefix\` + rest — уникаємо хибного `c:\win` ⊇ `c:\windows`.
+    // `prefix` + роздільник + rest — уникаємо хибного `c:\win` ⊇ `c:\windows`.
+    let separator = trashradar_domain::path_key::SEPARATOR as u8;
     path.len() > prefix.len()
-        && path.as_bytes().get(prefix.len()) == Some(&b'\\')
+        && path.as_bytes().get(prefix.len()) == Some(&separator)
         && path.starts_with(prefix)
 }
 

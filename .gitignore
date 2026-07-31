@@ -14,8 +14,26 @@ spikes/**/target/
 # Tauri
 core/shell/gen/
 
+# Ключі підпису оновлень. Приватний ключ живе лише локально та в
+# GitHub Secrets; втрата ключа незворотна — усі встановлені копії
+# перестануть приймати оновлення (розділ 5 брифу Стадії 2).
+.tauri-key*
+
+# Ресурси, які CI докладає у бандл (ffmpeg/ffprobe). .gitkeep лишається,
+# щоб glob "resources/*" у tauri.conf.json завжди мав збіг.
+core/shell/resources/*
+!core/shell/resources/.gitkeep
+
 # Claude Code (локальні налаштування)
 .claude/settings.local.json
+# Робочі копії агента: містять власний core/shell/tauri.conf.json, і якби
+# вони потрапили в git, tauri-action знаходив би чужий конфіг замість нашого.
+.claude/worktrees/
+
+# Маніфест завантажень генерується в CI з GitHub API. Закомічена копія
+# маскувала б падіння генерації: сайт зібрався б зі старим списком і зеленим
+# раном (розділ 9 брифу Стадії 2 — перевірка, яка бреше).
+site/download-manifest.json
 
 # IDE / OS
 .vscode/

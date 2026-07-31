@@ -529,10 +529,17 @@ impl MarkedDuplicateGroup {
 
 /// Downloads-подібний сегмент шляху (як installers detector).
 pub fn is_downloads_like_path(path: &str) -> bool {
-    let lower = path.replace('/', "\\").to_ascii_lowercase();
-    lower
-        .split('\\')
-        .any(|seg| matches!(seg, "downloads" | "download" | "завантаження" | "загрузки"))
+    // Сегменти ріжуться платформним роздільником: на Unix шлях
+    // `/home/u/Downloads` інакше лишився б одним сегментом і детектор мовчав.
+    crate::path_key::path_key(path)
+        .split(crate::path_key::SEPARATOR)
+        .any(|seg| {
+            let seg = seg.to_ascii_lowercase();
+            matches!(
+                seg.as_str(),
+                "downloads" | "download" | "завантаження" | "загрузки"
+            )
+        })
 }
 
 /// Обрати `candidate_id`, який Keep за політикою. Інваріант: ≥1 член.
@@ -728,9 +735,13 @@ pub fn reclaim_order_of_partial_groups(groups: &[PartialHashGroup]) -> Vec<u64> 
 
 // ─── Кеш хешів: валідність size + mtime (T-062) ──────────────────────────────
 
-/// Нормалізація шляху для ключа кешу (Windows: lower + `\`).
+/// Нормалізація шляху для ключа кешу.
+///
+/// Правило 6a: і роздільник, і згортання регістру визначає платформа —
+/// на Linux `Foo.JPG` і `foo.jpg` це РІЗНІ файли, і злити їх в один запис
+/// кешу означало б віддати чужий хеш.
 pub fn normalize_hash_cache_path(path: &str) -> String {
-    path.replace('/', "\\").to_ascii_lowercase()
+    crate::path_key::path_key(path)
 }
 
 /// Запис кешу partial/full хешів (architecture.md §10).

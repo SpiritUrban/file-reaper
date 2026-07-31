@@ -473,10 +473,7 @@ impl InMemoryIndex {
 
     /// Розпакувати лише записи з даними `candidate_id` (reap/batch lookup).
     /// Не клонує весь індекс — критично при 100k+ файлах.
-    pub fn get_by_candidate_ids(
-        &self,
-        ids: &std::collections::HashSet<u64>,
-    ) -> Vec<FileRecord> {
+    pub fn get_by_candidate_ids(&self, ids: &std::collections::HashSet<u64>) -> Vec<FileRecord> {
         if ids.is_empty() {
             return Vec::new();
         }
@@ -654,7 +651,9 @@ impl trashradar_app::ports::HotIndex for InMemoryIndex {
         // (T-154: remove_paths на 1.5 млн записів — гарячий шлях USN-дельти).
         let targets: std::collections::HashSet<String> = paths
             .iter()
-            .map(|p| p.replace('/', "\\").to_ascii_lowercase())
+            // Правило 6a: ключ будує платформа. На Linux згортання регістру
+            // злило б `Foo.JPG` і `foo.jpg` — два різні файли в один запис.
+            .map(|p| trashradar_domain::path_key::path_key(p))
             .collect();
         let mut inner = self.inner.write().unwrap();
         let before = inner.records.len();
@@ -695,7 +694,7 @@ impl trashradar_app::ports::HotIndex for InMemoryIndex {
         let mut by_lower: Option<std::collections::HashMap<String, usize>> = None;
 
         for record in records {
-            let path_norm = record.path.replace('/', "\\");
+            let path_norm = trashradar_domain::path_key::normalize_separators(&record.path);
             let path = std::path::Path::new(&path_norm);
             let parent_str = path.parent().and_then(|p| p.to_str()).unwrap_or("");
             let file_name_str = path.file_name().and_then(|f| f.to_str()).unwrap_or("");

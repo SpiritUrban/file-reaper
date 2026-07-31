@@ -25,12 +25,33 @@
       "csp": "default-src 'self'; img-src 'self' asset: data:; style-src 'self' 'unsafe-inline'"
     }
   },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/SpiritUrban/file-reaper/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDczMTgxQUY1NkVENzg3RDAKUldUUWg5ZHU5Um9ZYzRMbG1jS1VlTHZuZjJWMUp1d0lKZ0lESUtwUC9Xbmc5MkV0T0lLUW5NcUIK",
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  },
   "bundle": {
     "active": true,
     "targets": ["nsis"],
-    "icon": ["icons/icon.ico"],
-    "publisher": "TrashRadar",
-    "copyright": "© 2026 TrashRadar",
+    "createUpdaterArtifacts": true,
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "resources": ["resources/*"],
+    "publisher": "Vitaliy Dyachuk",
+    "copyright": "© 2026 Vitaliy Dyachuk",
+    "homepage": "https://spiriturban.github.io/file-reaper/",
+    "license": "MIT",
     "category": "Utility",
     "shortDescription": "Радар для сміття на диску",
     "longDescription": "TrashRadar знаходить потенційне сміття на дисках, групує його за категоріями і безпечно видаляє через Quarantine.",
@@ -39,7 +60,8 @@
       "nsis": {
         "installMode": "currentUser",
         "languages": ["Ukrainian", "English"],
-        "displayLanguageSelector": false
+        "displayLanguageSelector": false,
+        "installerIcon": "icons/icon.ico"
       }
     }
   }

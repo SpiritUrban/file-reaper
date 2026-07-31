@@ -32,7 +32,7 @@ mod video;
 
 pub use encode::PngThumbnailEncoder;
 pub use image::ImageThumbnailSource;
-pub use video::{FfmpegVideoFrameSource, FFMPEG_ENV_VAR};
+pub use video::{discover_ffmpeg_in, ffmpeg_exe_name, FfmpegVideoFrameSource, FFMPEG_ENV_VAR};
 
 use trashradar_app::ports::{RawThumbnail, ThumbnailSource};
 use trashradar_domain::error::CoreError;

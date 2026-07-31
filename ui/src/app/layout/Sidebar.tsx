@@ -15,6 +15,8 @@ import { categoryRowsByWeight } from "@/store/categories";
 import { toast } from "@/store/toasts";
 import { appStateStore, useAppState } from "@/store/appState";
 import { command, ipcErrorMessage } from "@/ipc/client";
+import { openExternal } from "@/ipc/external";
+import { PRODUCT_METADATA } from "@/product";
 import type { HotkeyActionEventDetail } from "@/hotkeys";
 import type {
   CategorySummary,
@@ -318,6 +320,29 @@ export function Sidebar() {
           <span>⛭</span>
           {!collapsed && <span>Налаштування</span>}
         </NavLink>
+
+        {/* Розділ 7 брифу Стадії 2, еталонне рішення: пункт одразу під
+            «Налаштування», стилізований як навігація, а не як промо-блок.
+            Прозорий фон, приглушений текст, кольоровий лише значок,
+            стрілка зовнішнього посилання — лише при наведенні. */}
+        <button
+          type="button"
+          onClick={() => openExternal(PRODUCT_METADATA.authorUrl)}
+          title={`Інші проєкти та послуги — ${PRODUCT_METADATA.author}`}
+          className={`group mt-1 w-full ${itemBase} ${collapsed ? "justify-center" : ""} text-[11px] text-ink-faint hover:text-ink-dim`}
+        >
+          <span className="text-accent/70 group-hover:text-accent">✦</span>
+          {!collapsed && (
+            <>
+              <span className="flex-1 truncate text-left">
+                Ще від {PRODUCT_METADATA.author}
+              </span>
+              <span className="opacity-0 transition-opacity group-hover:opacity-60">
+                ↗
+              </span>
+            </>
+          )}
+        </button>
       </nav>
     </aside>
   );

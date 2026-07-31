@@ -29,8 +29,11 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { ThresholdInput } from "@/components/ThresholdInput";
+import { FfmpegRow } from "@/features/settings/FfmpegRow";
 import { hotkeys } from "@/hotkeys";
 import { command, ipcErrorMessage, isTauri } from "@/ipc/client";
+import { openExternal } from "@/ipc/external";
+import { PRODUCT_METADATA } from "@/product";
 import { ARMED_ACTIONS, type ArmedAction } from "@/store/armedAction";
 import { appStateStore, useAppState } from "@/store/appState";
 import {
@@ -652,6 +655,10 @@ export function SettingsScreen() {
             </span>
           ) : null}
         </Row>
+        {/* Правило 29: дія замість пасивного попередження. */}
+        <Row label="Відео-превʼю (ffmpeg)">
+          <FfmpegRow />
+        </Row>
         <Row label="Кеші TrashRadar">
           <span className="font-mono text-ink-dim">
             {cacheUsage
@@ -677,6 +684,30 @@ export function SettingsScreen() {
           </button>
           <span className="text-ink-faint">
             модулі Core, IPC-лічильники, стратегії скану
+          </span>
+        </Row>
+        {/* Розділ 7: Settings → About — поверхня, куди людина приходить
+            сама, тож ім'я автора з посиланням на хаб тут доречне. */}
+        <Row label="Автор">
+          <span className="text-ink-dim">{PRODUCT_METADATA.author}</span>
+          <button
+            type="button"
+            onClick={() => openExternal(PRODUCT_METADATA.authorUrl)}
+            className="rounded border border-line bg-panel-2 px-2 py-0.5 text-ink hover:border-accent"
+          >
+            Інші проєкти та послуги ↗
+          </button>
+          <button
+            type="button"
+            onClick={() => openExternal(PRODUCT_METADATA.repositoryUrl)}
+            className="rounded border border-line bg-panel-2 px-2 py-0.5 text-ink hover:border-accent"
+          >
+            Вихідний код ↗
+          </button>
+        </Row>
+        <Row label="Ліцензія">
+          <span className="text-ink-faint">
+            {PRODUCT_METADATA.license} · {PRODUCT_METADATA.copyright}
           </span>
         </Row>
       </Section>

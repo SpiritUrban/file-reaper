@@ -7,6 +7,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod events;
+mod ffmpeg_setup;
 mod ipc;
 mod logging;
 mod preview_runtime;
@@ -58,6 +59,14 @@ fn main() {
     let preview = preview_runtime::PreviewRuntime::new(logging::data_profile_dir());
     let scan = scan_runtime::ScanRuntime::with_settings(settings.current());
     tauri::Builder::default()
+        // Правило 28: плагін автооновлень мусить бути зареєстрований у коді.
+        // Конфігурації в tauri.conf.json і release.yml замало — без цього
+        // рядка `check()` з UI не має що викликати, і встановлена копія
+        // ніколи не дізнається про нову версію.
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
+        // Зовнішні посилання (хаб автора, сторінка релізів) — розділ 7.
+        .plugin(tauri_plugin_opener::init())
         .manage(scan)
         .manage(settings)
         .manage(cache)
@@ -87,6 +96,8 @@ fn main() {
             preview_runtime::preview_scrub_strip,
             preview_runtime::preview_large,
             preview_runtime::preview_prefetch,
+            preview_runtime::ffmpeg_status,
+            preview_runtime::ffmpeg_download,
             preview_runtime::quarantine_thumbnail,
             scan_runtime::scan_start,
             scan_runtime::scan_stop,

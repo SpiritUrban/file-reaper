@@ -328,6 +328,8 @@ export type CommandName =
   | "preview.scrub_strip"
   | "preview.large"
   | "preview.prefetch"
+  | "ffmpeg.status"
+  | "ffmpeg.download"
   | "search.candidates"
   | "duplicates.groups";
 

@@ -1,2 +1,22 @@
-# Auto detect text files and perform LF normalization
-* text=auto
+# Правило 30 брифу Стадії 2: примусові LF у робочій копії й у git.
+#
+# Без `eol=lf` розробник на Windows кладе в дерево CRLF (тут `core.autocrlf`
+# увімкнений), а `cargo fmt --check` на Linux-раннері падає з помилкою
+# форматування на десятках файлів — і виглядає це як проблема коду, а не як
+# проблема закінчень рядків.
+* text=auto eol=lf
+
+# Бінарні артефакти: нормалізації не підлягають.
+*.ico binary
+*.icns binary
+*.png binary
+*.jpg binary
+*.webp binary
+*.exe binary
+*.dll binary
+*.zip binary
+*.gz binary
+
+# Windows-скрипти, які виконує cmd.exe, лишаються з CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf

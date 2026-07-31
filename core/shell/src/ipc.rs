@@ -359,7 +359,9 @@ fn open_profile_manifest(
 /// Бейдж з профільного manifest; недоступна БД → порожній бейдж (деградація,
 /// не збій snapshot — той самий принцип, що й health-проби T-089).
 /// `pub(crate)` — після reap/restore shell емітить `quarantine.changed`.
-pub(crate) fn read_profile_quarantine_badge(profile: Option<std::path::PathBuf>) -> QuarantineBadge {
+pub(crate) fn read_profile_quarantine_badge(
+    profile: Option<std::path::PathBuf>,
+) -> QuarantineBadge {
     match open_profile_manifest(profile) {
         Some(database) => quarantine_badge(&database).unwrap_or_else(|error| {
             tracing::warn!(%error, "Бейдж Quarantine недоступний");

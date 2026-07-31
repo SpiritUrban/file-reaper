@@ -9,6 +9,15 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+# Автооновлення (правило 28 брифу Стадії 2). Без реєстрації плагіна в коді
+# конфігурація в tauri.conf.json і release.yml не робить нічого: встановлена
+# копія ніколи не дізнається про нову версію.
+tauri-plugin-updater = "2"
+# Перезапуск після встановлення оновлення (на macOS/Linux інсталяція не
+# перезапускає застосунок сама).
+tauri-plugin-process = "2"
+# Відкриття зовнішніх посилань (хаб автора) з UI без власної команди.
+tauri-plugin-opener = "2"
 serde = { workspace = true }
 serde_json = { workspace = true }
 # time: затримки/таймаути в async-командах. Tokio вже в дереві через Tauri.
@@ -31,6 +40,24 @@ trashradar-hash = { path = "../infra/hash" }
 # дереві залежностей транзитивно через webview2-com — нової завантаженої
 # версії немає, лише прямий dependency на вже наявний крейт.
 base64 = "0.22"
+# Правило 29: 1-клік завантаження ffmpeg із самого застосунку.
+#
+# Усі три крейти вже лежать у дереві через tauri-plugin-updater, тож прямий
+# dependency не додає до збірки нічого — але лише за умови, що збігаються
+# ФІЧІ. `rustls` (за замовчуванням) підтягнув би провайдера aws-lc-rs, а це
+# cmake на всіх платформах і NASM на Windows: нові кілька хвилин збірки й
+# новий клас падінь на трьох раннерах із чотирьох. `rustls-no-provider`
+# лишає той самий ring, який уже приніс апдейтер.
+reqwest = { version = "0.13", default-features = false, features = [
+    "rustls-no-provider",
+    "stream",
+] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+zip = { version = "4", default-features = false, features = ["deflate"] }
+futures-util = "0.3"
+# Тека профілю на кожній платформі своя (правило 6a). Крейт уже в дереві
+# через tauri-plugin-updater.
+dirs = "6"
 
 [dev-dependencies]
 # Mock-рантайм Tauri: наскрізні тести диспетчеризації команд без вікна.

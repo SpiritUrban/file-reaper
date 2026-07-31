@@ -1,0 +1,504 @@
+<!doctype html>
+<html lang="uk">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>TrashRadar — радар для сміття на диску</title>
+    <meta
+      name="description"
+      content="TrashRadar сам знаходить файли-кандидати на видалення, групує їх за категоріями і показує, скільки місця можна звільнити. Безпечне видалення через Quarantine з відкатом."
+    />
+
+    <!--
+      Розділ 7 брифу Стадії 2, пункт 7: повний набір Open Graph і Twitter Card —
+      найцінніше з усього списку. Кожен репост посилання несе назву, опис і
+      згадку автора, і працює сам, без жодного банера в продукті.
+    -->
+    <meta name="author" content="Vitaliy Dyachuk" />
+    <link rel="author" href="https://spiriturban.github.io/" />
+    <link rel="canonical" href="https://spiriturban.github.io/file-reaper/" />
+    <link rel="icon" type="image/png" href="favicon.png" />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="TrashRadar" />
+    <meta property="og:title" content="TrashRadar — радар для сміття на диску" />
+    <meta
+      property="og:description"
+      content="Знаходить великі, старі й дубльовані файли, показує, скільки місця можна звільнити, і видаляє їх через Quarantine з відкатом."
+    />
+    <meta property="og:url" content="https://spiriturban.github.io/file-reaper/" />
+    <meta property="og:image" content="https://spiriturban.github.io/file-reaper/icon.png" />
+    <meta property="og:image:alt" content="Іконка TrashRadar: радарний екран із засвітками" />
+    <meta property="og:locale" content="uk_UA" />
+    <meta property="article:author" content="https://spiriturban.github.io/" />
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="TrashRadar — радар для сміття на диску" />
+    <meta
+      name="twitter:description"
+      content="Знаходить великі, старі й дубльовані файли, показує, скільки місця можна звільнити, і видаляє їх через Quarantine з відкатом."
+    />
+    <meta name="twitter:image" content="https://spiriturban.github.io/file-reaper/icon.png" />
+
+    <style>
+      /* Ті самі ролі палітри, що в застосунку (ui/src/design/theme.css). */
+      :root {
+        --bg: #0c0e12;
+        --panel: #14171d;
+        --panel-2: #1a1e26;
+        --line: #262b35;
+        --ink: #c8cdd5;
+        --ink-dim: #7b8290;
+        --ink-faint: #4d5460;
+        --accent: #5b9dd9;
+        --quarantine: #f0a13a;
+        --keep: #46a758;
+        --sans: "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, sans-serif;
+        --mono: "Cascadia Mono", "Consolas", ui-monospace, monospace;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--ink);
+        font-family: var(--sans);
+        line-height: 1.6;
+        -webkit-font-smoothing: antialiased;
+      }
+
+      a {
+        color: var(--accent);
+      }
+
+      .wrap {
+        max-width: 940px;
+        margin: 0 auto;
+        padding: 0 24px;
+      }
+
+      header.hero {
+        padding: 72px 0 48px;
+        border-bottom: 1px solid var(--line);
+        background:
+          radial-gradient(900px 420px at 50% -120px, rgba(91, 157, 217, 0.16), transparent 70%);
+      }
+
+      .hero-top {
+        display: flex;
+        align-items: center;
+        gap: 18px;
+      }
+
+      .hero-top img {
+        width: 76px;
+        height: 76px;
+        border-radius: 16px;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 40px;
+        letter-spacing: -0.02em;
+      }
+
+      .tagline {
+        margin: 4px 0 0;
+        color: var(--ink-dim);
+        font-size: 17px;
+      }
+
+      .lede {
+        margin: 28px 0 0;
+        max-width: 62ch;
+        font-size: 17px;
+        color: var(--ink-dim);
+      }
+
+      .lede strong {
+        color: var(--ink);
+        font-weight: 600;
+      }
+
+      .primary-row {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 14px;
+        margin-top: 32px;
+      }
+
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+        padding: 13px 22px;
+        border-radius: 10px;
+        border: 1px solid transparent;
+        background: var(--accent);
+        color: #08111a;
+        font-weight: 650;
+        font-size: 15px;
+        text-decoration: none;
+        transition: filter 0.15s ease;
+      }
+
+      .btn:hover {
+        filter: brightness(1.1);
+      }
+
+      .btn.secondary {
+        background: transparent;
+        border-color: var(--line);
+        color: var(--ink);
+        font-weight: 500;
+      }
+
+      .btn.secondary:hover {
+        border-color: var(--accent);
+        filter: none;
+      }
+
+      .version-note {
+        color: var(--ink-faint);
+        font-family: var(--mono);
+        font-size: 13px;
+      }
+
+      section {
+        padding: 56px 0;
+        border-bottom: 1px solid var(--line);
+      }
+
+      h2 {
+        margin: 0 0 8px;
+        font-size: 13px;
+        font-weight: 600;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--ink-dim);
+      }
+
+      .section-lede {
+        margin: 0 0 28px;
+        color: var(--ink-faint);
+        font-size: 14px;
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+        gap: 16px;
+      }
+
+      .card {
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: var(--panel);
+        padding: 18px 20px;
+      }
+
+      .card h3 {
+        margin: 0 0 6px;
+        font-size: 15px;
+        color: var(--ink);
+      }
+
+      .card p {
+        margin: 0;
+        color: var(--ink-dim);
+        font-size: 14px;
+      }
+
+      .dl-card {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+
+      .dl-head {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      .dl-os {
+        font-size: 15px;
+        font-weight: 600;
+      }
+
+      .dl-arch {
+        font-family: var(--mono);
+        font-size: 12px;
+        color: var(--ink-faint);
+      }
+
+      .dl-file {
+        font-family: var(--mono);
+        font-size: 12px;
+        color: var(--ink-faint);
+        word-break: break-all;
+      }
+
+      .dl-link {
+        display: inline-block;
+        padding: 9px 16px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel-2);
+        color: var(--ink);
+        font-size: 14px;
+        text-decoration: none;
+        text-align: center;
+      }
+
+      .dl-link:hover {
+        border-color: var(--accent);
+        color: var(--accent);
+      }
+
+      .empty {
+        border: 1px dashed var(--line);
+        border-radius: 12px;
+        padding: 26px;
+        color: var(--ink-dim);
+        font-size: 14px;
+      }
+
+      footer {
+        padding: 44px 0 64px;
+        color: var(--ink-faint);
+        font-size: 14px;
+      }
+
+      footer .built {
+        color: var(--ink-dim);
+      }
+
+      footer .links {
+        margin-top: 10px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 18px;
+        font-size: 13px;
+      }
+
+      @media (max-width: 560px) {
+        h1 {
+          font-size: 30px;
+        }
+        header.hero {
+          padding-top: 48px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header class="hero">
+      <div class="wrap">
+        <div class="hero-top">
+          <img src="icon.png" alt="Іконка TrashRadar" width="76" height="76" />
+          <div>
+            <h1>TrashRadar</h1>
+            <p class="tagline">Радар для сміття на диску</p>
+          </div>
+        </div>
+
+        <p class="lede">
+          Не файловий менеджер. TrashRadar сам проходить диски, знаходить
+          <strong>кандидатів на видалення</strong> — великі й старі файли, дублікати,
+          кеші застосунків, порожні теки — і показує одну цифру:
+          <strong>скільки місця можна звільнити</strong>. Видалення йде через
+          Quarantine, тож будь-яку дію можна відкотити.
+        </p>
+
+        <div class="primary-row">
+          <a class="btn" id="primary-download" href="https://github.com/SpiritUrban/file-reaper/releases">
+            Завантажити
+          </a>
+          <a class="btn secondary" href="https://github.com/SpiritUrban/file-reaper">
+            Вихідний код
+          </a>
+          <span class="version-note" id="version-note">версія завантажується…</span>
+        </div>
+      </div>
+    </header>
+
+    <section>
+      <div class="wrap">
+        <h2>Завантаження</h2>
+        <p class="section-lede">
+          Встановлена копія оновлюється сама: застосунок перевіряє нові версії при
+          старті й пропонує оновитись одним натисканням.
+        </p>
+        <div id="downloads" class="grid">
+          <div class="empty">Список збірок завантажується…</div>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <div class="wrap">
+        <h2>Що робить</h2>
+        <div class="grid">
+          <div class="card">
+            <h3>Знаходить, а не показує все</h3>
+            <p>
+              Детектори за категоріями: великі файли, давно не відкривані,
+              дублікати, кеші застосунків, тимчасові файли, порожні теки.
+            </p>
+          </div>
+          <div class="card">
+            <h3>Quarantine з відкатом</h3>
+            <p>
+              Позначене не зникає одразу: воно їде в карантин, звідки будь-що
+              повертається на місце. Остаточне видалення — окрема дія.
+            </p>
+          </div>
+          <div class="card">
+            <h3>Швидко на NTFS</h3>
+            <p>
+              Читання MFT напряму й дельти через журнал USN: повторний запуск
+              бачить зміни, не перескановуючи диск заново.
+            </p>
+          </div>
+          <div class="card">
+            <h3>Превʼю перед видаленням</h3>
+            <p>
+              Мініатюри зображень і кадри відео просто в сітці — рішення
+              приймається очима, а не за іменем файла.
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <footer>
+      <div class="wrap">
+        <!-- Розділ 7, пункт 6: футер сайту — «Built by» з посиланням на хаб. -->
+        <div class="built">
+          Built by <a href="https://spiriturban.github.io/">Vitaliy Dyachuk</a> —
+          інші проєкти та послуги на особистому хабі.
+        </div>
+        <div class="links">
+          <a href="https://github.com/SpiritUrban/file-reaper">GitHub</a>
+          <a href="https://github.com/SpiritUrban/file-reaper/releases">Усі релізи</a>
+          <a href="https://github.com/SpiritUrban/file-reaper/blob/main/LICENSE">Ліцензія MIT</a>
+          <a href="https://github.com/SpiritUrban">@SpiritUrban</a>
+        </div>
+      </div>
+    </footer>
+
+    <script>
+      // Маніфест лежить поруч зі сторінкою. Відносний шлях без ведучого слеша
+      // — єдина форма, що працює і в підкаталозі Pages (/file-reaper/), і при
+      // локальному відкритті файла (правило 19).
+      const MANIFEST_URL = new URL('download-manifest.json', document.baseURI);
+
+      const OS_LABEL = { windows: 'Windows', macos: 'macOS', linux: 'Linux' };
+      const KIND_LABEL = {
+        nsis: 'Інсталятор (.exe)',
+        msi: 'Інсталятор (.msi)',
+        dmg: 'Образ диска (.dmg)',
+        deb: 'Пакет (.deb)',
+        rpm: 'Пакет (.rpm)',
+        appimage: 'AppImage',
+      };
+      const ARCH_LABEL = { x64: 'x64', arm64: 'ARM64 (Apple Silicon)' };
+      const RELEASES_URL = 'https://github.com/SpiritUrban/file-reaper/releases';
+
+      function formatSize(bytes) {
+        if (!bytes) return null;
+        const mib = bytes / (1024 * 1024);
+        return mib >= 1024
+          ? `${(mib / 1024).toFixed(1)} ГБ`
+          : `${Math.round(mib)} МБ`;
+      }
+
+      function detectPlatform() {
+        const ua = navigator.userAgent;
+        if (/Mac/i.test(ua)) return 'macos';
+        if (/Linux|X11/i.test(ua) && !/Android/i.test(ua)) return 'linux';
+        return 'windows';
+      }
+
+      function renderDownloads(manifest) {
+        const container = document.getElementById('downloads');
+        const versionNote = document.getElementById('version-note');
+        const primary = document.getElementById('primary-download');
+
+        versionNote.textContent = `версія ${manifest.version}`;
+
+        // Правило 6.6: коли релізу ще немає, імена файлів НЕ вигадуються —
+        // кнопка веде на сторінку релізів, а не на 404.
+        const installers = (manifest.assets || []).filter(
+          (asset) => asset.kind !== 'updater' && asset.kind !== 'other',
+        );
+
+        if (installers.length === 0) {
+          container.innerHTML =
+            '<div class="empty">Готових збірок ще немає. ' +
+            `<a href="${RELEASES_URL}">Сторінка релізів</a> покаже їх, щойно вийде перша.</div>`;
+          primary.href = RELEASES_URL;
+          primary.textContent = 'Сторінка релізів';
+          return;
+        }
+
+        container.innerHTML = '';
+        for (const asset of installers) {
+          const card = document.createElement('div');
+          card.className = 'card dl-card';
+          const size = formatSize(asset.sizeBytes);
+          card.innerHTML = `
+            <div class="dl-head">
+              <span class="dl-os">${OS_LABEL[asset.platform] || asset.platform}</span>
+              <span class="dl-arch">${ARCH_LABEL[asset.architecture] || asset.architecture}</span>
+            </div>
+            <div class="dl-file">${asset.fileName}${size ? ` · ${size}` : ''}</div>
+          `;
+          const link = document.createElement('a');
+          link.className = 'dl-link';
+          link.href = asset.downloadUrl;
+          // Зіставлення за платформою + архітектурою + ФОРМАТОМ пакета:
+          // під Windows два пакети, під Linux теж, і без формату картка
+          // «MSI» повела б на .exe (розділ 6.6).
+          link.textContent = KIND_LABEL[asset.kind] || 'Завантажити';
+          card.appendChild(link);
+          container.appendChild(card);
+        }
+
+        const guess = detectPlatform();
+        const best =
+          installers.find(
+            (asset) =>
+              asset.platform === guess &&
+              (asset.kind === 'nsis' || asset.kind === 'dmg' || asset.kind === 'appimage'),
+          ) || installers.find((asset) => asset.platform === guess);
+
+        if (best) {
+          primary.href = best.downloadUrl;
+          primary.textContent = `Завантажити для ${OS_LABEL[best.platform]}`;
+        } else {
+          primary.href = RELEASES_URL;
+        }
+      }
+
+      fetch(MANIFEST_URL, { cache: 'no-cache' })
+        .then((response) => {
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          return response.json();
+        })
+        .then(renderDownloads)
+        .catch((error) => {
+          console.warn('Маніфест завантажень недоступний:', error);
+          document.getElementById('downloads').innerHTML =
+            `<div class="empty">Список збірок тимчасово недоступний — <a href="${RELEASES_URL}">сторінка релізів</a>.</div>`;
+          document.getElementById('version-note').textContent = '';
+        });
+    </script>
+  </body>
+</html>

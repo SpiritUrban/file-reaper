@@ -69,20 +69,23 @@ struct DirNode {
 /// Нормалізувати шлях директорії для ключа: `/`→`\`, без хвостового `\`,
 /// нижній регістр (Windows — регістронезалежний). Порожній лишається порожнім.
 fn normalize(path: &str) -> String {
-    let replaced = path.replace('/', "\\");
-    let trimmed = replaced.trim_end_matches('\\');
-    trimmed.to_ascii_lowercase()
+    use trashradar_domain::path_key;
+    // Правило 6a: роздільник і регістр — за платформою.
+    let replaced = path_key::normalize_separators(path);
+    path_key::fold_case(path_key::trim_trailing_separators(&replaced))
 }
 
-/// Батьківський нормалізований шлях: усе до останнього `\`. `None`, якщо `\`
-/// немає (корінь тому на кшталт `c:`).
+/// Батьківський нормалізований шлях: усе до останнього роздільника. `None`,
+/// якщо роздільника немає (корінь тому на кшталт `c:`).
 fn parent_of(norm: &str) -> Option<&str> {
-    norm.rfind('\\').map(|idx| &norm[..idx])
+    norm.rfind(trashradar_domain::path_key::SEPARATOR)
+        .map(|idx| &norm[..idx])
 }
 
-/// Це корінь тому (`c:` без жодного `\`) — цілий том у розділ не пропонуємо.
+/// Це корінь тому (`c:` без жодного роздільника) — цілий том у розділ не
+/// пропонуємо.
 fn is_drive_root(norm: &str) -> bool {
-    !norm.contains('\\')
+    !norm.contains(trashradar_domain::path_key::SEPARATOR)
 }
 
 /// Службовий файл, що не рахується як «вміст» теки для порожності:
@@ -159,9 +162,7 @@ pub fn detect_folder_units(
     // 4) Рекурсивний rollup знизу вгору: діти глибші → додаємо в батька.
     //    Сортуємо індекси за глибиною (кількість `\`) спадання.
     let mut order: Vec<usize> = (0..nodes.len()).collect();
-    order.sort_by(|&a, &b| {
-        depth(&norms[b]).cmp(&depth(&norms[a]))
-    });
+    order.sort_by(|&a, &b| depth(&norms[b]).cmp(&depth(&norms[a])));
     for &i in &order {
         if let Some(parent) = nodes[i].parent {
             let (rf, rb) = (nodes[i].recursive_files, nodes[i].recursive_bytes);
@@ -197,10 +198,7 @@ pub fn detect_folder_units(
         if my == DirClass::None {
             continue;
         }
-        let parent_same = nodes[i]
-            .parent
-            .map(|p| class[p] == my)
-            .unwrap_or(false);
+        let parent_same = nodes[i].parent.map(|p| class[p] == my).unwrap_or(false);
         if parent_same {
             continue; // topmost — вище по гілці
         }
@@ -380,11 +378,7 @@ mod tests {
         // Поріг 3 → p майже порожня (topmost, бо в корені). q (1 файл) НЕ
         // окремо: його батько p теж майже порожній.
         let dir_paths = dirs(&[r"C:\p", r"C:\p\q"]);
-        let file_list = files(&[
-            (r"C:\p\a.txt", 1),
-            (r"C:\p\b.txt", 2),
-            (r"C:\p\q\c.txt", 4),
-        ]);
+        let file_list = files(&[(r"C:\p\a.txt", 1), (r"C:\p\b.txt", 2), (r"C:\p\q\c.txt", 4)]);
         let units = detect_folder_units(&dir_paths, &file_list, cfg(3));
         assert_eq!(units.len(), 1, "лише topmost sparse");
         assert_eq!(units[0].path, r"C:\p");
@@ -412,9 +406,7 @@ mod tests {
     fn threshold_boundary_excludes_over_limit() {
         // Рівно N+1 файлів → не sparse.
         let dir_paths = dirs(&[r"C:\d"]);
-        let pairs: Vec<(String, u64)> = (0..4)
-            .map(|i| (format!(r"C:\d\f{i}"), 1))
-            .collect();
+        let pairs: Vec<(String, u64)> = (0..4).map(|i| (format!(r"C:\d\f{i}"), 1)).collect();
         let units = detect_folder_units(&dir_paths, &pairs, cfg(3));
         assert!(units.is_empty(), "4 файли при порозі 3 — не майже порожня");
     }
@@ -453,11 +445,11 @@ mod tests {
         // Гілка глибиною 5; поріг 3 → topmost-deep = папка на глибині 4
         // (батько на глибині 3 = поріг, не «занадто глибокий»).
         let dir_paths = dirs(&[
-            r"C:\a",           // depth 1
-            r"C:\a\b",         // 2
-            r"C:\a\b\c",       // 3
-            r"C:\a\b\c\d",     // 4  ← topmost deep (parent depth 3 == поріг)
-            r"C:\a\b\c\d\e",   // 5
+            r"C:\a",         // depth 1
+            r"C:\a\b",       // 2
+            r"C:\a\b\c",     // 3
+            r"C:\a\b\c\d",   // 4  ← topmost deep (parent depth 3 == поріг)
+            r"C:\a\b\c\d\e", // 5
         ]);
         // Файли в найглибших папках, щоб вони не були empty/sparse.
         let file_list: Vec<(String, u64)> = (0..10)
@@ -477,7 +469,11 @@ mod tests {
     fn deep_and_sparse_are_mutually_exclusive_per_folder() {
         // Глибока папка з ≤3 файлів → класифікується Sparse (пріоритет), НЕ Deep.
         let dir_paths = dirs(&[
-            r"C:\a", r"C:\a\b", r"C:\a\b\c", r"C:\a\b\c\d", r"C:\a\b\c\d\e",
+            r"C:\a",
+            r"C:\a\b",
+            r"C:\a\b\c",
+            r"C:\a\b\c\d",
+            r"C:\a\b\c\d\e",
         ]);
         let file_list = files(&[(r"C:\a\b\c\d\e\only.txt", 5)]);
         let units = detect_folder_units(&dir_paths, &file_list, cfg_deep(3, 3));
