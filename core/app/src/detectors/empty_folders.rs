@@ -294,12 +294,17 @@ fn make_unit(
 mod tests {
     use super::*;
 
+    /// Фікстури записані Windows-шляхами (детектор народився на NTFS), але в
+    /// шлях поточної платформи їх переводить один хелпер — інакше кожен
+    /// літерал перевіряв би роздільник, а не логіку (правило 6a).
+    use trashradar_domain::path_key::fixture as p;
+
     fn dirs(paths: &[&str]) -> Vec<String> {
-        paths.iter().map(|s| s.to_string()).collect()
+        paths.iter().map(|s| p(s)).collect()
     }
 
     fn files(pairs: &[(&str, u64)]) -> Vec<(String, u64)> {
-        pairs.iter().map(|(p, s)| (p.to_string(), *s)).collect()
+        pairs.iter().map(|(path, size)| (p(path), *size)).collect()
     }
 
     /// Поріг глибини «вимкнено» (дуже високий) — щоб тести empty/sparse не
@@ -327,7 +332,7 @@ mod tests {
             (0..5).map(|i| (format!(r"C:\x\keep{i}.txt"), 10)).collect();
         let units = detect_folder_units(&dir_paths, &file_list, cfg(3));
         assert_eq!(units.len(), 1, "лише найвища порожня папка");
-        assert_eq!(units[0].path, r"C:\x\A");
+        assert_eq!(units[0].path, p(r"C:\x\A"));
         assert_eq!(units[0].category, CategoryId::EmptyFolders);
         assert_eq!(units[0].unit, CandidateUnit::Folder);
         assert_eq!(units[0].size.0, 0);
@@ -349,9 +354,9 @@ mod tests {
             .filter(|u| u.category == CategoryId::SparseFolders)
             .collect();
         assert_eq!(empty.len(), 1);
-        assert_eq!(empty[0].path, r"C:\x\A");
+        assert_eq!(empty[0].path, p(r"C:\x\A"));
         assert_eq!(sparse.len(), 1);
-        assert_eq!(sparse[0].path, r"C:\x");
+        assert_eq!(sparse[0].path, p(r"C:\x"));
     }
 
     #[test]
@@ -360,7 +365,7 @@ mod tests {
         let dir_paths = dirs(&[r"C:\Empty", r"C:\Empty\sub"]);
         let units = detect_folder_units(&dir_paths, &[], cfg(3));
         assert_eq!(units.len(), 1);
-        assert_eq!(units[0].path, r"C:\Empty");
+        assert_eq!(units[0].path, p(r"C:\Empty"));
         assert_eq!(units[0].category, CategoryId::EmptyFolders);
     }
 
@@ -381,7 +386,7 @@ mod tests {
         let file_list = files(&[(r"C:\p\a.txt", 1), (r"C:\p\b.txt", 2), (r"C:\p\q\c.txt", 4)]);
         let units = detect_folder_units(&dir_paths, &file_list, cfg(3));
         assert_eq!(units.len(), 1, "лише topmost sparse");
-        assert_eq!(units[0].path, r"C:\p");
+        assert_eq!(units[0].path, p(r"C:\p"));
         assert_eq!(units[0].category, CategoryId::SparseFolders);
         assert_eq!(units[0].size.0, 7);
     }
@@ -397,7 +402,7 @@ mod tests {
         pairs.push((r"C:\big\thin\y.txt".to_string(), 6));
         let units = detect_folder_units(&dir_paths, &pairs, cfg(3));
         assert_eq!(units.len(), 1);
-        assert_eq!(units[0].path, r"C:\big\thin");
+        assert_eq!(units[0].path, p(r"C:\big\thin"));
         assert_eq!(units[0].category, CategoryId::SparseFolders);
         assert_eq!(units[0].size.0, 11);
     }
@@ -437,7 +442,7 @@ mod tests {
             .filter(|u| u.category == CategoryId::EmptyFolders)
             .collect();
         assert_eq!(empty.len(), 1);
-        assert_eq!(empty[0].path, r"C:\Root\JunkOnly");
+        assert_eq!(empty[0].path, p(r"C:\Root\JunkOnly"));
     }
 
     #[test]
@@ -461,7 +466,7 @@ mod tests {
             .filter(|u| u.category == CategoryId::DeepPaths)
             .collect();
         assert_eq!(deep.len(), 1, "лише topmost занадто-глибока");
-        assert_eq!(deep[0].path, r"C:\a\b\c\d");
+        assert_eq!(deep[0].path, p(r"C:\a\b\c\d"));
         assert_eq!(deep[0].unit, CandidateUnit::Folder);
     }
 
@@ -484,7 +489,7 @@ mod tests {
             .filter(|u| u.category == CategoryId::SparseFolders)
             .collect();
         assert_eq!(sparse.len(), 1);
-        assert_eq!(sparse[0].path, r"C:\a");
+        assert_eq!(sparse[0].path, p(r"C:\a"));
     }
 
     #[test]

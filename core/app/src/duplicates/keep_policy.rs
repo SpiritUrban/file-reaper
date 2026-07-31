@@ -69,11 +69,14 @@ mod tests {
     };
     use trashradar_domain::category::CategoryId;
     use trashradar_domain::duplicates::{ContentHash, DuplicateRole};
+    /// Фікстури записані Windows-шляхами; у шлях поточної платформи їх
+    /// переводить один хелпер (правило 6a).
+    use trashradar_domain::path_key::fixture as p;
 
-    fn rec(id: u64, path: &str, mtime: Option<i64>) -> FileRecord {
+    fn rec(id: u64, path: impl AsRef<str>, mtime: Option<i64>) -> FileRecord {
         FileRecord {
             candidate_id: CandidateId(id),
-            path: path.into(),
+            path: path.as_ref().into(),
             size: ByteSize(100),
             created_at: None,
             modified_at: mtime.map(FsTimestamp),
@@ -100,8 +103,8 @@ mod tests {
     #[test]
     fn prefer_outside_downloads() {
         let records = [
-            rec(1, r"C:\Users\Ada\Downloads\copy.mp4", Some(10)),
-            rec(2, r"C:\Media\archive\copy.mp4", Some(20)), // newer but outside
+            rec(1, p(r"C:\Users\Ada\Downloads\copy.mp4"), Some(10)),
+            rec(2, p(r"C:\Media\archive\copy.mp4"), Some(20)), // newer but outside
         ];
         let g = group(&[1, 2]);
         let marked = mark_confirmed_groups(&[g], &records, KeepPolicy::PreferOutsideDownloads);
@@ -120,9 +123,9 @@ mod tests {
     #[test]
     fn prefer_oldest_modified() {
         let records = [
-            rec(1, r"C:\a\x.bin", Some(100)),
-            rec(2, r"C:\b\x.bin", Some(50)), // older
-            rec(3, r"C:\c\x.bin", Some(200)),
+            rec(1, p(r"C:\a\x.bin"), Some(100)),
+            rec(2, p(r"C:\b\x.bin"), Some(50)), // older
+            rec(3, p(r"C:\c\x.bin"), Some(200)),
         ];
         let marked = mark_confirmed_groups(
             &[group(&[1, 2, 3])],
@@ -137,8 +140,8 @@ mod tests {
     #[test]
     fn prefer_shortest_path() {
         let records = [
-            rec(1, r"C:\very\long\path\to\file.dat", Some(1)),
-            rec(2, r"C:\file.dat", Some(1)),
+            rec(1, p(r"C:\very\long\path\to\file.dat"), Some(1)),
+            rec(2, p(r"C:\file.dat"), Some(1)),
         ];
         let marked =
             mark_confirmed_groups(&[group(&[1, 2])], &records, KeepPolicy::PreferShortestPath);
@@ -147,7 +150,7 @@ mod tests {
 
     #[test]
     fn always_exactly_one_keep() {
-        let records = [rec(1, r"C:\a", Some(1)), rec(2, r"C:\b", Some(1))];
+        let records = [rec(1, p(r"C:\a"), Some(1)), rec(2, p(r"C:\b"), Some(1))];
         for policy in [
             KeepPolicy::PreferOldestModified,
             KeepPolicy::PreferNewestModified,

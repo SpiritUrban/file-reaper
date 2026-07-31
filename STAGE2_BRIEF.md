@@ -443,7 +443,7 @@
 
 | # | Що | Де | Симптом, якщо пропустити |
 |---|---|---|---|
-| 1 | Активний платіжний метод, ненульовий spending limit | Settings → Billing and plans | Джоба падає за 3 с з порожнім списком кроків: «The job was not started because recent account payments have failed». Звичайний CI при цьому може працювати — блокуються джоби з `environment` |
+| 1 | Репозиторій **публічний** — і цього достатньо | Settings → General → Visibility | Джоби стартують. Симптом проблеми: падіння за 3 с із **порожнім списком кроків** (0 steps) |
 | 2 | Pages: Source = **GitHub Actions** | Settings → Pages | Сайт 404, `/repos/.../pages` теж 404 |
 | 3 | Оточення `github-pages`: дозволити гілку `main` **і тег** `v*.*.*` — див. попередження нижче про тип рефа | Settings → Environments → github-pages → Deployment branches and tags | `Tag "v0.1.0" is not allowed to deploy to github-pages due to environment protection rules` |
 | 4 | Секрети `TAURI_SIGNING_PRIVATE_KEY` і `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Settings → Secrets and variables → Actions | Збірка падає: `public key found, but no private key` |

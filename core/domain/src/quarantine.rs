@@ -21,12 +21,36 @@ pub fn is_under_service_directory(path: &str) -> bool {
     let Some(normalized) = normalize_windows_path(path) else {
         return false;
     };
-    if drive_letter(&normalized).is_none() {
+    let Some(root) = volume_root_prefix(&normalized) else {
         return false;
-    }
-    // normalized гарантовано починається з `x:\` — службовий корінь тому.
-    let service_root = format!("{}{}", &normalized[..3], SERVICE_DIRECTORY_NAME);
+    };
+    let service_root = format!("{root}{SERVICE_DIRECTORY_NAME}");
     path_is_under(&normalized, &service_root)
+}
+
+/// Префікс кореня тому в уже нормалізованому шляху: `x:\` на Windows, `/` на
+/// Unix. `None` — шлях не абсолютний, і службового каталогу в ньому бути не
+/// може.
+///
+/// Правило 6a: без цієї розвилки перевірка вимагала літери диска й на Unix
+/// поверталася `false` **завжди** — тобто вміст карантину потрапляв би назад
+/// у кандидати, і застосунок «знаходив сам себе». Помилки при цьому нема
+/// жодної, лише тихо неправильна поведінка.
+/// Реалізація розділена справжніми `cfg`-блоками, а не `if cfg!(windows)`:
+/// `cfg!` — це рантайм-булеан, тому **обидві гілки все одно компілюються**, і
+/// виклик Windows-only `drive_letter` завалив би збірку на Linux
+/// (`cannot find function in this scope`).
+#[cfg(windows)]
+fn volume_root_prefix(normalized: &str) -> Option<&str> {
+    // normalized має форму `x:\...`, коли літера диска є.
+    drive_letter(normalized).map(|_| &normalized[..3])
+}
+
+#[cfg(not(windows))]
+fn volume_root_prefix(normalized: &str) -> Option<&str> {
+    normalized
+        .starts_with(crate::path_key::SEPARATOR)
+        .then(|| &normalized[..1])
 }
 
 /// Ідентифікатор запису журналу Quarantine.
@@ -249,7 +273,10 @@ impl QuarantineGuard {
 
     pub fn classify(&self, candidate_path: &str) -> Option<ProtectedPathKind> {
         let normalized = normalize_windows_path(candidate_path)?;
-        if drive_letter(&normalized).is_none() {
+        // Правило 6a: «немає кореня тому» — це мережевий/відносний шлях, а не
+        // «не Windows». Через `drive_letter` тут на Unix кожен шлях ставав
+        // UnsupportedLocation, і reap не працював би взагалі ніде.
+        if volume_root_prefix(&normalized).is_none() {
             return Some(ProtectedPathKind::UnsupportedLocation);
         }
         self.protected_roots
@@ -294,6 +321,10 @@ fn normalize_windows_path(path: &str) -> Option<String> {
     (!normalized.is_empty()).then_some(normalized)
 }
 
+/// Літера диска — поняття, якого поза Windows не існує; без `cfg` функція
+/// стала б мертвим кодом на Linux, а `-D warnings` у CI зробив би це помилкою
+/// збірки (правило 6).
+#[cfg(windows)]
 fn drive_letter(path: &str) -> Option<char> {
     let bytes = path.as_bytes();
     (bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'\\')

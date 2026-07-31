@@ -474,6 +474,10 @@ mod tests {
     use super::*;
     use crate::ports::HotIndex;
     use std::sync::Mutex;
+    /// Фікстури записані Windows-шляхами (USN існує лише на NTFS), але в шлях
+    /// поточної платформи їх переводить один хелпер: інакше кожен літерал
+    /// перевіряв би роздільник, а не логіку планування мутацій (правило 6a).
+    use trashradar_domain::path_key::fixture as p;
     use trashradar_domain::scan::UsnChange;
 
     struct MemIndex {
@@ -605,11 +609,11 @@ mod tests {
         let index = MemIndex::new();
         let mut cache = FrnPathCache::new();
         cache.seed_volume_root('C');
-        cache.insert(10, "C:\\data");
+        cache.insert(10, p("C:\\data"));
 
         let mut sizes: HashMap<String, u64> = HashMap::new();
-        sizes.insert("C:\\data\\a.bin".into(), 100);
-        sizes.insert("C:\\data\\a.bin".into(), 200); // modify size
+        sizes.insert(p("C:\\data\\a.bin"), 100);
+        sizes.insert(p("C:\\data\\a.bin"), 200); // modify size
 
         let mut next_id = 1u64;
         let changes = [
@@ -621,19 +625,19 @@ mod tests {
         // create
         let mut probe = probe_map({
             let mut m = HashMap::new();
-            m.insert("C:\\data\\a.bin".into(), 100);
+            m.insert(p("C:\\data\\a.bin"), 100);
             m
         });
         let (m1, s1) = plan_usn_mutations(&changes[0..1], &mut cache, &mut probe, &mut next_id);
         apply_mutations_to_hot_index(&index, &m1).unwrap();
         assert_eq!(s1.created, 1);
-        assert_eq!(index.paths(), vec!["C:\\data\\a.bin"]);
+        assert_eq!(index.paths(), vec![p("C:\\data\\a.bin")]);
         assert_eq!(index.get_all().unwrap()[0].size.0, 100);
 
         // modify
         let mut probe = probe_map({
             let mut m = HashMap::new();
-            m.insert("C:\\data\\a.bin".into(), 200);
+            m.insert(p("C:\\data\\a.bin"), 200);
             m
         });
         let (m2, s2) = plan_usn_mutations(&changes[1..2], &mut cache, &mut probe, &mut next_id);
@@ -654,14 +658,14 @@ mod tests {
         let index = MemIndex::new();
         let mut cache = FrnPathCache::new();
         cache.seed_volume_root('C');
-        cache.insert(10, "C:\\data");
-        cache.insert(20, "C:\\data\\old.txt");
+        cache.insert(10, p("C:\\data"));
+        cache.insert(20, p("C:\\data\\old.txt"));
 
         // seed existing
         index
             .insert_batch(vec![FileRecord {
                 candidate_id: CandidateId(1),
-                path: "C:\\data\\old.txt".into(),
+                path: p("C:\\data\\old.txt"),
                 size: ByteSize(50),
                 created_at: None,
                 modified_at: None,
@@ -684,7 +688,7 @@ mod tests {
         let mut next_id = 2u64;
         let mut probe = probe_map({
             let mut m = HashMap::new();
-            m.insert("C:\\data\\new.txt".into(), 50);
+            m.insert(p("C:\\data\\new.txt"), 50);
             m
         });
         let (mutations, stats) = plan_usn_mutations(&changes, &mut cache, &mut probe, &mut next_id);
@@ -695,10 +699,10 @@ mod tests {
         assert_eq!(paths.len(), 1);
         assert!(paths
             .iter()
-            .any(|p| p.eq_ignore_ascii_case("C:\\data\\new.txt")));
+            .any(|path| path.eq_ignore_ascii_case(&p("C:\\data\\new.txt"))));
         assert!(!paths
             .iter()
-            .any(|p| p.eq_ignore_ascii_case("C:\\data\\old.txt")));
+            .any(|path| path.eq_ignore_ascii_case(&p("C:\\data\\old.txt"))));
     }
 
     /// DoD T-088: reap-move у `<том>\.trashradar` прибирає файл з кандидатів
@@ -708,14 +712,14 @@ mod tests {
         let index = MemIndex::new();
         let mut cache = FrnPathCache::new();
         cache.seed_volume_root('C');
-        cache.insert(10, "C:\\data");
-        cache.insert(11, "C:\\.trashradar\\quarantine");
-        cache.insert(20, "C:\\data\\old.mp4");
+        cache.insert(10, p("C:\\data"));
+        cache.insert(11, p("C:\\.trashradar\\quarantine"));
+        cache.insert(20, p("C:\\data\\old.mp4"));
 
         index
             .insert_batch(vec![FileRecord {
                 candidate_id: CandidateId(1),
-                path: "C:\\data\\old.mp4".into(),
+                path: p("C:\\data\\old.mp4"),
                 size: ByteSize(4096),
                 created_at: None,
                 modified_at: None,
@@ -767,7 +771,7 @@ mod tests {
     fn create_and_modify_inside_quarantine_are_ignored() {
         let mut cache = FrnPathCache::new();
         cache.seed_volume_root('C');
-        cache.insert(11, "C:\\.trashradar\\quarantine");
+        cache.insert(11, p("C:\\.trashradar\\quarantine"));
 
         let changes = vec![
             change(1, 30, 11, usn_reason::FILE_CREATE, "00000002.bin", false),

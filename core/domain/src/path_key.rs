@@ -72,9 +72,50 @@ pub fn join_child(parent: &str, name: &str) -> String {
     format!("{}{}{}", trim_trailing_separators(parent), SEPARATOR, name)
 }
 
+/// Перетворює Windows-літерал у шлях поточної платформи — **для фікстур
+/// тестів**.
+///
+/// `fixture(r"C:\data\a.bin")` дає `C:\data\a.bin` на Windows і `/data/a.bin`
+/// на Unix. Потрібне тому, що тестів із Windows-шляхами в кодовій базі
+/// вісімдесят із гаком, і кожен такий літерал перевіряє **роздільник**, а не
+/// логіку: на Linux `C:\data\a.bin` — це одне ім'я файла з бекслешами, і
+/// будь-яке порівняння з ним зелене або червоне випадково (правило 6a).
+///
+/// Це не робоча функція: продакшн-код шляхів не «конвертує», він їх отримує
+/// від ОС уже правильними.
+pub fn fixture(windows_path: &str) -> String {
+    if cfg!(windows) {
+        return windows_path.to_string();
+    }
+    let without_drive = match windows_path.as_bytes() {
+        [drive, b':', ..] if drive.is_ascii_alphabetic() => &windows_path[2..],
+        _ => windows_path,
+    };
+    let unix = without_drive.replace('\\', "/");
+    if unix.starts_with('/') {
+        unix
+    } else {
+        format!("/{unix}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fixture_yields_a_native_absolute_path() {
+        let got = fixture(r"C:\data\a.bin");
+        if cfg!(windows) {
+            assert_eq!(got, r"C:\data\a.bin");
+        } else {
+            assert_eq!(got, "/data/a.bin");
+        }
+        // Головна властивість, заради якої хелпер існує: результат завжди
+        // складається з рідних роздільників і нічого чужого не містить.
+        assert!(!got.contains(if cfg!(windows) { '/' } else { '\\' }));
+        assert!(got.starts_with(if cfg!(windows) { "C:" } else { "/" }));
+    }
 
     /// Очікуване будується з [`SEPARATOR`], а не хардкодиться рядком: тест з
     /// `assert_eq!(got, "c:\\a\\b")` перевіряв би роздільник, а не логіку, і

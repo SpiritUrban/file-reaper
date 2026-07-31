@@ -40,10 +40,10 @@ git tag v0.2.0 && git push origin v0.2.0
 
 | # | Що | Де | Сигнал, що вийшло |
 |---|---|---|---|
-| 1 | Активний платіжний метод, ненульовий spending limit | Settings → Billing and plans | джоби з `environment` стартують; інакше падіння за 3 с із порожнім списком кроків |
+| 1 | Активний платіжний метод, ненульовий spending limit | Settings → Billing and plans | джоби стартують; інакше падіння за **3 с із порожнім списком кроків** (0 steps) |
 | 2 | Pages: Source = **GitHub Actions** | Settings → Pages | сторінка віддає сайт, а не 404 |
 | 3 | Секрет `TAURI_SIGNING_PRIVATE_KEY` = **весь вміст `.tauri-key`** | Settings → Secrets → Actions, **Repository secrets** | крок «Normalize and verify signing secret» друкує «Ключ підпису прийнято» |
-| 4 | Секрет `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` = **порожній рядок** | там само | той самий крок зелений |
+| 4 | Секрет `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` — **не створювати** | — | ключ згенеровано без пароля; відсутній секрет приходить порожнім рядком, а це саме те, що треба |
 | 5 | Права воркфлоу на запис | Settings → Actions → General | реліз створюється |
 | 6 | **Після першого деплою Pages:** оточення `github-pages` дозволяє гілку `main` **і тег** `v*.*.*` | Settings → Environments → github-pages | заголовок читається **«1 branch and 1 tag allowed»** |
 
@@ -57,6 +57,33 @@ git tag v0.2.0 && git push origin v0.2.0
 > **Порядок обов'язковий:** оточення `github-pages` **не існує**, поки Pages не
 > задеплоїлись хоча б раз. Тобто: 1 → 2 → 3 → 4 → 5 → пуш у `main` → перший
 > деплой Pages → 6 → тег.
+
+> ### Червоний ран «pages build and deployment» — це не наш воркфлоу
+>
+> Якщо в Actions висить ран з назвою **`pages build and deployment`**
+> (`on: dynamic`, джоби `build / report-build-status / deploy`, у логах Jekyll і
+> `jekyll-theme-primer`) — це **вбудований збирач GitHub**, а не `pages.yml`.
+> Він запускається лише поки Pages Source = «Deploy from a branch»: GitHub
+> намагається зібрати корінь репозиторію як Jekyll-сайт, і для проєкту, який
+> Jekyll-сайтом не є, це падіння закономірне.
+>
+> Лікується кроком 2 цієї таблиці: Source = **GitHub Actions**. Після цього
+> легасі-воркфлоу зникає сам, і деплоїть лише наш `pages.yml` (у нього одна
+> джоба `deploy` і жодного Jekyll).
+
+### Як читати падіння
+
+Спершу дивіться на **список кроків**, а не на текст помилки:
+
+- **0 кроків, ~3 с** → джоба не стартувала: білінг (крок 1 вище). Текст причини
+  видно в анотаціях, без токена:
+  `curl -s https://api.github.com/repos/SpiritUrban/file-reaper/check-runs/<JOB_ID>/annotations`
+- червоні `Set up job` / `Post Run …` / `Complete job` → впав раннер, не збірка;
+- 1–3 с — конфігурація; 20–40 с — встановлення пакетів; хвилини — справді код.
+
+Логи ранів закриті без авторизації навіть у публічному репозиторії
+(«Sign in to view logs»), **анотації — ні**. Тому кожен крок, що може впасти,
+проводить вивід через `scripts/ci-annotate.sh`.
 
 ### Ключі підпису оновлень
 

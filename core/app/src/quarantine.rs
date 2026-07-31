@@ -644,8 +644,19 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use trashradar_domain::{
         candidate::{ByteSize, FsTimestamp},
+        path_key::fixture as p,
         quarantine::{BatchId, DestructiveAuditRecord, QuarantineEntryId},
     };
+
+    /// Шлях сурогата в карантині у формі поточної платформи.
+    ///
+    /// Раніше кожен із дев'яти виклик­ів будував `C:\.trashradar\quarantine\…`
+    /// власним `format!`. На Linux такий рядок — одне ім'я файла з бекслешами,
+    /// і `validate_quarantine_destination` його не впізнавала: тести падали не
+    /// на логіці, а на роздільнику (правило 6a).
+    fn qpath(surrogate: &str) -> String {
+        p(&format!(r"C:\.trashradar\quarantine\{surrogate}"))
+    }
 
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum CrashPhase {
@@ -806,7 +817,7 @@ mod tests {
     }
 
     fn request(id: u64) -> ReapRequest {
-        let original = format!(r"C:\Users\Ada\Videos\clip-{id}.mp4");
+        let original = p(&format!(r"C:\Users\Ada\Videos\clip-{id}.mp4"));
         let surrogate = format!("{id:08}.bin");
         ReapRequest {
             entry: QuarantineEntry {
@@ -819,7 +830,7 @@ mod tests {
                 expires_at_unix: 1_752_592_000,
                 status: QuarantineStatus::InFlight,
             },
-            destination_path: format!(r"C:\.trashradar\quarantine\{surrogate}"),
+            destination_path: qpath(&surrogate),
             expected_identity: FileIdentity {
                 size: ByteSize(100 + id),
                 modified_at: Some(FsTimestamp(id as i64)),
@@ -876,7 +887,7 @@ mod tests {
             entry
         };
         let original = quarantined.original_path.clone();
-        let surrogate_path = format!(r"C:\.trashradar\quarantine\{}", quarantined.surrogate_name);
+        let surrogate_path = qpath(&quarantined.surrogate_name);
         let crash = Arc::new(CrashControl {
             phase: CrashPhase::AfterMove,
             crash_call: usize::MAX,
@@ -975,9 +986,7 @@ mod tests {
             entry.batch_id = Some(BatchId(77));
             entry.status = QuarantineStatus::Quarantined;
         }
-        let paths = |entry: &QuarantineEntry| {
-            format!(r"C:\.trashradar\quarantine\{}", entry.surrogate_name)
-        };
+        let paths = |entry: &QuarantineEntry| qpath(&entry.surrogate_name);
         let crash = Arc::new(CrashControl {
             phase: CrashPhase::AfterMove,
             crash_call: usize::MAX,
@@ -1014,9 +1023,7 @@ mod tests {
         let mut future = request(2).entry;
         future.status = QuarantineStatus::Quarantined;
         future.expires_at_unix = now + 60;
-        let path = |entry: &QuarantineEntry| {
-            format!(r"C:\.trashradar\quarantine\{}", entry.surrogate_name)
-        };
+        let path = |entry: &QuarantineEntry| qpath(&entry.surrogate_name);
         let crash = Arc::new(CrashControl {
             phase: CrashPhase::AfterMove,
             crash_call: usize::MAX,
@@ -1061,9 +1068,7 @@ mod tests {
         for entry in &mut entries {
             entry.status = QuarantineStatus::Quarantined;
         }
-        let path = |entry: &QuarantineEntry| {
-            format!(r"C:\.trashradar\quarantine\{}", entry.surrogate_name)
-        };
+        let path = |entry: &QuarantineEntry| qpath(&entry.surrogate_name);
         let crash = Arc::new(CrashControl {
             phase: CrashPhase::AfterMove,
             crash_call: usize::MAX,
@@ -1159,12 +1164,7 @@ mod tests {
             crash,
         };
         let result = QuarantineRecovery::new(&fs, &manifest)
-            .reconcile(|entry| {
-                Ok(format!(
-                    r"C:\.trashradar\quarantine\{}",
-                    entry.surrogate_name
-                ))
-            })
+            .reconcile(|entry| Ok(qpath(&entry.surrogate_name)))
             .unwrap();
         assert_eq!(result.rolled_back, vec![QuarantineEntryId(1)]);
         assert_eq!(result.completed, vec![QuarantineEntryId(2)]);
@@ -1204,10 +1204,7 @@ mod tests {
         });
         // Лише файл `intact` присутній у карантині.
         let fs = FakeFs {
-            files: Arc::new(Mutex::new(HashSet::from([format!(
-                r"C:\.trashradar\quarantine\{}",
-                intact.surrogate_name
-            )]))),
+            files: Arc::new(Mutex::new(HashSet::from([qpath(&intact.surrogate_name)]))),
             crash: Arc::clone(&crash),
         };
         let manifest = FakeManifest {
@@ -1217,12 +1214,7 @@ mod tests {
             crash,
         };
         let result = QuarantineRecovery::new(&fs, &manifest)
-            .reconcile(|entry| {
-                Ok(format!(
-                    r"C:\.trashradar\quarantine\{}",
-                    entry.surrogate_name
-                ))
-            })
+            .reconcile(|entry| Ok(qpath(&entry.surrogate_name)))
             .unwrap();
 
         assert_eq!(result.purge_completed, vec![QuarantineEntryId(1)]);
@@ -1263,12 +1255,7 @@ mod tests {
                 crash,
             };
             let error = QuarantineRecovery::new(&fs, &manifest)
-                .reconcile(|entry| {
-                    Ok(format!(
-                        r"C:\.trashradar\quarantine\{}",
-                        entry.surrogate_name
-                    ))
-                })
+                .reconcile(|entry| Ok(qpath(&entry.surrogate_name)))
                 .unwrap_err();
             assert_eq!(error.code, ErrorCode::Internal);
             assert_eq!(
