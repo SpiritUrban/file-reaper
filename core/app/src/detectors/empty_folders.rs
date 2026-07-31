@@ -232,9 +232,18 @@ pub fn detect_folder_units(
     units
 }
 
-/// Глибина шляху для порядку rollup = кількість `\`.
+/// Глибина шляху для порядку rollup = кількість роздільників.
+///
+/// Правило 6a: тут був хардкод `b'\\'`, і поза Windows глибина ставала **0
+/// для всіх** папок. Наслідки тихі й обидва неправильні: сортування кроку 4
+/// вироджувалось, тож батьки не збирали лічильники дітей (гілка з файлом
+/// у листі виглядала порожньою аж до передостаннього рівня), а умова
+/// `depth > deep_max` не спрацьовувала ніколи — розділ «Задовгі шляхи»
+/// просто не знаходив нічого. Компіляція про це не казала нічого.
 fn depth(norm: &str) -> usize {
-    norm.bytes().filter(|&b| b == b'\\').count()
+    norm.chars()
+        .filter(|&c| c == trashradar_domain::path_key::SEPARATOR)
+        .count()
 }
 
 fn empty_explanation() -> String {
@@ -328,8 +337,9 @@ mod tests {
         // C:\x\A\B\C — всі порожні; x має достатньо файлів, щоб не бути sparse
         // (5 > поріг 3) → лишається лише одна порожня одиниця = topmost A.
         let dir_paths = dirs(&[r"C:\x", r"C:\x\A", r"C:\x\A\B", r"C:\x\A\B\C"]);
-        let file_list: Vec<(String, u64)> =
-            (0..5).map(|i| (format!(r"C:\x\keep{i}.txt"), 10)).collect();
+        let file_list: Vec<(String, u64)> = (0..5)
+            .map(|i| (p(&format!(r"C:\x\keep{i}.txt")), 10))
+            .collect();
         let units = detect_folder_units(&dir_paths, &file_list, cfg(3));
         assert_eq!(units.len(), 1, "лише найвища порожня папка");
         assert_eq!(units[0].path, p(r"C:\x\A"));
@@ -396,10 +406,10 @@ mod tests {
         // C:\big має 10 файлів (не sparse), але підпапка thin — 2 файли (sparse).
         let dir_paths = dirs(&[r"C:\big", r"C:\big\thin"]);
         let mut pairs: Vec<(String, u64)> = (0..10)
-            .map(|i| (format!(r"C:\big\f{i}.dat"), 100))
+            .map(|i| (p(&format!(r"C:\big\f{i}.dat")), 100))
             .collect();
-        pairs.push((r"C:\big\thin\x.txt".to_string(), 5));
-        pairs.push((r"C:\big\thin\y.txt".to_string(), 6));
+        pairs.push((p(r"C:\big\thin\x.txt"), 5));
+        pairs.push((p(r"C:\big\thin\y.txt"), 6));
         let units = detect_folder_units(&dir_paths, &pairs, cfg(3));
         assert_eq!(units.len(), 1);
         assert_eq!(units[0].path, p(r"C:\big\thin"));
@@ -411,20 +421,42 @@ mod tests {
     fn threshold_boundary_excludes_over_limit() {
         // Рівно N+1 файлів → не sparse.
         let dir_paths = dirs(&[r"C:\d"]);
-        let pairs: Vec<(String, u64)> = (0..4).map(|i| (format!(r"C:\d\f{i}"), 1)).collect();
+        let pairs: Vec<(String, u64)> = (0..4).map(|i| (p(&format!(r"C:\d\f{i}")), 1)).collect();
         let units = detect_folder_units(&dir_paths, &pairs, cfg(3));
         assert!(units.is_empty(), "4 файли при порозі 3 — не майже порожня");
     }
 
+    /// Ізолюючий тест на баг, що завалив Linux-джобу: `depth` рахував лише
+    /// `\`, тож поза Windows глибина була 0 для всіх папок — rollup лічильників
+    /// вироджувався, а «Задовгі шляхи» не знаходились ніколи. Перевіряє саме
+    /// підрахунок, а не наслідок, і осмислений на будь-якій платформі.
     #[test]
-    fn case_insensitive_path_matching() {
-        // Файл під директорією іншого регістру все одно рахується.
+    fn depth_counts_native_separators() {
+        assert_eq!(depth(&normalize(&p(r"C:\a"))), 1);
+        assert_eq!(depth(&normalize(&p(r"C:\a\b\c\d"))), 4);
+        assert!(
+            depth(&normalize(&p(r"C:\a\b\c\d"))) > depth(&normalize(&p(r"C:\a\b"))),
+            "глибша тека мусить мати більшу глибину — інакше сортування rollup вироджується"
+        );
+    }
+
+    #[test]
+    fn path_matching_follows_the_filesystem_case_rules() {
+        // Той самий вхід дає РІЗНИЙ правильний результат на різних ФС, і це
+        // не дефект (правило 6a): Windows/macOS регістр не розрізняють, тож
+        // файл належить теці; Linux розрізняє, тож `/proj/bin` і `/Proj/Bin`
+        // — дві різні теки, і зливати їх було б помилкою.
         let dir_paths = dirs(&[r"C:\Proj\Bin"]);
         let file_list = files(&[(r"c:\proj\bin\a.o", 3)]);
         let units = detect_folder_units(&dir_paths, &file_list, cfg(3));
         assert_eq!(units.len(), 1);
-        assert_eq!(units[0].category, CategoryId::SparseFolders);
-        assert_eq!(units[0].size.0, 3);
+        if trashradar_domain::path_key::CASE_INSENSITIVE {
+            assert_eq!(units[0].category, CategoryId::SparseFolders);
+            assert_eq!(units[0].size.0, 3);
+        } else {
+            assert_eq!(units[0].category, CategoryId::EmptyFolders);
+            assert_eq!(units[0].size.0, 0);
+        }
     }
 
     #[test]
@@ -458,7 +490,7 @@ mod tests {
         ]);
         // Файли в найглибших папках, щоб вони не були empty/sparse.
         let file_list: Vec<(String, u64)> = (0..10)
-            .map(|i| (format!(r"C:\a\b\c\d\e\f{i}.dat"), 100))
+            .map(|i| (p(&format!(r"C:\a\b\c\d\e\f{i}.dat")), 100))
             .collect();
         let units = detect_folder_units(&dir_paths, &file_list, cfg_deep(3, 3));
         let deep: Vec<_> = units
