@@ -97,21 +97,38 @@ jobs:
       # попередню збірку. Раніше цей збій був НЕВИДИМИЙ: ран зелений, і ловила
       # його лише випадкова ручна перевірка. Тепер ран падає з повідомленням,
       # що реліз справний, а відстає саме сайт.
+      # Порівнюється ПІДПИС збірки (version + source + tag + кількість
+      # ассетів), а не сама лише version.
+      #
+      # Перша редакція цього кроку дивилась тільки на `version` — і мовчки
+      # пропустила рівно той випадок, заради якого існує: деплой з тега
+      # відзвітував success, живий сайт віддавав старий fallback-маніфест, а
+      # версія в обох була `0.1.0`, бо fallback бере її з package.json.
+      # Перевірка, яка не здатна почервоніти на своєму випадку, — декорація
+      # (правило 33).
       - name: Verify the live site serves this build
         env:
           PAGE_URL: ${{ steps.deployment.outputs.page_url }}
         run: |
-          expected=$(node -p "require('./site/download-manifest.json').version")
+          signature() {
+            node -e "
+              let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{
+                try { const j=JSON.parse(s);
+                  console.log([j.version, j.source, j.tag, (j.assets||[]).length].join('/'));
+                } catch { console.log(''); }
+              })"
+          }
+          expected=$(signature < ./site/download-manifest.json)
+          echo "Очікуваний підпис: ${expected}"
           live=""
           for attempt in $(seq 1 12); do
-            live=$(curl -sS -L "${PAGE_URL}download-manifest.json?check=${GITHUB_RUN_ID}-${attempt}" \
-              | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{console.log(JSON.parse(s).version)}catch{console.log('')}})")
+            live=$(curl -sS -L "${PAGE_URL}download-manifest.json?check=${GITHUB_RUN_ID}-${attempt}" | signature)
             if [ "$live" = "$expected" ]; then
               echo "Живий сайт віддає ${live} (спроба ${attempt})."
               exit 0
             fi
-            echo "Спроба ${attempt}: живий сайт віддає '${live}', очікується ${expected}. Чекаю 15 с."
+            echo "Спроба ${attempt}: живий сайт віддає '${live}', очікується '${expected}'. Чекаю 15 с."
             sleep 15
           done
-          echo "::error title=Site did not go live::${PAGE_URL} віддає '${live}' замість ${expected} після 3 хв. Реліз і автооновлення справні (вони живуть у GitHub Releases) — відстає саме вітрина. Обхід: Actions → Deploy GitHub Pages → Run workflow."
+          echo "::error title=Site did not go live::${PAGE_URL} віддає '${live}' замість '${expected}' після 3 хв (підпис = version/source/tag/assets). Реліз і автооновлення справні — вони живуть у GitHub Releases, відстає саме вітрина. Обхід: Actions → Deploy GitHub Pages → Run workflow."
           exit 1
